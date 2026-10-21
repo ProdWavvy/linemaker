@@ -171,6 +171,19 @@ def tune(records: list, current: dict) -> tuple:
     return new, changes
 
 
+def tune_live(records: list, current: dict) -> tuple:
+    """(live weight, [changes]): the in-game blend, fit on graded live reads only."""
+    graded = _graded(records)
+    old = current.get("live_weight", _env("LINEMAKER_LIVE_MODEL_WEIGHT", 0.35))
+    min_total = int(_env("LINEMAKER_AUTOTUNE_MIN", 200))
+    n = _outcomes(graded)
+    if n < min_total:
+        return old, []
+    (best, _ll, _br), _ = best_weight(_rows(graded))
+    new = _step(old, best, graded, _env("LINEMAKER_AUTOTUNE_STEP", 0.10))
+    return new, ([f"Live weight {old:.2f} → {new:.2f} ({n} live outcomes)"] if new != old else [])
+
+
 def run_autotune(tracking_dir: str, today: str) -> list:
     """Re-fit and save. Returns lines describing what changed (or why nothing did)."""
     if not autotune_on():
@@ -179,6 +192,13 @@ def run_autotune(tracking_dir: str, today: str) -> list:
     records = load_records(tracking_dir, days, today)
     current = load_weights()
     new, changes = tune(records, current)
+    live_w, live_changes = tune_live(load_records(os.path.join(tracking_dir, "live"), days, today),
+                                     current)
+    new["live_weight"] = live_w
+    if live_changes:
+        changes = changes + live_changes
+        new["history"] = (new.get("history", []) + [{"date": dt.date.today().isoformat(),
+                                                    "changes": live_changes}])[-30:]
     new["updated"] = dt.datetime.now().isoformat(timespec="seconds")
     path = weights_path()
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
@@ -196,6 +216,8 @@ def current_summary() -> str:
         return "Using .env weights (nothing auto-tuned yet)."
     parts = [f"overall {w.get('model_weight', 0.5):.2f}", f"fresh news {w.get('fresh_weight', 0.8):.2f}"]
     parts += [f"{k} {v:.2f}" for k, v in sorted(w.get("markets", {}).items())]
+    if w.get("live_weight") is not None:
+        parts.append(f"live {w['live_weight']:.2f}")
     return "Auto-tuned weights: " + ", ".join(parts)
 
 

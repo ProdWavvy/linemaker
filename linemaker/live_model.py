@@ -47,7 +47,9 @@ PACE_PRIOR = 1.0         # observed pace counts as much as the pre-game total on
 
 
 def live_weight() -> float:
-    return float(os.environ.get("LINEMAKER_LIVE_MODEL_WEIGHT", "0.35"))
+    from .autotune import tuned
+    v = tuned("live_weight")
+    return v if v is not None else float(os.environ.get("LINEMAKER_LIVE_MODEL_WEIGHT", "0.35"))
 
 
 def max_odds_age() -> float:

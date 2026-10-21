@@ -69,14 +69,14 @@ def lock_near_start(rows: list, now: Optional[dt.datetime] = None):
 
 
 def run_auto(odds: OddsAPI, fp, sports: list, date: str, tz: ZoneInfo, cfg: ProConfig,
-             freezer=None, max_events: Optional[int] = None) -> LiveRun:
+             freezer=None, max_events: Optional[int] = None, only: Optional[set] = None) -> LiveRun:
     """FantasyPros consensus projections -> live FanDuel/DraftKings odds -> pro card."""
     from .fantasypros import fetch_projections
     projections = []
     for sport in sports:
         projections += fetch_projections(fp, sport, date)
     lr = run_live(odds, sports, projections, date, tz, cfg, freezer, props=True,
-                  max_events=max_events)
+                  max_events=max_events, only=only)
     # Thousands of projected players have no posted line; only report misses with a line.
     lr.result.passes = [(l, r) for l, r in lr.result.passes if r != "no odds found in the feed"]
     lr.result.source_warning = getattr(fp, "warning", None)
@@ -84,10 +84,11 @@ def run_auto(odds: OddsAPI, fp, sports: list, date: str, tz: ZoneInfo, cfg: ProC
 
 
 def run_auto_espn(odds: OddsAPI, sports: list, date: str, tz: ZoneInfo, cfg: ProConfig,
-                  freezer=None, max_events: Optional[int] = None) -> LiveRun:
+                  freezer=None, max_events: Optional[int] = None,
+                  only: Optional[set] = None) -> LiveRun:
     """Free projections from ESPN game logs, built only for players with a posted prop."""
     from .espn_projections import espn_projections
-    feed = fetch_feed(odds, sports, date, tz, True, max_events, game_lines=False)
+    feed = fetch_feed(odds, sports, date, tz, True, max_events, game_lines=False, only=only)
     projections = []
     for sport in sports:
         wanted = {}
@@ -111,16 +112,16 @@ def projection_source() -> str:
 
 
 def run_best(odds: OddsAPI, sports: list, date: str, tz: ZoneInfo, cfg: ProConfig,
-             freezer=None, max_events: Optional[int] = None) -> LiveRun:
+             freezer=None, max_events: Optional[int] = None, only: Optional[set] = None) -> LiveRun:
     """Projections from the configured source; in auto mode a FantasyPros sample-data warning
     switches to the ESPN model (the odds feed is reused, so no credits are spent twice)."""
     source = projection_source()
     from .fantasypros import SUPPORTED
     if source == "espn" or any(s.upper() not in SUPPORTED for s in sports):
         # FantasyPros has no WNBA, NHL or college projections.
-        return run_auto_espn(odds, sports, date, tz, cfg, freezer, max_events)
+        return run_auto_espn(odds, sports, date, tz, cfg, freezer, max_events, only)
     from .fantasypros import FantasyPros
-    lr = run_auto(odds, FantasyPros(), sports, date, tz, cfg, freezer, max_events)
+    lr = run_auto(odds, FantasyPros(), sports, date, tz, cfg, freezer, max_events, only)
     lr.result.projection_source = "FantasyPros consensus"
     if source == "auto" and lr.result.source_warning:
         import logging
@@ -128,7 +129,7 @@ def run_best(odds: OddsAPI, sports: list, date: str, tz: ZoneInfo, cfg: ProConfi
                                                     "using the ESPN game-log model")
         from .espn_projections import espn_projections
         feed = getattr(lr, "feed", None) or fetch_feed(odds, sports, date, tz, True, max_events,
-                                                       game_lines=False)
+                                                       game_lines=False, only=only)
         projections = []
         for sport in sports:
             wanted = {}
@@ -209,11 +210,12 @@ def run_live_games(odds: OddsAPI, sports: list, date: str, tz: ZoneInfo, cfg: Pr
 
 
 def fetch_feed(api: OddsAPI, sports: list, date: str, tz: ZoneInfo, props: bool = False,
-               max_events: Optional[int] = None, game_lines: bool = True) -> list:
+               max_events: Optional[int] = None, game_lines: bool = True,
+               only: Optional[set] = None) -> list:
     feed = []
     for sport in sports:
         feed += fetch_slate(api, sport, date, tz, props=props, max_events=max_events,
-                            game_lines=game_lines)
+                            game_lines=game_lines, only=only)
     return feed
 
 
@@ -225,14 +227,14 @@ def odds_template(api: OddsAPI, sports: list, date: str, tz: ZoneInfo, props: bo
 
 def run_live(api: OddsAPI, sports: list, projections: list, date: str, tz: ZoneInfo,
              cfg: ProConfig, freezer=None, props: Optional[bool] = None,
-             max_events: Optional[int] = None) -> LiveRun:
+             max_events: Optional[int] = None, only: Optional[set] = None) -> LiveRun:
     # Only spend credits on what the projections need.
     game_types = {"moneyline", "spread", "game total", "total goals", "match result"}
     markets = {p.get("market", "").strip().lower() for p in projections}
     if props is None:
         props = bool(markets - game_types)
     game_lines = bool(markets & game_types)
-    feed = fetch_feed(api, sports, date, tz, props, max_events, game_lines)
+    feed = fetch_feed(api, sports, date, tz, props, max_events, game_lines, only)
     return price_feed(api, feed, sports, projections, date, cfg, freezer)
 
 
@@ -301,6 +303,11 @@ def auto_results(api: OddsAPI, snapshot_path: str) -> list:
     sports = sorted({r["sport"] for r in records.values()
                      if r.get("sport") and r["inputs"].get("bet_type") != "prop"})
     rows = []
+    cache = getattr(api, "_scores_cache", None)
+    if cache is None:
+        cache = api._scores_cache = {}   # one /scores call per league per grading run
     for sport in sports:
-        rows += results_from_scores(api.scores(sport, 3), records)
+        if sport not in cache:
+            cache[sport] = api.scores(sport, 3)
+        rows += results_from_scores(cache[sport], records)
     return rows

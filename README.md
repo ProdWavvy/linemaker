@@ -135,6 +135,25 @@ not) and restarts it. `.env`, `tracking/`, `cache/` and `snapshots/` are git-ign
 updates never touch them. Logs: `sudo journalctl -u linemaker -f` and
 `sudo journalctl -u linemaker-update`.
 
+## Alerts, stakes, bet log and reports
+
+- **Pre-tip scans** (`LINEMAKER_PRETIP_MINUTES`, default 45): props for each game shortly before
+  tip, posted only when something clears the gates.
+- **Injury news** (`LINEMAKER_NEWS_MINUTES`, default 12): a newly ruled-Out rotation player
+  triggers a re-price of his game with the teammate usage bump (basketball).
+- **Projection adjustments** (basketball): teammate usage when someone is out, starter minutes
+  trimmed for blowout risk (spread > 7) and back-to-backs, and defense vs position (what the
+  opponent allows to guards / forwards / centers, from ESPN box scores, shrunk by sample size).
+- **Stakes**: quarter-Kelly suggestion on every pick and parlay (`LINEMAKER_BANKROLL` for dollars).
+- **Bet log**: "📝 I bet this" / "Log parlay" buttons record what you actually bet; grading
+  settles them; `/record` shows your profit and ROI.
+- **Closing-line value**: `/clv` and the `/calibrate` report show whether the market moved
+  toward the picks after they were made.
+- **Live grading**: in-game reads are graded from final scores, and the live weight is tuned
+  separately with the same guardrails.
+- **Weekly summary**: Mondays (`LINEMAKER_WEEKLY_TIME`), model record, CLV, your bets, weight
+  changes.
+
 ## Credit savers
 
 - One odds pull per league, date and bet kind per `LINEMAKER_PLAYS_CACHE_MINUTES` (default

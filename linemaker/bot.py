@@ -47,7 +47,7 @@ from .config import Config
 from .devig import hold, no_vig, overround
 from .discord_format import chunk_embeds, lite_embeds
 from .scan_format import (chart_page, movement_page, odds_page, scan_messages,
-                          stats_page)
+                          stats_page, SPORT_NAMES)
 from .freeze import Freezer, grade
 from .market import load_markets
 from .odds import american_to_decimal, expected_value, fair_odds, fmt_money, fmt_odds, implied_probability, parse_odds
@@ -102,13 +102,58 @@ class PickView(discord.ui.View):
                 text = f"Bet on {label}" if label in ("FanDuel", "DraftKings") else label
                 self.add_item(discord.ui.Button(label=text[:80], url=url, row=1,
                                                 emoji="🟦" if book == "FanDuel" else "🟩"))
+        if "ev" in detail:
+            button = discord.ui.Button(label="I bet this", emoji="📝", row=1,
+                                       style=discord.ButtonStyle.success, custom_id=f"lm:bet:{key}")
+            button.callback = self._bet_single(key)
+            self.add_item(button)
+        for i, p in enumerate((detail.get("parlays") or [])[:4]):
+            button = discord.ui.Button(label=f"Log {len(p.legs)}-leg {p.book}", emoji="📝", row=2,
+                                       style=discord.ButtonStyle.success, custom_id=f"lm:betp:{key}:{i}")
+            button.callback = self._bet_parlay(key, i)
+            self.add_item(button)
         if "ev" not in detail and detail:
-            return   # a parlay: bet buttons only
+            return   # a parlay card: bet buttons only
         for kind, label, emoji, page in BUTTONS:
             button = discord.ui.Button(label=label, emoji=emoji, style=discord.ButtonStyle.secondary,
                                        custom_id=f"lm:{kind}:{key}")
             button.callback = self._handler(key, page)
             self.add_item(button)
+
+    @staticmethod
+    def _bet_single(key):
+        async def callback(interaction: discord.Interaction):
+            detail = PICK_DETAILS.get(key)
+            if detail is None:
+                await interaction.response.send_message(
+                    "This card is from before the bot restarted, so I can't log it. Ask again "
+                    "for a fresh card.", ephemeral=True)
+                return
+            from .bets import leg_from_eval
+            from .staking import suggested_dollars
+            ev = detail["ev"]
+            leg = leg_from_eval(ev, live=ev.market.notes.startswith("LIVE"))
+            await interaction.response.send_modal(BetModal(
+                [leg], ev.best.best_odds, ev.best.best_book,
+                suggested_dollars(ev.best.blended, ev.best.best_odds), ev.best.label))
+        return callback
+
+    @staticmethod
+    def _bet_parlay(key, i):
+        async def callback(interaction: discord.Interaction):
+            detail = PICK_DETAILS.get(key)
+            if detail is None:
+                await interaction.response.send_message(
+                    "This card is from before the bot restarted, so I can't log it.", ephemeral=True)
+                return
+            from .bets import leg_from_eval
+            from .staking import suggested_dollars
+            p = detail["parlays"][i]
+            legs = [leg_from_eval(ev, odds=o, book=p.book) for ev, o in p.legs]
+            await interaction.response.send_modal(BetModal(
+                legs, p.american, p.book, suggested_dollars(p.prob, p.american),
+                f"{len(p.legs)}-leg parlay"))
+        return callback
 
     @staticmethod
     def _handler(key, page):
@@ -124,6 +169,41 @@ class PickView(discord.ui.View):
             except Exception as e:
                 await _report_error(interaction, e)
         return callback
+
+
+class BetModal(discord.ui.Modal):
+    """'I bet this': stake, the odds you actually got, and the book."""
+
+    def __init__(self, legs: list, odds: int, book: str, stake: Optional[float], what: str):
+        super().__init__(title="Log this bet", timeout=600)
+        self.legs, self.what = legs, what
+        self.stake = discord.ui.TextInput(label="Stake ($)", placeholder="25",
+                                          default=f"{stake:g}" if stake else None, max_length=12)
+        self.odds = discord.ui.TextInput(label="Odds you got (American)", default=fmt_odds(odds),
+                                         max_length=8)
+        self.book = discord.ui.TextInput(label="Book", default=book or "", required=False,
+                                         max_length=40)
+        for item in (self.stake, self.odds, self.book):
+            self.add_item(item)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        from .bets import add_bet
+        try:
+            stake = float(str(self.stake.value).replace("$", "").replace(",", "").strip())
+            odds = int(str(self.odds.value).replace("+", "").strip())
+            if stake <= 0 or abs(odds) < 100:
+                raise ValueError
+        except ValueError:
+            await interaction.response.send_message(
+                "Couldn't read that: stake should be a number like 25 and odds like -150 or +120.",
+                ephemeral=True)
+            return
+        add_bet(self.legs, odds, stake, str(self.book.value).strip(), str(interaction.user))
+        await interaction.response.send_message(
+            f"✅ Logged **${stake:,.2f}** on {self.what} at **{fmt_odds(odds)}**"
+            + (f" ({self.book.value})" if self.book.value else "")
+            + ". It settles automatically after grading; `/record` shows your results.",
+            ephemeral=True)
 
 
 def _remember(detail: dict) -> str:
@@ -267,11 +347,26 @@ class LinemakerBot(discord.Client):
             daily_post.start()
         # Grade yesterday every morning (~2 credits per league with tracked game lines; props
         # are free), which also re-fits the weights. LINEMAKER_AUTOGRADE_TIME= (blank) turns it off.
+        from .alerts import news_minutes, pretip_minutes
+        if self.alert_channel_id() and pretip_minutes():
+            pretip_loop.start()
+        if self.alert_channel_id() and news_minutes():
+            news_loop.change_interval(minutes=news_minutes())
+            news_loop.start()
+        weekly_at = os.environ.get("LINEMAKER_WEEKLY_TIME", "10:00").strip()
+        if weekly_at and self.alert_channel_id():
+            h, m = weekly_at.split(":")
+            weekly_post.change_interval(time=dt.time(int(h), int(m), tzinfo=TZ))
+            weekly_post.start()
         grade_at = os.environ.get("LINEMAKER_AUTOGRADE_TIME", "09:30").strip()
         if grade_at:
             h, m = grade_at.split(":")
             daily_grade.change_interval(time=dt.time(int(h), int(m), tzinfo=TZ))
             daily_grade.start()
+
+    def alert_channel_id(self) -> Optional[int]:
+        raw = os.environ.get("LINEMAKER_CHANNEL_ID") or self.home
+        return int(raw) if raw else None
 
     async def on_ready(self):
         log.info("logged in as %s (chat %s)", self.user,
@@ -464,6 +559,57 @@ async def grade_cmd(interaction: discord.Interaction, results: Optional[discord.
                               color=BLUE_BOARD)
         if remaining is not None:
             embed.set_footer(text=f"Game lines scored from final scores · credits left: {remaining}")
+        await interaction.followup.send(embed=embed)
+    except Exception as e:
+        await _report_error(interaction, e)
+
+
+@bot.tree.command(name="record", description="Your logged bets: open bets, record, profit and ROI")
+@app_commands.describe(days="How many days back (default 30; 0 = all time)")
+async def record_cmd(interaction: discord.Interaction, days: Optional[int] = 30):
+    await interaction.response.defer(thinking=True)
+    try:
+        from .bets import settle, summary
+        await asyncio.to_thread(settle)
+        s = await asyncio.to_thread(summary, days or None, today())
+        span = f"last {days} days" if days else "all time"
+        lines = []
+        if s["settled"]:
+            roi = f"{s['roi']:+.1%}" if s["roi"] is not None else "—"
+            lines.append(f"**{s['won']}-{s['lost']}" + (f"-{s['push']}" if s["push"] else "")
+                         + f"** · staked ${s['staked']:,.2f} · profit **{fmt_money(s['profit'])}** · ROI **{roi}**")
+            for kind, k in sorted(s["by_kind"].items()):
+                kroi = k["profit"] / k["staked"] if k["staked"] else 0
+                lines.append(f"• {kind.title()}s: {k['won']}/{k['n']} won · {fmt_money(k['profit'])} ({kroi:+.1%})")
+            lines.append("")
+            lines.append("**Recent:**")
+            for b in sorted(s["settled"], key=lambda b: b.get("settled", ""), reverse=True)[:8]:
+                mark = {"won": "✅", "lost": "❌", "push": "➖"}[b["status"]]
+                what = b["legs"][0]["label"] if b["kind"] == "single" else f"{len(b['legs'])}-leg parlay"
+                lines.append(f"{mark} {what} {fmt_odds(b['odds'])} · ${b['stake']:,.0f} → {fmt_money(b.get('profit', 0))}")
+        else:
+            lines.append("No settled bets yet. Tap **📝 I bet this** on a pick (or **Log parlay**) "
+                         "after you place it, and it settles automatically after grading.")
+        if s["open"]:
+            lines += ["", f"**Open ({len(s['open'])}):** " + "; ".join(
+                (b["legs"][0]["label"] if b["kind"] == "single" else f"{len(b['legs'])}-leg parlay")
+                + f" ${b['stake']:,.0f}" for b in s["open"][:10])]
+        embed = discord.Embed(title=f"🧾 Your Bets · {span}", description="\n".join(lines)[:4000],
+                              color=0x2ECC71 if s["profit"] >= 0 else 0xE74C3C)
+        await interaction.followup.send(embed=embed)
+    except Exception as e:
+        await _report_error(interaction, e)
+
+
+@bot.tree.command(name="clv", description="Closing-line value: did the market move toward our picks?")
+@app_commands.describe(days="How many days back (default 14)")
+async def clv_cmd(interaction: discord.Interaction, days: Optional[int] = 14):
+    await interaction.response.defer(thinking=True)
+    try:
+        from .tracking import clv_lines, load_records
+        recs = await asyncio.to_thread(load_records, TRACKING, days or None, today())
+        embed = discord.Embed(title=f"📏 Closing-Line Value · last {days} days", color=0x3498DB,
+                              description="\n\n".join(clv_lines(recs))[:4000])
         await interaction.followup.send(embed=embed)
     except Exception as e:
         await _report_error(interaction, e)
@@ -678,6 +824,121 @@ async def quota_cmd(interaction: discord.Interaction):
         await interaction.response.send_message(embed=embed, ephemeral=True)
     except Exception as e:
         await _report_error(interaction, e)
+
+
+def _alert_sports(override: str = "") -> list:
+    from .gamelogs import PATHS
+    raw = (os.environ.get(override, "").strip() if override else "") or os.environ.get("LINEMAKER_SPORTS", "NBA")
+    return [s.strip().upper() for s in raw.split(",") if s.strip().upper() in PATHS]
+
+
+def _todays_events(sport: str, date: str) -> list:
+    """Today's games from The Odds API's free /events list."""
+    from .oddsapi import slate_window
+    start, end = slate_window(date, TZ)
+    return OddsAPI().events(sport, start, end)
+
+
+@tasks.loop(minutes=5)
+async def pretip_loop():
+    """Props for each game LINEMAKER_PRETIP_MINUTES before it tips; posts only real plays."""
+    from .alerts import load_state, pretip_due, pretip_minutes, save_state
+    from .chat import scan_events
+    date = today()
+    channel = bot.get_channel(bot.alert_channel_id() or 0)
+    if channel is None:
+        return
+    done = set(load_state(f"pretip_{date}.json", []))
+    now = dt.datetime.now(dt.timezone.utc)
+    for sport in _alert_sports("LINEMAKER_PRETIP_SPORTS"):
+        try:
+            events = await asyncio.to_thread(_todays_events, sport, date)
+        except Exception as e:
+            log.warning("pre-tip %s: %s", sport, e)
+            continue
+        for group in pretip_due(events, now, pretip_minutes(), done):
+            ids = {e["id"] for e in group}
+            done |= ids
+            save_state(f"pretip_{date}.json", sorted(done))
+            names = ", ".join(f"{e['away_team']} @ {e['home_team']}" for e in group)
+            try:
+                messages, _res = await asyncio.to_thread(
+                    scan_events, sport, date, ids, f"{SPORT_NAMES.get(sport, sport)} Pre-Tip Scan")
+            except Exception:
+                log.exception("pre-tip scan failed: %s", names)
+                continue
+            if messages:
+                await _send_card(channel.send, messages)
+            else:
+                log.info("pre-tip %s: nothing cleared the gates (%s)", sport, names)
+
+
+@tasks.loop(minutes=12)
+async def news_loop():
+    """Re-price a game when a rotation player is newly ruled Out (basketball)."""
+    from .alerts import NEWS_SPORTS, load_state, news_events, save_state
+    from .chat import drop_slate, scan_events
+    from .espn_projections import injuries
+    date = today()
+    channel = bot.get_channel(bot.alert_channel_id() or 0)
+    if channel is None:
+        return
+    cap = int(os.environ.get("LINEMAKER_NEWS_MAX_ALERTS", "8") or 0)
+    sent = load_state(f"news_sent_{date}.json", 0)
+    now = dt.datetime.now(dt.timezone.utc)
+    for sport in [s for s in _alert_sports() if s in NEWS_SPORTS]:
+        try:
+            current = await asyncio.to_thread(injuries, sport)
+            if not current:
+                continue
+            previous = load_state(f"news_{sport}_{date}.json", None)
+            events = await asyncio.to_thread(_todays_events, sport, date) if previous is not None else []
+            hits = await asyncio.to_thread(news_events, sport, date, events, now, previous, current)
+            save_state(f"news_{sport}_{date}.json", current)
+        except Exception:
+            log.exception("injury news check failed (%s)", sport)
+            continue
+        for ev, players in hits:
+            if sent >= cap:
+                log.info("news alerts: daily cap of %d reached", cap)
+                break
+            sent += 1
+            save_state(f"news_sent_{date}.json", sent)
+            who = " & ".join(players)
+            game = f"{ev['away_team']} @ {ev['home_team']}"
+            drop_slate(sport, date)          # the next full scan should see the news too
+            try:
+                messages, res = await asyncio.to_thread(
+                    scan_events, sport, date, {ev["id"]}, f"🚨 {who} OUT · Re-Price", False)
+            except Exception:
+                log.exception("news re-price failed: %s", game)
+                continue
+            if res.picks:
+                await _send_card(channel.send, messages)
+            else:
+                await channel.send(embed=discord.Embed(
+                    title=f"🚨 {who} ruled OUT · {game}", color=0xE74C3C,
+                    description=(f"Re-priced {game} with the usage bump for his teammates. "
+                                 f"{len(res.evaluated)} props priced; nothing cleared the gates, "
+                                 "so the books have likely already adjusted.")))
+
+
+@tasks.loop(time=dt.time(10, 0, tzinfo=TZ))
+async def weekly_post():
+    """Monday (LINEMAKER_WEEKLY_DAY, 0 = Monday) summary of the last 7 days."""
+    if dt.datetime.now(TZ).weekday() != int(os.environ.get("LINEMAKER_WEEKLY_DAY", "0") or 0):
+        return
+    channel = bot.get_channel(bot.alert_channel_id() or 0)
+    if channel is None:
+        return
+    from .reports import weekly_lines
+    try:
+        lines = await asyncio.to_thread(weekly_lines, today())
+    except Exception:
+        log.exception("weekly summary failed")
+        return
+    await channel.send(embed=discord.Embed(title="🗓️ Weekly Summary · last 7 days",
+                                           description="\n\n".join(lines)[:4000], color=0x9B59B6))
 
 
 @tasks.loop(time=dt.time(9, 30, tzinfo=TZ))

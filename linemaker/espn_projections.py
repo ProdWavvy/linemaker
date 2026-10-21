@@ -41,6 +41,9 @@ FOOTBALL_RATES = {"receiving yards": ("receivingTargets", "receivingYards"),
 RECENT_K = 10.0
 
 
+DISPLAY_NAMES = {}   # norm(player) -> name as ESPN writes it
+
+
 def injuries(sport: str) -> dict:
     """norm(player) -> engine injury status, from ESPN's league injury report."""
     path = PATHS.get(sport)
@@ -60,6 +63,7 @@ def injuries(sport: str) -> dict:
             status = INJURY_MAP.get((inj.get("status") or "").strip().lower())
             if status:
                 out[norm(inj["athlete"]["displayName"])] = status
+                DISPLAY_NAMES[norm(inj["athlete"]["displayName"])] = inj["athlete"]["displayName"]
     return out
 
 
@@ -88,10 +92,12 @@ def _minutes(g: dict) -> Optional[float]:
     return m if m else None
 
 
-def basketball_mean(games: list, market: str, factors: dict) -> Optional[tuple]:
-    """(mean, sd, steps) for one basketball market."""
+def basketball_mean(games: list, market: str, factors: dict, minutes_delta: float = 0.0) -> Optional[tuple]:
+    """(mean, sd, steps) for one basketball market. factors: pace, defense (team rating vs
+    average) and dvp ({market: factor} for the player's position); minutes_delta adds or
+    removes projected minutes (blowout risk, back-to-back)."""
     if market.lower() == "pra":
-        parts = [basketball_mean(games, m, factors) for m in ("points", "rebounds", "assists")]
+        parts = [basketball_mean(games, m, factors, minutes_delta) for m in ("points", "rebounds", "assists")]
         if any(p is None for p in parts):
             return None
         vals = [_value("NBA", "pra", g["stats"]) for g in games]
@@ -112,9 +118,15 @@ def basketball_mean(games: list, market: str, factors: dict) -> Optional[tuple]:
         rate_season=sum(v for v in vals if v is not None) / sum(_minutes(g) for g in played),
         rate_recent=_avg(rates[:10]), rate_recent_games=min(10, len(rates)),
         pace_factor=factors.get("pace"),
-        matchup_factor=factors.get("defense") if market.lower() in ("points", "threes") else None)
+        matchup_factor=(factors.get("dvp") or {}).get(market.lower())
+        or (factors.get("defense") if market.lower() in ("points", "threes") else None))
     proj = build_projection(inp)
-    return proj.mean, _sd(vals, proj.mean), proj.steps
+    mean, steps = proj.mean, list(proj.steps)
+    if minutes_delta and proj.opportunity > 0:
+        scale = max(proj.opportunity + minutes_delta, 0.0) / proj.opportunity
+        mean *= scale
+        steps.append((f"minutes adjusted {minutes_delta:+.1f}", f"{mean:.2f}"))
+    return mean, _sd(vals, mean), steps
 
 
 def football_mean(games: list, market: str) -> Optional[tuple]:
@@ -175,6 +187,37 @@ def _team_factors(sport: str, date: str, teams: set) -> dict:
                 "drtg": c.def_rating / avg_drtg if c.def_rating else None} for k, c in ctx.items()}
 
 
+def _apply_usage(sport: str, date: str, rows: list, index: dict, hurt: dict):
+    """Hand part of each ruled-out rotation player's production to his projected teammates."""
+    from .adjustments import usage_boosts
+    by_team = {}
+    for r in rows:
+        by_team.setdefault(norm(r["_team"]), {})[r["subject"]] = r["_games"]
+    outs_by_team = {}
+    for player, status in hurt.items():
+        hit = index.get(player)
+        if status == "out" and hit and norm(hit[1]) in by_team:
+            outs_by_team.setdefault(norm(hit[1]), []).append((player, hit[0]))
+    for team, outs in outs_by_team.items():
+        logs = {}
+        for player, aid in outs:
+            try:
+                logs[DISPLAY_NAMES.get(player, player.title())] = game_log(sport, aid, date)
+            except Exception as e:
+                log.warning("espn game log %s: %s", player, e)
+        boosts = usage_boosts(logs, by_team[team], sport)
+        for r in rows:
+            if norm(r["_team"]) != team:
+                continue
+            b = boosts.get(r["subject"]) or {}
+            m = r["market"].lower()
+            add = (sum(b.get(k, 0.0) for k in ("points", "rebounds", "assists")) if m == "pra"
+                   else b.get(m, 0.0))
+            if add > 0.05:
+                r["mean"] = f"{float(r['mean']) + add:.3f}"
+                r["notes"] += f"; +{add:.1f} with {', '.join(b['_why'])} out"
+
+
 def espn_projections(sport: str, date: str, wanted: dict) -> list:
     """wanted: {player name: {markets}} -> projection rows for the pro engine."""
     if sport not in PATHS:
@@ -183,6 +226,17 @@ def espn_projections(sport: str, date: str, wanted: dict) -> list:
     hurt = injuries(sport)
     teams = {v[1] for v in index.values()} | {v[2] for v in index.values()}
     factors = _team_factors(sport, date, teams)
+    spreads, tired, dvp = {}, set(), {}
+    if sport in BASKETBALL:
+        from .adjustments import spreads_today
+        from .game_model import played_yesterday
+        spreads, tired = spreads_today(sport, date), played_yesterday(sport, date)
+        try:
+            from .dvp import position_factors
+            dvp = position_factors(sport, date, teams)
+        except Exception as e:
+            log.warning("defense vs position unavailable: %s", e)
+    from .gamelogs import POSITIONS
 
     def one(item):
         name, markets = item
@@ -196,6 +250,15 @@ def espn_projections(sport: str, date: str, wanted: dict) -> list:
             log.warning("espn game log %s: %s", name, e)
             return []
         rows = []
+        extra = ""
+        delta = 0.0
+        if sport in BASKETBALL:
+            from .adjustments import minutes_delta
+            played = [g for g in games if _minutes(g)][:10]
+            avg_min = sum(_minutes(g) for g in played) / len(played) if played else 0.0
+            delta, why = minutes_delta(avg_min, spreads.get(norm(team)), norm(team) in tired)
+            if why:
+                extra = "; " + ", ".join(why)
         for market in markets:
             if sport in BASKETBALL:
                 f = {}
@@ -204,7 +267,11 @@ def espn_projections(sport: str, date: str, wanted: dict) -> list:
                     f["pace"] = (mine["pace"] + theirs["pace"]) / 2
                 if theirs.get("drtg"):
                     f["defense"] = theirs["drtg"]
-                res = basketball_mean(games, market, f)
+                pos = POSITIONS.get((sport, norm(name)))
+                if pos and (dvp.get(norm(opp)) or {}).get(pos):
+                    table = dvp[norm(opp)][pos]
+                    f["dvp"] = dict(table, pra=None)
+                res = basketball_mean(games, market, f, delta)
             elif sport in FOOTBALL:
                 res = football_mean(games, market)
             else:
@@ -213,7 +280,9 @@ def espn_projections(sport: str, date: str, wanted: dict) -> list:
                 continue
             mean, sd, steps = res
             row = {"sport": sport, "subject": name, "market": market, "mean": f"{mean:.3f}",
-                   "stdev": f"{sd:.3f}", "notes": f"ESPN game-log model ({len(games)} games); {team}"}
+                   "stdev": f"{sd:.3f}",
+                   "notes": f"ESPN game-log model ({len(games)} games); {team}{extra}",
+                   "_team": team, "_games": games}
             if hurt.get(norm(name)):
                 row["injury_status"] = hurt[norm(name)]
             rows.append(row)
@@ -223,5 +292,10 @@ def espn_projections(sport: str, date: str, wanted: dict) -> list:
     with ThreadPoolExecutor(max_workers=6) as pool:
         for rows in pool.map(one, wanted.items()):
             out += rows
+    if sport in BASKETBALL:
+        _apply_usage(sport, date, out, index, hurt)
+    for r in out:
+        r.pop("_team", None)
+        r.pop("_games", None)
     log.info("espn projections %s: %d players asked, %d projections built", sport, len(wanted), len(out))
     return out

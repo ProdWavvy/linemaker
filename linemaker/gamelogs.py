@@ -134,6 +134,18 @@ def game_log(sport: str, athlete_id: str, date: str) -> list:
     return games[:SEASON_GAMES]
 
 
+POSITIONS = {}   # (sport, norm(player)) -> "G" / "F" / "C" (basketball), filled by roster_index
+
+
+def position_group(abbr: str) -> str:
+    a = (abbr or "").upper()
+    if a.startswith("C"):
+        return "C"
+    if a in ("PG", "SG", "G") or a.startswith("G"):
+        return "G"
+    return "F" if a else ""
+
+
 @functools.lru_cache(maxsize=16)
 def roster_index(sport: str, date: str) -> dict:
     """norm(player) -> (athlete id, team name, opponent name, home tonight) for the slate."""
@@ -163,6 +175,10 @@ def roster_index(sport: str, date: str) -> dict:
                 people += a["items"]
             elif isinstance(a, dict):
                 people.append(a)
+        for a in people:
+            if "displayName" in a and isinstance(a.get("position"), dict):
+                POSITIONS[(sport, norm(a["displayName"]))] = position_group(
+                    a["position"].get("abbreviation", ""))
         return [(a["displayName"], a["id"], name, opp, home) for a in people
                 if "displayName" in a and "id" in a]
 

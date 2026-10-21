@@ -177,6 +177,9 @@ def _pick_embed(rank: int, ev, prof, partners: list, biggest: bool, ctx=None,
             + (" The biggest disconnect on the board." if biggest else "")
             + f"\n{_emoji(m.sport)} {m.game}" + (f" · {when}" if when else ""))
     paras = [head, _projection_sentence(ev), _price_sentence(ev)]
+    tweaks = [t for t in m.notes.split("; ")[2:] if t] if m.notes.startswith("ESPN game-log") else []
+    if tweaks:
+        paras.insert(2, "🔧 **Adjusted for tonight:** " + "; ".join(tweaks) + ".")
     if m.notes.startswith("LIVE · "):
         paras.insert(1, "🔴 **Live:** " + m.notes[len("LIVE · "):] + ". Live prices move fast; "
                      "check the line in the app before you bet.")
@@ -194,6 +197,8 @@ def _pick_embed(rank: int, ev, prof, partners: list, biggest: bool, ctx=None,
         paras.append(" ".join(risks))
     paras.append(_closer(ev, prof))
     paras.append(f"{emoji} **Bet this at {name}**")
+    from .staking import stake_line
+    paras.append(stake_line(s.blended, s.best_odds))
     return discord.Embed(title=_clip(f"{rank}. {s.label} ({fmt_odds(s.best_odds)}, {name})", 256),
                          description=_clip("\n\n".join(paras), 4096), color=colour)
 
@@ -678,14 +683,16 @@ def volume_messages(sections: list, date: str, cfg, title: str = "") -> list:
                 slip = f"\n[🧾 Open this {len(p.legs)}-leg slip on {bname}]({url})" if url else ""
                 if url:
                     buttons.append((f"{len(p.legs)}-leg on {bname}", url))
+                from .staking import stake_line
                 body = (f"{legs_txt}\nHit chance **{_pct(p.prob)}** · $100 pays "
-                        f"**${p.payout:,.0f}** · EV {fmt_money(p.ev)}")
+                        f"**${p.payout:,.0f}** · EV {fmt_money(p.ev)}\n"
+                        + stake_line(p.prob, p.american, parlay=True))
                 e.add_field(name=f"🔒 {len(p.legs)}-Leg · {fmt_odds(p.american)}",
                             value=body + slip if len(body + slip) <= 1024 else _clip(body, 1024),
                             inline=False)
             e.set_footer(text="One leg per game · payout multiplies the legs' prices; the book's "
                               "parlay price may differ slightly · check every leg before you bet")
-            out.append(([e], {"links": buttons} if buttons else None))
+            out.append(([e], {"links": buttons, "parlays": mine}))
     notes = discord.Embed(title="🧠 Volume Mode, Honestly", color=PURPLE, description=(
         "These legs are picked to **hit often**, not because the price is wrong. Parlaying "
         "heavy favorites multiplies the book's margin on every leg, so the expected value of a "

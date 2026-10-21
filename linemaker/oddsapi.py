@@ -380,13 +380,16 @@ def parse_event_props(event: dict, sport: str, tz: ZoneInfo) -> list:
 
 def fetch_slate(api: OddsAPI, sport: str, date: str, tz: ZoneInfo, props: bool = False,
                 prop_markets: Optional[list] = None, max_events: Optional[int] = None,
-                game_markets: str = "h2h,spreads,totals", game_lines: bool = True) -> list:
+                game_markets: str = "h2h,spreads,totals", game_lines: bool = True,
+                only: Optional[set] = None) -> list:
     """All priced markets for one sport on one local date. With game_lines=False the
     event list comes from the free /events endpoint instead of a paid /odds call."""
     start, end = slate_window(date, tz)
     source = (api.game_odds(sport, game_markets, start, end) if game_lines
               else api.events(sport, start, end))
     events = [e for e in source if _local_date(e["commence_time"], tz) == date]
+    if only is not None:   # a single-game scan (pre-tip, injury news)
+        events = [e for e in events if e["id"] in only]
     if hasattr(api, "slate"):
         api.slate[sport.upper()] = [(_game(e), e["commence_time"]) for e in events]
     out = parse_game_odds(events, sport, tz) if game_lines else []

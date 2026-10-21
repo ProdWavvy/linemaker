@@ -582,6 +582,33 @@ def slate_for(sport: str, date: str, kind: str = "props", refresh: bool = False)
     return tuple(_SLATES[key][1:])
 
 
+def drop_slate(sport: str, date: str, kind: str = "props"):
+    """Forget a saved slate (news changed the projections, so the next ask re-prices)."""
+    _SLATES.pop((sport, date, kind), None)
+    try:
+        os.remove(_cache_path(sport, date, kind))
+    except OSError:
+        pass
+
+
+def scan_events(sport: str, date: str, event_ids: set, title: str, only_if_picks: bool = True):
+    """Price props for just these games and build the card. None when nothing cleared the
+    gates and only_if_picks is set. Returns (messages, result)."""
+    from .live import run_best
+    from .scan_format import scan_messages
+    snaps = os.environ.get("LINEMAKER_SNAPSHOTS", "snapshots")
+    cfg = ProConfig()
+    lr = run_best(OddsAPI(), [sport], date, _tz(), cfg, Freezer(snaps, date), only=set(event_ids))
+    res = lr.result
+    res.kind, res.odds_age = "props", 0.0
+    extras = enrich(res, sport, date)
+    log.info("%s scan of %d game(s): %d priced, %d picks", title, len(event_ids),
+             len(res.evaluated), len(res.picks))
+    if only_if_picks and not res.picks:
+        return None, res
+    return scan_messages([(sport, res, extras)], date, cfg, title), res
+
+
 def slate_age_minutes(sport: str, date: str, kind: str = "props") -> Optional[float]:
     hit = _SLATES.get((sport, date, kind))
     return (time.time() - hit[0]) / 60 if hit else None

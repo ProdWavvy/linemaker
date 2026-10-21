@@ -25,6 +25,9 @@ from .oddsapi import norm
 MAX_HISTORY = 60
 
 
+PICK_FIELDS = ("pick_side", "pick_time", "pick_odds", "pick_book", "pick_market_prob")
+
+
 def _now() -> dt.datetime:
     return dt.datetime.now(dt.timezone.utc)
 
@@ -80,14 +83,21 @@ class Tracker:
             "updated": now.isoformat(timespec="seconds"),
             "result": old.get("result") if old else None,
         }
+        for k in PICK_FIELDS:            # the price we picked at, kept for closing-line value
+            if old and k in old:
+                self.records[m.key][k] = old[k]
         self._touched.add(m.key)
 
-    def mark_picks(self, picks):
+    def mark_picks(self, picks, now: Optional[dt.datetime] = None):
+        now = now or _now()
         for ev in picks:
             if ev.market.key in self._touched:
                 rec = self.records[ev.market.key]
                 rec["picked"] = True
                 rec["pick_side"] = ev.best.side
+                if "pick_time" not in rec:
+                    rec.update(pick_time=now.isoformat(timespec="seconds"), pick_odds=ev.best.best_odds,
+                               pick_book=ev.best.best_book, pick_market_prob=ev.best.market_prob)
 
     def save(self):
         os.makedirs(os.path.dirname(self.path) or ".", exist_ok=True)
@@ -171,6 +181,7 @@ def calibrate(records: list, min_group: int = 30) -> str:
            f"Tracked markets: **{len(records)}** · graded (two-way, no push): **{len(graded)}**", ""]
     if len(graded) < 10:
         out.append("Not enough graded results yet (need at least 10). Keep tracking and grading.")
+        out += ["", "## Closing-line value", ""] + clv_lines(records)
         return "\n".join(out) + "\n"
 
     def rows_of(recs):
@@ -220,6 +231,7 @@ def calibrate(records: list, min_group: int = 30) -> str:
     out.append("")
 
     out += _roi_tables(graded)
+    out += ["## Closing-line value", ""] + clv_lines(records) + [""]
 
     picks = [r for r in graded if r.get("picked")]
     if picks:
@@ -292,4 +304,67 @@ def _roi_tables(graded: list) -> list:
                  lambda lo, hi: f"{lo * 100:.0f}–{hi * 100:.0f} pts" if hi < 1 else f"{lo * 100:.0f}+ pts")
     out += ["Use the bands with enough bets and a positive ROI to set LINEMAKER_ODDS_MIN/MAX "
             "and LINEMAKER_MIN_GAP/MAX_GAP.", ""]
+    return out
+
+
+# ---- closing-line value --------------------------------------------------------------
+
+def _implied(odds: int) -> float:
+    return 100 / (odds + 100) if odds > 0 else -odds / (-odds + 100)
+
+
+def pick_clv(rec: dict) -> Optional[dict]:
+    """How the market moved after the pick, up to the last pre-game read.
+
+    prob  closing no-vig probability of the picked side minus its no-vig probability at the
+          pick (positive = the market came our way)
+    price implied probability of the closing price at the pick's book minus the pick price's
+          (positive = we got a better number than the close)
+    None when nothing was seen after the pick (one read only)."""
+    if not rec.get("pick_time") or rec.get("market_prob_a") is None:
+        return None
+    later = [h for h in rec.get("history", []) if h.get("t", "") > rec["pick_time"]]
+    if not later and rec.get("updated", "") <= rec["pick_time"]:
+        return None
+    side = rec.get("pick_side", "A")
+    close_p = rec["market_prob_a"] if side == "A" else 1 - rec["market_prob_a"]
+    out = {"prob": close_p - rec["pick_market_prob"], "price": None}
+    close_odds = None
+    for h in reversed(later or rec.get("history", [])[-1:]):
+        close_odds = (h.get(side) or {}).get(rec.get("pick_book"))
+        if close_odds is not None:
+            break
+    if close_odds is not None and rec.get("pick_odds") is not None:
+        out["price"] = _implied(close_odds) - _implied(rec["pick_odds"])
+    return out
+
+
+def clv_summary(records: list) -> dict:
+    rows = [(r, pick_clv(r)) for r in records if r.get("picked")]
+    rows = [(r, c) for r, c in rows if c is not None]
+    groups = {}
+    for r, c in rows:
+        groups.setdefault(f"{r['sport']} {r['market']}", []).append(c["prob"])
+    probs = [c["prob"] for _r, c in rows]
+    prices = [c["price"] for _r, c in rows if c["price"] is not None]
+    return {"n": len(rows), "avg_prob": sum(probs) / len(probs) if probs else None,
+            "beat": sum(p > 0.0005 for p in probs) / len(probs) if probs else None,
+            "avg_price": sum(prices) / len(prices) if prices else None,
+            "groups": {k: (len(v), sum(v) / len(v)) for k, v in groups.items()}}
+
+
+def clv_lines(records: list) -> list:
+    s = clv_summary(records)
+    if not s["n"]:
+        return ["No picks with a later price read yet. Pre-tip scans record closing prices; "
+                "closing-line value shows up after a few game days."]
+    out = [f"Picks with a closing read: **{s['n']}** · beat the close **{s['beat']:.0%}** of the "
+           f"time · average move **{s['avg_prob'] * 100:+.2f} pts** of no-vig probability"]
+    if s["avg_price"] is not None:
+        out.append(f"Price vs the closing number at the same book: **{s['avg_price'] * 100:+.2f} pts**")
+    big = sorted(((k, n, v) for k, (n, v) in s["groups"].items() if n >= 10), key=lambda x: -x[1])
+    if big:
+        out.append("By market: " + " · ".join(f"{k} {v * 100:+.2f} ({n})" for k, n, v in big[:6]))
+    out.append("Consistently positive = the model sees moves before the market makes them, the "
+               "best early sign of a real edge (long before win/loss settles down).")
     return out
