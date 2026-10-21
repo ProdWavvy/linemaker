@@ -151,7 +151,7 @@ class PickView(discord.ui.View):
             p = detail["parlays"][i]
             legs = [leg_from_eval(ev, odds=o, book=p.book) for ev, o in p.legs]
             await interaction.response.send_modal(BetModal(
-                legs, p.american, p.book, suggested_dollars(p.prob, p.american),
+                legs, p.american, p.book, suggested_dollars(p.prob, p.american, parlay=True),
                 f"{len(p.legs)}-leg parlay"))
         return callback
 

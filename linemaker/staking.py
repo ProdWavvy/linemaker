@@ -5,7 +5,12 @@
               LINEMAKER_MAX_STAKE_PCT (default 2%) of bankroll
 
 Quarter Kelly gives up a little growth for much smaller swings, and it forgives an estimate
-that's a few points too confident. With LINEMAKER_BANKROLL set, cards show dollars too.
+that's a few points too confident.
+
+Cards show one of your usual amounts (LINEMAKER_STAKE_TIERS, default 2.5,5,10,15,20): the
+Kelly suggestion as a share of the cap picks the tier, so the strongest edges get the top
+amount. Parlays stay at the lowest tiers (they swing much harder). Set the tiers blank to
+see Kelly percentages (and dollars, with LINEMAKER_BANKROLL) instead.
 """
 import os
 from typing import Optional
@@ -36,7 +41,43 @@ def suggested(p: float, american: int) -> float:
     return max(0.0, min(f, _env("LINEMAKER_MAX_STAKE_PCT", 2.0) / 100))
 
 
+def tiers() -> list:
+    raw = os.environ.get("LINEMAKER_STAKE_TIERS", "2.5,5,10,15,20")
+    out = []
+    for x in raw.split(","):
+        try:
+            out.append(float(x.strip().lstrip("$")))
+        except ValueError:
+            continue
+    return sorted(v for v in out if v > 0)
+
+
+def stake_tier(p: float, american: int, parlay: bool = False) -> Optional[float]:
+    """One of your amounts for this bet, or None when there's no edge at this price."""
+    levels = tiers()
+    if not levels:
+        return None
+    share = suggested(p, american)
+    if share <= 0:
+        return levels[0] if parlay else None      # a fun-money parlay: smallest amount
+    cap = _env("LINEMAKER_MAX_STAKE_PCT", 2.0) / 100
+    usable = levels[:2] if parlay else levels
+    i = min(int(share / cap * len(usable) - 1e-9), len(usable) - 1)
+    return usable[max(i, 0)]
+
+
+def _money(v: float) -> str:
+    return f"${v:,.2f}" if v != int(v) else f"${v:,.0f}"
+
+
 def stake_line(p: float, american: int, parlay: bool = False) -> str:
+    if tiers():
+        amount = stake_tier(p, american, parlay)
+        if amount is None:
+            return "💵 **Stake:** skip — no edge left at this price"
+        if parlay and suggested(p, american) <= 0:
+            return f"💵 **Stake:** {_money(amount)} (fun money: no edge, so keep it small)"
+        return f"💵 **Stake:** {_money(amount)}"
     share = suggested(p, american)
     if share <= 0:
         return ("💵 **Stake:** fun money only (no edge at this price, so Kelly says $0)" if parlay
@@ -48,7 +89,9 @@ def stake_line(p: float, american: int, parlay: bool = False) -> str:
     return f"💵 **Stake:** {share:.1%} of bankroll{money} · {name}"
 
 
-def suggested_dollars(p: float, american: int) -> Optional[float]:
+def suggested_dollars(p: float, american: int, parlay: bool = False) -> Optional[float]:
+    if tiers():
+        return stake_tier(p, american, parlay)
     roll = bankroll()
     share = suggested(p, american)
     return round(share * roll, 2) if roll and share > 0 else None
