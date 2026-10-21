@@ -48,7 +48,25 @@ class DiscordFormatTest(unittest.TestCase):
     def test_bot_registers_commands(self):
         from linemaker.bot import bot
         names = {c.name for c in bot.tree.get_commands()}
-        self.assertEqual(names, {"pro", "lite", "grade", "devig", "fair", "ev", "live", "odds", "quota", "picks", "calibrate", "parlay", "record", "clv"})
+        self.assertEqual(names, {"pro", "lite", "grade", "devig", "fair", "ev", "live", "odds", "quota", "picks", "calibrate", "parlay", "record", "clv", "tips"})
+
+
+class TipsTest(unittest.TestCase):
+    def test_tips_command_and_chat(self):
+        import asyncio
+        from linemaker.scan_format import tips_embed
+        e = tips_embed()
+        self.assertEqual(e.title, "🧠 How to Think About These Long-Term")
+        self.assertIn("A bet can lose and still have been a great decision", e.description)
+        self.assertIn("hundreds of wagers", e.description)
+        from linemaker import chat
+        bot = chat.LinemakerChat.__new__(chat.LinemakerChat)
+        from collections import defaultdict
+        bot.history, bot.provider = defaultdict(list), "gemini"
+        for text in ("tips", "/tips", "betting tips?"):
+            turn = asyncio.run(bot.respond(1, "J", text))
+            self.assertIn("thousand times", turn.text)
+        self.assertIsNone(chat.TIPS_WORDS.fullmatch("best props tips for nba tonight"))
 
 
 if __name__ == "__main__":
@@ -151,7 +169,8 @@ class ScanFormatTest(unittest.TestCase):
         titles = [e.title for e in embeds]
         self.assertTrue(titles[0].startswith("🎯 NBA Value Scan · Today's Board (Oct 21, 2026)"))
         self.assertIn("📊 The Board, Ranked by Probability Gap", titles)
-        self.assertIn("🧠 How to Think About These Long-Term", titles)
+        self.assertNotIn("🧠 How to Think About These Long-Term", titles)   # lives in /tips now
+        self.assertIn("📌 Staking Note", titles)
         self.assertIn("⚠️ Scoping & Data Notes", titles)
         self.assertFalse(any("Bench Guy" in (t or "") for t in titles))
         notes = embeds[-1].description

@@ -414,6 +414,12 @@ class LinemakerChat:
         history = self.history[channel_id]
         system = f"{SYSTEM}\n\nToday is {_today()} ({_tz().key})."
         quick = None if attached_csv else quick_plays_request(text)
+        if not attached_csv and TIPS_WORDS.fullmatch(text.strip()):
+            from .scan_format import TIPS
+            reply = "**🧠 How to Think About These Long-Term**\n\n" + "\n\n".join(TIPS)
+            history.append({"role": "user", "content": f"{author}: {text}"})
+            history.append({"role": "assistant", "content": reply})
+            return Turn(reply, ctx["files"], [])
         if quick:
             mode, kind = quick_mode(text), quick_kind(text)
             refresh = bool(REFRESH_WORDS.search(text))
@@ -716,6 +722,8 @@ def summarize(lr, header: str, limit: int = 10) -> str:
 PLAYS_INTENT = re.compile(r"\b(best|top|good|any|today'?s|tonight'?s)\b.*\b(props?|plays?|picks?|bets?)\b"
                           r"|\b(props?|plays?|picks?)\b.*\b(today|tonight)\b", re.I)
 SPORT_DISPLAY = {"NCAAF": "college football"}
+TIPS_WORDS = re.compile(r"[!/]?(betting )?tips[?!.]*|how (should|do) i think about (these|this|betting)[?!.]*",
+                        re.I)
 GAME_LINE_WORDS = re.compile(r"\b(money ?lines?|ml|spreads?|totals?|over/unders?|o/u|"
                              r"winners?|who wins|game lines?)\b", re.I)
 REFRESH_WORDS = re.compile(r"\b(fresh|refresh|updated?|latest|new odds|re-?pull)\b", re.I)

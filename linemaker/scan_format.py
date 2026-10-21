@@ -4,6 +4,7 @@ rate chart, line movement, key stats). Every sentence is built from numbers the 
 the data sources produced; nothing is invented (no sharp-money or position-defense claims)."""
 import datetime as dt
 import os
+from typing import Optional
 from zoneinfo import ZoneInfo
 
 import discord
@@ -334,20 +335,31 @@ def scan_messages(sections: list, date: str, cfg, title: str = "") -> list:
             messages.append(([_pick_embed(r, ev, pr, [x for x in by_game[ev.market.game_id] if x != r],
                                           r == 1, ctx, hist)], detail))
 
-    messages.append(([_long_term(ranked, by_game), _scoping(sections)], None))
+    notes = _staking_note(ranked, by_game)
+    messages.append((([notes] if notes else []) + [_scoping(sections)], None))
     return messages
 
 
-def _long_term(ranked: list, by_game: dict) -> discord.Embed:
-    paras = ["**A bet can lose and still have been a great decision.** If a play priced with a "
-             "real edge misses tonight, that's one result, not a verdict. You want to make the "
-             "bet a thousand times, not win it once.",
-             "**A bet can win and still have been a bad decision.** A hot five-game streak on a "
-             "player whose season rate sits below the price is a losing proposition even when "
-             "it cashes. That's why plays like that are moved to the notes below.",
-             "The goal is repetition: find places where the true probability beats the implied "
-             "probability, size so a losing streak doesn't break you, and let the math work "
-             "over hundreds of wagers."]
+TIPS = ["**A bet can lose and still have been a great decision.** If a play priced with a "
+        "real edge misses tonight, that's one result, not a verdict. You want to make the "
+        "bet a thousand times, not win it once.",
+        "**A bet can win and still have been a bad decision.** A hot five-game streak on a "
+        "player whose season rate sits below the price is a losing proposition even when "
+        "it cashes. That's why plays like that are moved to the notes at the end of each scan.",
+        "The goal is repetition: find places where the true probability beats the implied "
+        "probability, size so a losing streak doesn't break you, and let the math work "
+        "over hundreds of wagers."]
+
+
+def tips_embed() -> discord.Embed:
+    """/tips: how to think about these bets long-term."""
+    return discord.Embed(title="🧠 How to Think About These Long-Term",
+                         description="\n\n".join(TIPS), color=PURPLE)
+
+
+def _staking_note(ranked: list, by_game: dict) -> Optional[discord.Embed]:
+    """Tonight's price range and correlated groups (the general advice lives in /tips)."""
+    paras = []
     if ranked:
         odds = [ev.best.best_odds for ev, _s, _p in ranked]
         avg_gap = sum(ev.best.gap for ev, _s, _p in ranked) / len(ranked)
@@ -359,9 +371,11 @@ def _long_term(ranked: list, by_game: dict) -> discord.Embed:
         if groups:
             staking += " Correlated groups: " + "; ".join(
                 " + ".join(f"#{r}" for r in g) for g in groups) + ". They aren't independent bets."
-        paras.append(staking)
-    return discord.Embed(title="🧠 How to Think About These Long-Term",
-                         description=_clip("\n\n".join(paras), 4096), color=PURPLE)
+        paras.append(staking + " (`/tips` for how to think about these long-term.)")
+    if not paras:
+        return None
+    return discord.Embed(title="📌 Staking Note", description=_clip("\n\n".join(paras), 4096),
+                         color=PURPLE)
 
 
 PASS_GROUPS = (   # pass reason prefix -> plain-English label for the summary

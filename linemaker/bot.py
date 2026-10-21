@@ -608,6 +608,12 @@ async def record_cmd(interaction: discord.Interaction, days: Optional[int] = 30)
         await _report_error(interaction, e)
 
 
+@bot.tree.command(name="tips", description="How to think about these bets long-term")
+async def tips_cmd(interaction: discord.Interaction):
+    from .scan_format import tips_embed
+    await interaction.response.send_message(embed=tips_embed())
+
+
 @bot.tree.command(name="clv", description="Closing-line value: did the market move toward our picks?")
 @app_commands.describe(days="How many days back (default 14)")
 async def clv_cmd(interaction: discord.Interaction, days: Optional[int] = 14):
