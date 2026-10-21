@@ -1,0 +1,748 @@
+"""Discord bot front end.
+
+  DISCORD_TOKEN=... python -m linemaker.bot
+
+Environment:
+  DISCORD_TOKEN          bot token (required)
+  LINEMAKER_GUILD_ID     sync slash commands to one server instantly (optional; global sync
+                         can take up to an hour to appear)
+  LINEMAKER_TZ           timezone for "today" and the daily post (default America/New_York)
+  LINEMAKER_SNAPSHOTS    freeze directory (default ./snapshots)
+  LINEMAKER_CHANNEL_ID   channel for the automatic daily pro card (optional)
+  LINEMAKER_POST_TIME    daily post time, HH:MM in LINEMAKER_TZ (default 11:00)
+  Daily post source, first match wins:
+  LINEMAKER_SPORTS + LINEMAKER_PROJECTIONS_DIR   live odds (needs ODDS_API_KEY) joined with
+                         <PROJECTIONS_DIR>/<YYYY-MM-DD>.csv; SPORTS is e.g. "NBA,NHL,NFL"
+  LINEMAKER_SLATE_DIR    folder holding complete <YYYY-MM-DD>.csv pro slates
+  LINEMAKER_SPORTS alone (with FANTASYPROS_API_KEY)  FantasyPros projections, NBA/NFL/MLB
+  ODDS_API_KEY           The Odds API key (for /live, /odds, /quota)
+  ODDS_API_BOOKMAKERS    optional comma list, e.g. draftkings,fanduel,betrivers,williamhill_us
+  ANTHROPIC_API_KEY      enables plain-English chat (mention the bot, DM it, or talk in a
+                         chat channel); needs Message Content Intent on in the Developer Portal
+  LINEMAKER_CHAT_CHANNELS  comma list of channel IDs where every message is answered
+  LINEMAKER_HOME_CHANNEL   lock the bot to one channel (ID): every message there is answered,
+                         slash commands elsewhere are refused, DMs and @mentions elsewhere
+                         are ignored, and the daily post goes there
+"""
+import asyncio
+import csv
+import datetime as dt
+import io
+import logging
+import os
+import tempfile
+from typing import Optional
+from zoneinfo import ZoneInfo
+
+from .envfile import load_env
+
+load_env()  # .env in the working directory; real environment variables take priority
+load_env(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), ".env"))
+
+import discord
+from discord import app_commands
+from discord.ext import tasks
+
+from .config import Config
+from .devig import hold, no_vig, overround
+from .discord_format import chunk_embeds, lite_embeds
+from .scan_format import (chart_page, movement_page, odds_page, scan_messages,
+                          stats_page)
+from .freeze import Freezer, grade
+from .market import load_markets
+from .odds import american_to_decimal, expected_value, fair_odds, fmt_money, fmt_odds, implied_probability, parse_odds
+from .pipeline import run
+from .live import auto_results, board_lines, fetch_feed, odds_template, read_projections, rows_csv, run_live
+from .oddsapi import SPORT_KEYS, OddsAPI, feed_row
+from .pro import ProConfig, load_pro_markets, run_pro
+from .pro_report import render_pro
+from .report import render
+
+log = logging.getLogger("linemaker")
+TZ = ZoneInfo(os.environ.get("LINEMAKER_TZ", "America/New_York"))
+SNAPSHOTS = os.environ.get("LINEMAKER_SNAPSHOTS", "snapshots")
+MAX_UPLOAD = 2_000_000
+CHAT_TIMEOUT = int(os.environ.get("LINEMAKER_CHAT_TIMEOUT", "150"))
+
+
+def today() -> str:
+    return dt.datetime.now(TZ).date().isoformat()
+
+
+def _post_time() -> dt.time:
+    h, m = os.environ.get("LINEMAKER_POST_TIME", "11:00").split(":")
+    return dt.time(int(h), int(m), tzinfo=TZ)
+
+
+async def _save_attachment(att: discord.Attachment, suffix: str) -> str:
+    if att.size > MAX_UPLOAD:
+        raise ValueError(f"{att.filename} is too large ({att.size:,} bytes)")
+    fd, path = tempfile.mkstemp(suffix=suffix)
+    with os.fdopen(fd, "wb") as f:
+        f.write(await att.read())
+    return path
+
+
+PICK_DETAILS = {}          # button key -> pick detail (kept in memory until restart)
+MAX_DETAILS = 2000
+BUTTONS = (("odds", "Odds Comparison", "🏷️", odds_page), ("chart", "Hit Rate Chart", "📊", chart_page),
+           ("move", "Line Movement", "📉", movement_page), ("stats", "Key Stats", "📈", stats_page))
+
+
+class PickView(discord.ui.View):
+    """Odds Comparison · Hit Rate Chart · Line Movement · Key Stats, answered privately."""
+
+    def __init__(self, key: str, detail: Optional[dict] = None):
+        super().__init__(timeout=None)
+        detail = detail or {}
+        # Bet buttons open the book with the slip loaded (Discord caps button URLs at 512).
+        for label, url in (detail.get("links") or [])[:5]:
+            if url and len(url) <= 512:
+                book = next((b for b in ("FanDuel", "DraftKings") if b in label), label)
+                text = f"Bet on {label}" if label in ("FanDuel", "DraftKings") else label
+                self.add_item(discord.ui.Button(label=text[:80], url=url, row=1,
+                                                emoji="🟦" if book == "FanDuel" else "🟩"))
+        if "ev" not in detail and detail:
+            return   # a parlay: bet buttons only
+        for kind, label, emoji, page in BUTTONS:
+            button = discord.ui.Button(label=label, emoji=emoji, style=discord.ButtonStyle.secondary,
+                                       custom_id=f"lm:{kind}:{key}")
+            button.callback = self._handler(key, page)
+            self.add_item(button)
+
+    @staticmethod
+    def _handler(key, page):
+        async def callback(interaction: discord.Interaction):
+            detail = PICK_DETAILS.get(key)
+            if detail is None:
+                await interaction.response.send_message(
+                    "This card is from before the bot restarted. Ask again for fresh numbers.",
+                    ephemeral=True)
+                return
+            try:
+                await interaction.response.send_message(embed=page(detail), ephemeral=True)
+            except Exception as e:
+                await _report_error(interaction, e)
+        return callback
+
+
+def _remember(detail: dict) -> str:
+    import uuid
+    key = uuid.uuid4().hex[:16]
+    PICK_DETAILS[key] = detail
+    while len(PICK_DETAILS) > MAX_DETAILS:
+        PICK_DETAILS.pop(next(iter(PICK_DETAILS)))
+    return key
+
+
+async def _send_card(send, messages: list, markdown=None, filename=None):
+    """Post a value scan: header and board, then one message per pick with its buttons,
+    then the long-term and scoping notes. Plain embed lists are posted as-is."""
+    if messages and not isinstance(messages[0], tuple):
+        messages = [(messages, None)]
+    for embeds, detail in messages:
+        if detail is not None:
+            await send(embeds=embeds, view=PickView(_remember(detail), detail))
+            continue
+        for group in chunk_embeds(embeds):
+            await send(embeds=group)
+
+
+def build_pro(slate_path: str, date: str, cfg: ProConfig):
+    from .chat import enrich
+    markets = load_pro_markets(slate_path)
+    sections = []
+    for sport in sorted({m.sport for m in markets}):
+        res = run_pro([m for m in markets if m.sport == sport], date, cfg, Freezer(SNAPSHOTS, date))
+        sections.append((sport, res, enrich(res, sport, date)))
+    return scan_messages(sections, date, cfg), None
+
+
+def build_live(sports: list, projections: list, date: str, cfg: ProConfig,
+               props: Optional[bool] = None):
+    api = OddsAPI()
+    lr = run_live(api, sports, projections, date, TZ, cfg, Freezer(SNAPSHOTS, date), props)
+    from .chat import enrich
+    sections = [(sport, lr.result, enrich(lr.result, sport, date)) for sport in sports[:1]]
+    return scan_messages(sections, date, cfg, f"{'/'.join(sports)} Projection Check"), None, \
+        rows_csv(lr.rows)
+
+
+BLUE_BOARD = 0x3498DB
+SPORT_CHOICES = [app_commands.Choice(name=k, value=k) for k in SPORT_KEYS]
+FP_CHOICES = [app_commands.Choice(name=k, value=k)
+              for k in ("NBA", "WNBA", "NFL", "NCAAF", "MLB", "NHL")]
+KIND_CHOICES = [app_commands.Choice(name="Player props", value="props"),
+                app_commands.Choice(name="Moneylines, spreads, totals", value="games"),
+                app_commands.Choice(name="Live in-game lines", value="live")]
+
+
+def build_auto(sports: list, date: str, cfg: ProConfig, kind: str = "props",
+               refresh: bool = False):
+    """Uses the same cached odds as chat, so asking twice inside the window costs nothing."""
+    from .chat import enrich, slate_for
+    from .pro import rows_to_markets
+    sections = []
+    for sport in sports:
+        rows, slate, _left, warning, source = slate_for(sport, date, kind, refresh)
+        freezer, tracker = Freezer(SNAPSHOTS, date), None
+        if kind == "live":
+            from .live import live_settings
+            cfg, tracker = live_settings(ProConfig(), date)
+            freezer = None
+        res = run_pro(rows_to_markets(rows), date, cfg, freezer, tracker)
+        res.slate, res.source_warning, res.projection_source = slate, warning, source
+        res.kind = kind
+        from .chat import slate_age_minutes
+        res.odds_age = slate_age_minutes(sport, date, kind)
+        sections.append((sport, res, enrich(res, sport, date)))
+    return scan_messages(sections, date, cfg), None
+
+
+def build_lite(slate_path: str, date: str, cfg: Config):
+    res = run(load_markets(slate_path), date, cfg)
+    return lite_embeds(res, cfg), render(res, cfg)
+
+
+def home_channel() -> Optional[int]:
+    raw = os.environ.get("LINEMAKER_HOME_CHANNEL", "").strip()
+    return int(raw) if raw else None
+
+
+def in_home(channel, home: Optional[int]) -> bool:
+    """True when no home channel is set, or the channel (or a thread's parent) is it."""
+    if home is None:
+        return True
+    return getattr(channel, "id", None) == home or getattr(channel, "parent_id", None) == home
+
+
+class HomeChannelTree(app_commands.CommandTree):
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        home = home_channel()
+        if in_home(interaction.channel, home):
+            return True
+        await interaction.response.send_message(f"Linemaker only works in <#{home}>.",
+                                                ephemeral=True)
+        return False
+
+
+class LinemakerBot(discord.Client):
+    def __init__(self):
+        intents = discord.Intents.default()
+        self.chat = None
+        if os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("GEMINI_API_KEY"):
+            from .chat import LinemakerChat
+            self.chat = LinemakerChat()
+            intents.message_content = True   # privileged: enable it in the Developer Portal
+        super().__init__(intents=intents)
+        self.tree = HomeChannelTree(self)
+        self.home = home_channel()
+        self.chat_channels = {int(c) for c in
+                              os.environ.get("LINEMAKER_CHAT_CHANNELS", "").split(",") if c.strip()}
+        if self.home:
+            self.chat_channels.add(self.home)
+
+    async def setup_hook(self):
+        # Linemaker owns this application: each sync replaces the whole command list, so
+        # commands left over from whatever the bot ran before are removed.
+        guild_id = os.environ.get("LINEMAKER_GUILD_ID")
+        if guild_id:
+            guild = discord.Object(id=int(guild_id))
+            self.tree.copy_global_to(guild=guild)
+            await self.tree.sync(guild=guild)
+            # Clear old global commands too, or they'd show up next to the server ones.
+            self.tree.clear_commands(guild=None)
+            await self.tree.sync()
+        else:
+            await self.tree.sync()
+        log.info("slash commands synced: %s",
+                 ", ".join(sorted(c.name for c in self.tree.get_commands(
+                     guild=discord.Object(id=int(guild_id)) if guild_id else None))))
+        # The daily post spends credits every day, so it only runs when a time is set.
+        if os.environ.get("LINEMAKER_POST_TIME", "").strip() and (
+                os.environ.get("LINEMAKER_CHANNEL_ID") or self.home) and (
+                os.environ.get("LINEMAKER_SLATE_DIR") or os.environ.get("LINEMAKER_PROJECTIONS_DIR")
+                or os.environ.get("LINEMAKER_SPORTS")):
+            daily_post.change_interval(time=_post_time())
+            daily_post.start()
+        # Grade yesterday every morning (~2 credits per league with tracked game lines; props
+        # are free), which also re-fits the weights. LINEMAKER_AUTOGRADE_TIME= (blank) turns it off.
+        grade_at = os.environ.get("LINEMAKER_AUTOGRADE_TIME", "09:30").strip()
+        if grade_at:
+            h, m = grade_at.split(":")
+            daily_grade.change_interval(time=dt.time(int(h), int(m), tzinfo=TZ))
+            daily_grade.start()
+
+    async def on_ready(self):
+        log.info("logged in as %s (chat %s)", self.user,
+                 f"on: {self.chat.provider}" if self.chat else "off")
+        if self.home is not None:
+            ch = self.get_channel(self.home)
+            if ch is None:
+                log.warning("home channel %s not found: check LINEMAKER_HOME_CHANNEL, and that "
+                            "the bot has been added to that channel", self.home)
+            else:
+                log.info("home channel: #%s (answers every message there)", ch.name)
+        else:
+            log.info("no home channel set: answers @mentions and DMs")
+
+    async def on_message(self, message: discord.Message):
+        if message.author.bot:
+            return
+        where = f"#{getattr(message.channel, 'name', 'DM')} ({message.channel.id})"
+        if self.chat is None:
+            log.info("message in %s skipped: chat is off (no GEMINI_API_KEY or "
+                     "ANTHROPIC_API_KEY in .env)", where)
+            return
+        if self.home is not None:
+            if not in_home(message.channel, self.home):
+                log.info("message in %s skipped: not the home channel (%s)", where, self.home)
+                return
+        else:
+            is_dm = message.guild is None
+            mentioned = self.user in message.mentions
+            if not (is_dm or mentioned or message.channel.id in self.chat_channels):
+                log.info("message in %s skipped: bot not @mentioned (set "
+                         "LINEMAKER_HOME_CHANNEL to answer every message there)", where)
+                return
+        if not message.content and not message.attachments:
+            log.warning("message in %s arrived empty: turn on Message Content Intent in the "
+                        "Developer Portal (Bot -> Privileged Gateway Intents)", where)
+            return
+        log.info("message in %s from %s: answering", where, message.author.display_name)
+        text = message.content
+        for token in (f"<@{self.user.id}>", f"<@!{self.user.id}>"):
+            text = text.replace(token, "")
+        text = text.strip()
+        csv_text = None
+        for att in message.attachments:
+            if att.filename.lower().endswith(".csv") and att.size <= MAX_UPLOAD:
+                csv_text = (await att.read()).decode("utf-8-sig")
+                break
+        if not text and not csv_text:
+            return
+        from .chat import split_for_discord
+        try:
+            async with message.channel.typing():
+                turn = await asyncio.wait_for(
+                    self.chat.respond(message.channel.id, message.author.display_name,
+                                      text or "Price the attached projections.", csv_text),
+                    timeout=CHAT_TIMEOUT)
+        except asyncio.TimeoutError:
+            log.warning("chat timed out after %ss", CHAT_TIMEOUT)
+            await message.reply(f"⏱️ That took longer than {CHAT_TIMEOUT}s, so I stopped. The "
+                                "console log shows which step was slow. Try again, or use "
+                                "`/picks` directly.")
+            return
+        except Exception as e:
+            log.exception("chat failed")
+            await message.reply(f"⚠️ Something went wrong: {type(e).__name__}: {e}")
+            return
+        chunks = split_for_discord(turn.text)
+        files = [discord.File(io.BytesIO(md.encode()), filename=name) for name, md in turn.files]
+        cards = []
+        if turn.results:
+            if all((ex or {}).get("mode") == "volume" for _s, _r, ex in turn.results):
+                from .pro import volume_config
+                from .scan_format import volume_messages
+                cards = volume_messages(turn.results, today(), volume_config())
+            else:
+                cards = scan_messages(turn.results, today(), ProConfig())
+        none = discord.AllowedMentions.none()
+        for i, chunk in enumerate(chunks):
+            last = i == len(chunks) - 1
+            send = message.reply if i == 0 else message.channel.send
+            await send(chunk, files=files if last else [], allowed_mentions=none)
+        if cards:
+            first = not chunks
+
+            async def send_cards(**kw):
+                nonlocal first
+                fn = message.reply if first else message.channel.send
+                first = False
+                return await fn(allowed_mentions=none, **kw)
+            await _send_card(send_cards, cards)
+
+
+bot = LinemakerBot()
+
+
+async def _report_error(interaction: discord.Interaction, err: Exception):
+    log.exception("command failed")
+    msg = f"⚠️ {type(err).__name__}: {err}"
+    if "OUT_OF_USAGE_CREDITS" in str(err) or "401" in str(err):
+        from .chat import friendly_error
+        msg = friendly_error("Odds", err)
+    if interaction.response.is_done():
+        await interaction.followup.send(msg, ephemeral=True)
+    else:
+        await interaction.response.send_message(msg, ephemeral=True)
+
+
+@bot.tree.command(name="pro", description="Simulation + de-vig + market-blend card from a slate CSV")
+@app_commands.describe(
+    slate="Pro slate CSV", date="Slate date YYYY-MM-DD (default today)",
+    odds_min="Shortest odds allowed, e.g. -200", odds_max="Longest odds allowed, e.g. -1000",
+    min_prob="Blended probability floor, e.g. 0.70",
+    confirmed_only="Only price games with confirmed lineups/inactives",
+    devig="De-vig method (default proportional)")
+@app_commands.choices(devig=[app_commands.Choice(name="proportional", value="proportional"),
+                             app_commands.Choice(name="shin", value="shin")])
+async def pro_cmd(interaction: discord.Interaction, slate: discord.Attachment,
+                  date: Optional[str] = None, odds_min: Optional[int] = None,
+                  odds_max: Optional[int] = None, min_prob: Optional[float] = None,
+                  confirmed_only: bool = False,
+                  devig: Optional[app_commands.Choice[str]] = None):
+    await interaction.response.defer(thinking=True)
+    try:
+        date = date or today()
+        cfg = ProConfig(min_odds=odds_min, max_odds=odds_max, min_prob=min_prob,
+                        confirmed_only=confirmed_only,
+                        devig_method=devig.value if devig else "proportional")
+        path = await _save_attachment(slate, ".csv")
+        try:
+            embeds, md = await asyncio.to_thread(build_pro, path, date, cfg)
+        finally:
+            os.unlink(path)
+        await _send_card(interaction.followup.send, embeds, md, f"pro_card_{date}.md")
+    except Exception as e:
+        await _report_error(interaction, e)
+
+
+@bot.tree.command(name="lite", description="Hit-rate probability-gap card from a slate CSV")
+@app_commands.describe(
+    slate="Lite slate CSV", date="Slate date YYYY-MM-DD (default today)",
+    odds_min="Shortest odds allowed (default -200)", odds_max="Longest odds allowed (default -1000)",
+    min_prob="True-probability floor (default 0.70)")
+async def lite_cmd(interaction: discord.Interaction, slate: discord.Attachment,
+                   date: Optional[str] = None, odds_min: Optional[int] = None,
+                   odds_max: Optional[int] = None, min_prob: Optional[float] = None):
+    await interaction.response.defer(thinking=True)
+    try:
+        date = date or today()
+        cfg = Config()
+        for attr, val in (("min_odds", odds_min), ("max_odds", odds_max),
+                          ("min_true_prob", min_prob)):
+            if val is not None:
+                setattr(cfg, attr, val)
+        path = await _save_attachment(slate, ".csv")
+        try:
+            embeds, md = await asyncio.to_thread(build_lite, path, date, cfg)
+        finally:
+            os.unlink(path)
+        await _send_card(interaction.followup.send, embeds, md, f"card_{date}.md")
+    except Exception as e:
+        await _report_error(interaction, e)
+
+
+TRACKING = os.environ.get("LINEMAKER_TRACKING_DIR", "tracking")
+from .grading import grade_day  # noqa: E402  (shared with chat's grade tool)
+
+
+@bot.tree.command(name="grade", description="Score a day's picks and log results for calibration")
+@app_commands.describe(results="Optional results CSV (props are scored from box scores automatically)",
+                       date="Slate date YYYY-MM-DD (default today)",
+                       auto="Fetch final scores for game lines from The Odds API (default on)")
+async def grade_cmd(interaction: discord.Interaction, results: Optional[discord.Attachment] = None,
+                    date: Optional[str] = None, auto: bool = True):
+    await interaction.response.defer(thinking=True)
+    try:
+        date = date or today()
+        rows = []
+        if results is not None:
+            if results.size > MAX_UPLOAD:
+                raise ValueError("results file too large")
+            rows = list(csv.DictReader(io.StringIO((await results.read()).decode("utf-8-sig"))))
+        summary, remaining, tracked = await asyncio.to_thread(grade_day, date, rows, auto)
+        if not summary and not tracked:
+            await interaction.followup.send(f"Nothing graded for {date} yet: games may not be "
+                                            "final, or nothing was tracked that day.")
+            return
+        lines = summary + [f"- 📊 Results logged for **{tracked}** tracked markets "
+                           "(`/calibrate` shows the full report)"]
+        embed = discord.Embed(title=f"📈 Grading · {date}", description="\n".join(lines),
+                              color=BLUE_BOARD)
+        if remaining is not None:
+            embed.set_footer(text=f"Game lines scored from final scores · credits left: {remaining}")
+        await interaction.followup.send(embed=embed)
+    except Exception as e:
+        await _report_error(interaction, e)
+
+
+@bot.tree.command(name="calibrate", description="Test blend weights against graded results")
+@app_commands.describe(days="How many days of tracked results to use (default all)")
+async def calibrate_cmd(interaction: discord.Interaction, days: Optional[int] = None):
+    await interaction.response.defer(thinking=True)
+    try:
+        from .tracking import calibrate, load_records
+        report = await asyncio.to_thread(lambda: calibrate(load_records(TRACKING, days, today())))
+        body = report.replace("# 🧪 Linemaker Calibration\n\n", "")
+        embed = discord.Embed(title="🧪 Linemaker Calibration", color=0x9B59B6,
+                              description=body[:4000])
+        from .autotune import autotune_on, current_summary
+        embed.set_footer(text=(current_summary() + " · re-fit automatically after every grade"
+                               if autotune_on() else
+                               "Auto-tuning is off: change LINEMAKER_MODEL_WEIGHT in .env and restart")[:2048])
+        await interaction.followup.send(embed=embed)
+    except Exception as e:
+        await _report_error(interaction, e)
+
+
+@bot.tree.command(name="devig", description="Fair probabilities, overround and hold for a 2- or 3-way market")
+@app_commands.describe(side_a="Odds for one side: -115, +150 or decimal 2.30",
+                       side_b="Odds for the other side",
+                       side_c="Third outcome for 3-way markets (e.g. the draw)",
+                       method="De-vig method (default proportional)")
+@app_commands.choices(method=[app_commands.Choice(name="proportional", value="proportional"),
+                              app_commands.Choice(name="shin", value="shin")])
+async def devig_cmd(interaction: discord.Interaction, side_a: str, side_b: str,
+                    side_c: Optional[str] = None,
+                    method: Optional[app_commands.Choice[str]] = None):
+    try:
+        odds = [parse_odds(x) for x in (side_a, side_b, side_c) if x]
+        how = method.value if method else "proportional"
+        fair = no_vig(*odds, method=how)
+        lines = [f"{fmt_odds(o):>6}  implied {implied_probability(o):6.2%}  fair {p:6.2%}  "
+                 f"fair odds {fmt_odds(fair_odds(p)):>5} / {1 / p:.2f}"
+                 for o, p in zip(odds, fair)]
+        lines.append(f"total implied {1 + overround(*odds):.2%} · overround {overround(*odds):.2%}"
+                     f" · hold {hold(*odds):.2%} · {how}")
+        await interaction.response.send_message("```\n" + "\n".join(lines) + "\n```")
+    except Exception as e:
+        await _report_error(interaction, e)
+
+
+@bot.tree.command(name="ev", description="Expected value of a bet at a price, per $100")
+@app_commands.describe(probability="Your win probability, as 38 or 0.38",
+                       odds="Price: +200, -110 or decimal 3.00",
+                       stake="Stake in dollars (default 100)")
+async def ev_cmd(interaction: discord.Interaction, probability: float, odds: str,
+                 stake: float = 100.0):
+    try:
+        p = probability / 100 if probability > 1 else probability
+        o = parse_odds(odds)
+        ev = expected_value(p, o, stake)
+        verdict = "✅ positive EV" if ev > 0 else "❌ negative EV"
+        await interaction.response.send_message(
+            f"{p:.1%} at {fmt_odds(o)} ({american_to_decimal(o):.2f}): EV **{fmt_money(ev)}** on "
+            f"${stake:g} · break-even {implied_probability(o):.2%} · fair {fmt_odds(fair_odds(p))}"
+            f" · {verdict}")
+    except Exception as e:
+        await _report_error(interaction, e)
+
+
+@bot.tree.command(name="fair", description="Convert a win probability to fair American odds")
+@app_commands.describe(probability="Win probability, as 58 or 0.58")
+async def fair_cmd(interaction: discord.Interaction, probability: float):
+    try:
+        p = probability / 100 if probability > 1 else probability
+        await interaction.response.send_message(f"{p:.1%} → fair **{fmt_odds(fair_odds(p))}**")
+    except Exception as e:
+        await _report_error(interaction, e)
+
+
+@bot.tree.command(name="live", description="Live Odds API prices + your projections → pro card")
+@app_commands.describe(sport="League", projections="Projections CSV (sport, subject, market, mean or inputs)",
+                       date="Slate date YYYY-MM-DD (default today)",
+                       props="Fetch player props (default: only if a projection needs them)",
+                       devig="De-vig method (default proportional)")
+@app_commands.choices(sport=SPORT_CHOICES,
+                      devig=[app_commands.Choice(name="proportional", value="proportional"),
+                             app_commands.Choice(name="shin", value="shin")])
+async def live_cmd(interaction: discord.Interaction, sport: app_commands.Choice[str],
+                   projections: discord.Attachment, date: Optional[str] = None,
+                   props: Optional[bool] = None,
+                   devig: Optional[app_commands.Choice[str]] = None):
+    await interaction.response.defer(thinking=True)
+    try:
+        date = date or today()
+        cfg = ProConfig(devig_method=devig.value if devig else "proportional")
+        if projections.size > MAX_UPLOAD:
+            raise ValueError("projections file too large")
+        rows = read_projections(io.StringIO((await projections.read()).decode("utf-8-sig")))
+        embeds, md, slate = await asyncio.to_thread(build_live, [sport.value], rows, date, cfg, props)
+        await _send_card(interaction.followup.send, embeds, md, f"live_card_{sport.value}_{date}.md")
+        await interaction.followup.send(file=discord.File(
+            io.BytesIO(slate.encode()), filename=f"live_slate_{sport.value}_{date}.csv"))
+    except Exception as e:
+        await _report_error(interaction, e)
+
+
+@bot.tree.command(name="picks", description="Today's best plays: projections vs live FD/DK odds")
+@app_commands.describe(sport="League", bet="Player props (default) or game lines",
+                       date="Slate date YYYY-MM-DD (default today)",
+                       refresh="Buy fresh odds now instead of reusing the last 30 minutes")
+@app_commands.choices(sport=FP_CHOICES, bet=KIND_CHOICES)
+async def picks_cmd(interaction: discord.Interaction, sport: app_commands.Choice[str],
+                    bet: Optional[app_commands.Choice[str]] = None, date: Optional[str] = None,
+                    refresh: bool = False):
+    await interaction.response.defer(thinking=True)
+    try:
+        date = date or today()
+        kind = bet.value if bet else "props"
+        embeds, md = await asyncio.to_thread(build_auto, [sport.value], date, ProConfig(), kind,
+                                             refresh)
+        await _send_card(interaction.followup.send, embeds, md, f"picks_{sport.value}_{date}.md")
+    except Exception as e:
+        await _report_error(interaction, e)
+
+
+@bot.tree.command(name="parlay", description="Volume mode: likeliest legs and ready-made parlays")
+@app_commands.describe(sport="League", bet="Player props (default) or game lines",
+                       date="Slate date YYYY-MM-DD (default today)",
+                       refresh="Buy fresh odds now instead of reusing the last 30 minutes")
+@app_commands.choices(sport=FP_CHOICES, bet=KIND_CHOICES)
+async def parlay_cmd(interaction: discord.Interaction, sport: app_commands.Choice[str],
+                     bet: Optional[app_commands.Choice[str]] = None, date: Optional[str] = None,
+                     refresh: bool = False):
+    await interaction.response.defer(thinking=True)
+    try:
+        date = date or today()
+
+        def work():
+            from .chat import LinemakerChat
+            from .pro import volume_config
+            from .scan_format import volume_messages
+            helper = bot.chat or _TOOL_HELPER.setdefault("chat", LinemakerChat.__new__(LinemakerChat))
+            if not hasattr(helper, "_feed_cache"):
+                helper._feed_cache = {}
+            ctx = {"files": [], "attached_rows": []}
+            LinemakerChat.run_tool(helper, "find_plays", {"sport": sport.value, "mode": "volume",
+                                                          "date": date,
+                                                          "kind": bet.value if bet else "props",
+                                                          "refresh": refresh},
+                                                   ctx)
+            return volume_messages(ctx["results"], date, volume_config())
+        messages = await asyncio.to_thread(work)
+        await _send_card(interaction.followup.send, messages)
+    except Exception as e:
+        await _report_error(interaction, e)
+
+
+_TOOL_HELPER = {}
+
+
+@bot.tree.command(name="odds", description="Today's market board (no-vig) + a CSV to fill with projections")
+@app_commands.describe(sport="League", date="Slate date YYYY-MM-DD (default today)",
+                       props="Include player props in the CSV (costs credits per game)")
+@app_commands.choices(sport=SPORT_CHOICES)
+async def odds_cmd(interaction: discord.Interaction, sport: app_commands.Choice[str],
+                   date: Optional[str] = None, props: bool = False):
+    await interaction.response.defer(thinking=True)
+    try:
+        date = date or today()
+
+        def work():
+            api = OddsAPI()
+            feed = fetch_feed(api, [sport.value], date, TZ, props)
+            return board_lines(feed), rows_csv([feed_row(f) for f in feed]), api.quota.remaining
+
+        lines, template, remaining = await asyncio.to_thread(work)
+        embed = discord.Embed(title=f"📋 {sport.value} board — {date}", color=BLUE_BOARD)
+        by_game = {}
+        for game, _kind, desc, n_books in lines:
+            by_game.setdefault(game, []).append(f"{desc} ({n_books} books)")
+        for game, descs in list(by_game.items())[:25]:
+            embed.add_field(name=game[:256], value="\n".join(descs)[:1024], inline=False)
+        if not by_game:
+            embed.description = "No games with prices on this date."
+        embed.set_footer(text=f"Consensus no-vig probabilities · credits left: {remaining} · "
+                              "fill `mean` in the CSV and pass it to /live")
+        await interaction.followup.send(embed=embed, file=discord.File(
+            io.BytesIO(template.encode()), filename=f"odds_{sport.value}_{date}.csv"))
+    except Exception as e:
+        await _report_error(interaction, e)
+
+
+@bot.tree.command(name="quota", description="The Odds API credits left on every key (free call)")
+async def quota_cmd(interaction: discord.Interaction):
+    try:
+        from .oddsapi import key_quotas
+        rows = await asyncio.to_thread(key_quotas)
+        if not rows:
+            await interaction.response.send_message("No ODDS_API_KEY set in .env.", ephemeral=True)
+            return
+        lines, total = [], 0
+        for n, masked, remaining, used, error, active in rows:
+            tag = " · **in use**" if active else ""
+            if error:
+                lines.append(f"🔴 Key #{n} ({masked}): {error}{tag}")
+                continue
+            total += remaining or 0
+            dot = "🟢" if (remaining or 0) > 50 else ("🟡" if remaining else "🔴")
+            lines.append(f"{dot} Key #{n} ({masked}): **{remaining}** left · {used} used{tag}")
+        embed = discord.Embed(title="🔋 The Odds API credits", color=BLUE_BOARD,
+                              description="\n".join(lines))
+        embed.add_field(name="Total remaining", value=f"**{total}** across {len(rows)} "
+                                                      f"key{'s' if len(rows) != 1 else ''}")
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+    except Exception as e:
+        await _report_error(interaction, e)
+
+
+@tasks.loop(time=dt.time(9, 30, tzinfo=TZ))
+async def daily_grade():
+    day = (dt.datetime.now(TZ).date() - dt.timedelta(days=1)).isoformat()
+    try:
+        summary, remaining, tracked = await asyncio.to_thread(grade_day, day, [], True)
+    except Exception:
+        log.exception("daily grade failed")
+        return
+    log.info("daily grade %s: %d tracked markets graded", day, tracked)
+    channel_id = os.environ.get("LINEMAKER_CHANNEL_ID") or bot.home
+    channel = bot.get_channel(int(channel_id)) if channel_id else None
+    if channel is None or not (summary or tracked):
+        return
+    embed = discord.Embed(title=f"📈 Morning grade · {day}", color=BLUE_BOARD,
+                          description="\n".join(summary + [f"- 📊 Results logged for **{tracked}** "
+                                                           "tracked markets"])[:4000])
+    if remaining is not None:
+        embed.set_footer(text=f"Credits left: {remaining}")
+    await channel.send(embed=embed)
+
+
+@tasks.loop(time=dt.time(11, 0, tzinfo=TZ))
+async def daily_post():
+    date = today()
+    channel = bot.get_channel(int(os.environ.get("LINEMAKER_CHANNEL_ID") or bot.home))
+    if channel is None:
+        log.warning("daily post skipped: channel not found")
+        return
+    sports = [s.strip() for s in os.environ.get("LINEMAKER_SPORTS", "").split(",") if s.strip()]
+    proj_dir = os.environ.get("LINEMAKER_PROJECTIONS_DIR")
+    try:
+        if sports and not proj_dir:   # FantasyPros or the free ESPN model
+            embeds, md = await asyncio.to_thread(build_auto, sports, date, ProConfig())
+        elif sports and proj_dir:
+            path = os.path.join(proj_dir, f"{date}.csv")
+            if not os.path.exists(path):
+                log.warning("daily post skipped: no projections at %s", path)
+                return
+            embeds, md, _ = await asyncio.to_thread(
+                build_live, sports, read_projections(path), date, ProConfig())
+        else:
+            path = os.path.join(os.environ.get("LINEMAKER_SLATE_DIR", ""), f"{date}.csv")
+            if not os.path.exists(path):
+                log.warning("daily post skipped: no slate at %s", path)
+                return
+            embeds, md = await asyncio.to_thread(build_pro, path, date, ProConfig())
+        await _send_card(channel.send, embeds, md, f"pro_card_{date}.md")
+    except Exception:
+        log.exception("daily post failed")
+
+
+@daily_post.before_loop
+async def _wait_ready():
+    await bot.wait_until_ready()
+
+
+def main():
+    logging.basicConfig(level=logging.INFO)
+    token = os.environ.get("DISCORD_TOKEN")
+    if not token:
+        raise SystemExit("Set DISCORD_TOKEN to your bot token.")
+    bot.run(token, log_handler=None)
+
+
+if __name__ == "__main__":
+    main()

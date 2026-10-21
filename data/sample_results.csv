@@ -1,0 +1,10 @@
+game_id,subject,market,line,actual,close_a_odds,close_b_odds,close_d_odds
+NFL1,RB Example,rushing yards,60.5,74,-135,+115,
+NFL1,QB Example,rushing yards,28.5,22,-125,+105,
+NFL1,WR Example,receiving yards,64.5,81,-120,+100,
+NFL1,TE Example,anytime td,0.5,1,+150,-190,
+NFL1,Example Lions,spread,-3.5,7,-115,-105,
+NHL1,Wing Example,shots on goal,2.5,2,-150,+125,
+MLB1,SP Example,strikeouts,5.5,6,-120,+100,
+UCL1,Example FC,match result,0,1,2.00,3.90,3.50
+LIGA1,Example CF vs Example Real,total goals,2.5,3,2.10,1.75,

@@ -1,0 +1,3 @@
+{"sport": "NBA", "count": 2, "injuries": [
+  {"player_id": 1, "name": "José Example Jr.", "injury_type": "Ankle", "status": "DTD", "status_short": "DTD"},
+  {"player_id": 9, "name": "Hurt Example", "injury_type": "Knee", "status": "Out", "status_short": "O"}]}

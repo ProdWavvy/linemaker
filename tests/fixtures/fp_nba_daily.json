@@ -1,0 +1,7 @@
+{"season": "2026", "date": "2026-10-21", "type": "daily", "count": 2,
+ "player": [
+  {"fpid": 1, "player_id": 1, "name": "Jose Example", "position_id": "PG", "team_id": "ATL",
+   "points": 27.1, "rebounds": 5.2, "assists": 7.4, "three_points_made": 2.6, "minutes": 35.5},
+  {"fpid": 2, "player_id": 2, "name": "Bench Example", "position_id": "C", "team_id": "ATL",
+   "points": 0, "rebounds": null, "assists": 0.4, "three_points_made": 0, "minutes": 4.0}
+ ]}

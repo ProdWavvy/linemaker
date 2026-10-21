@@ -1,0 +1,5 @@
+[{"id": "ucl1", "sport_key": "soccer_uefa_champs_league", "commence_time": "2026-10-21T19:00:00Z",
+  "home_team": "Example FC", "away_team": "Example United",
+  "bookmakers": [{"key": "draftkings", "title": "DraftKings", "markets": [
+    {"key": "h2h", "outcomes": [{"name": "Example FC", "price": 105}, {"name": "Draw", "price": 240}, {"name": "Example United", "price": 250}]},
+    {"key": "totals", "outcomes": [{"name": "Over", "price": 115, "point": 2.5}, {"name": "Under", "price": -140, "point": 2.5}]}]}]}]

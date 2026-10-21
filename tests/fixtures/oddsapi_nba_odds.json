@@ -1,0 +1,16 @@
+[
+  {"id": "evt1", "sport_key": "basketball_nba", "commence_time": "2026-10-21T23:30:00Z",
+   "home_team": "Home Hawks", "away_team": "Road Bulls",
+   "bookmakers": [
+     {"key": "draftkings", "title": "DraftKings", "markets": [
+       {"key": "h2h", "outcomes": [{"name": "Home Hawks", "price": -150}, {"name": "Road Bulls", "price": 130}]},
+       {"key": "spreads", "outcomes": [{"name": "Home Hawks", "price": -110, "point": -3.5}, {"name": "Road Bulls", "price": -110, "point": 3.5}]},
+       {"key": "totals", "outcomes": [{"name": "Over", "price": -110, "point": 228.5}, {"name": "Under", "price": -110, "point": 228.5}]}]},
+     {"key": "fanduel", "title": "FanDuel", "markets": [
+       {"key": "h2h", "outcomes": [{"name": "Home Hawks", "price": -145}, {"name": "Road Bulls", "price": 124}]},
+       {"key": "spreads", "outcomes": [{"name": "Home Hawks", "price": -105, "point": -3.5}, {"name": "Road Bulls", "price": -115, "point": 3.5}]},
+       {"key": "totals", "outcomes": [{"name": "Over", "price": -108, "point": 229.5}, {"name": "Under", "price": -112, "point": 229.5}]}]}
+   ]},
+  {"id": "evt2", "sport_key": "basketball_nba", "commence_time": "2026-10-22T23:00:00Z",
+   "home_team": "Tomorrow Home", "away_team": "Tomorrow Away", "bookmakers": []}
+]

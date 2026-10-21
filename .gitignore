@@ -1,0 +1,9 @@
+# Secrets and per-machine state: never committed
+.env
+tracking/
+cache/
+snapshots/
+.venv/
+__pycache__/
+*.pyc
+*.tmp

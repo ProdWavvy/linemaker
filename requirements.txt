@@ -1,0 +1,5 @@
+discord.py==2.5.2
+tzdata>=2024.1
+numpy>=1.26
+anthropic>=1.17      # optional: only for Claude chat
+google-genai>=2.32   # optional: only for Gemini chat
