@@ -68,3 +68,33 @@ class ScanEventsTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ArmTest(unittest.TestCase):
+    def test_your_phrases_route_to_the_right_league(self):
+        from linemaker.chat import quick_kind, quick_plays_request
+        for text, sport in (("best props for nhl", "NHL"), ("best props wnba", "WNBA"),
+                            ("best picks nfl", "NFL"), ("best props mlb", "MLB"),
+                            ("best college football props", "NCAAF"), ("best nba props", "NBA")):
+            self.assertEqual(quick_plays_request(text), [sport], text)
+            self.assertEqual(quick_kind(text), "props", text)
+
+    def test_asking_arms_that_league_for_the_day(self):
+        with tempfile.TemporaryDirectory() as tmp, \
+                mock.patch.dict(os.environ, {"LINEMAKER_CACHE_DIR": tmp, "LINEMAKER_PRETIP_MINUTES": "45",
+                                             "LINEMAKER_PRETIP_SPORTS": ""}):
+            self.assertEqual(alerts.pretip_sports("2026-10-21", ["NBA"]), ["NBA"])
+            self.assertTrue(alerts.arm_pretip("NHL", "2026-10-21"))
+            self.assertFalse(alerts.arm_pretip("NHL", "2026-10-21"))          # already on
+            self.assertEqual(alerts.pretip_sports("2026-10-21", ["NBA"]), ["NBA", "NHL"])
+            self.assertEqual(alerts.pretip_sports("2026-10-22", ["NBA"]), ["NBA"])   # next day: reset
+            with mock.patch.dict(os.environ, {"LINEMAKER_PRETIP_SPORTS": "all"}):
+                self.assertEqual(len(alerts.pretip_sports("2026-10-22", ["NBA"])), 6)
+            with mock.patch.dict(os.environ, {"LINEMAKER_PRETIP_MINUTES": ""}):
+                self.assertFalse(alerts.arm_pretip("MLB", "2026-10-21"))       # pre-tip off
+
+    def test_reply_says_so(self):
+        from linemaker.chat import pretip_note
+        self.assertEqual(pretip_note([]), "")
+        with mock.patch.dict(os.environ, {"LINEMAKER_PRETIP_MINUTES": "45"}):
+            self.assertIn("each NHL game about 45 minutes", pretip_note(["NHL"]))

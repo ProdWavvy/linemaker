@@ -257,6 +257,9 @@ KIND_CHOICES = [app_commands.Choice(name="Player props", value="props"),
                 app_commands.Choice(name="Live in-game lines", value="live")]
 
 
+ARMED_NOW = []   # leagues whose pre-tip scans the last /picks switched on
+
+
 def build_auto(sports: list, date: str, cfg: ProConfig, kind: str = "props",
                refresh: bool = False):
     """Uses the same cached odds as chat, so asking twice inside the window costs nothing."""
@@ -265,6 +268,10 @@ def build_auto(sports: list, date: str, cfg: ProConfig, kind: str = "props",
     sections = []
     for sport in sports:
         rows, slate, _left, warning, source = slate_for(sport, date, kind, refresh)
+        if kind == "props" and date == today():
+            from .alerts import arm_pretip
+            if arm_pretip(sport, date):
+                ARMED_NOW.append(sport)
         freezer, tracker = Freezer(SNAPSHOTS, date), None
         if kind == "live":
             from .live import live_settings
@@ -726,9 +733,13 @@ async def picks_cmd(interaction: discord.Interaction, sport: app_commands.Choice
     try:
         date = date or today()
         kind = bet.value if bet else "props"
+        ARMED_NOW.clear()
         embeds, md = await asyncio.to_thread(build_auto, [sport.value], date, ProConfig(), kind,
                                              refresh)
         await _send_card(interaction.followup.send, embeds, md, f"picks_{sport.value}_{date}.md")
+        from .chat import pretip_note
+        if pretip_note(ARMED_NOW):
+            await interaction.followup.send(pretip_note(ARMED_NOW))
     except Exception as e:
         await _report_error(interaction, e)
 
@@ -850,7 +861,8 @@ async def pretip_loop():
         return
     done = set(load_state(f"pretip_{date}.json", []))
     now = dt.datetime.now(dt.timezone.utc)
-    for sport in _alert_sports("LINEMAKER_PRETIP_SPORTS"):
+    from .alerts import pretip_sports
+    for sport in pretip_sports(date, _alert_sports("LINEMAKER_PRETIP_SPORTS")):
         try:
             events = await asyncio.to_thread(_todays_events, sport, date)
         except Exception as e:

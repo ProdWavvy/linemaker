@@ -33,6 +33,27 @@ def pretip_minutes() -> Optional[int]:
     return _env_int("LINEMAKER_PRETIP_MINUTES", 45)
 
 
+def arm_pretip(sport: str, date: str) -> bool:
+    """Asking for a league's props turns on its pre-tip scans for the rest of that day.
+    Returns True when this call switched it on (False if already on, or pre-tip is off)."""
+    if not pretip_minutes():
+        return False
+    armed = set(load_state(f"pretip_armed_{date}.json", []))
+    if sport.upper() in armed:
+        return False
+    armed.add(sport.upper())
+    save_state(f"pretip_armed_{date}.json", sorted(armed))
+    return True
+
+
+def pretip_sports(date: str, configured: list) -> list:
+    """Leagues to pre-tip scan today: LINEMAKER_PRETIP_SPORTS plus any you asked about."""
+    from .gamelogs import PATHS
+    raw = os.environ.get("LINEMAKER_PRETIP_SPORTS", "").strip().lower()
+    base = list(PATHS) if raw == "all" else list(configured)
+    return sorted(set(base) | {s for s in load_state(f"pretip_armed_{date}.json", []) if s in PATHS})
+
+
 def news_minutes() -> Optional[int]:
     return _env_int("LINEMAKER_NEWS_MINUTES", 12)
 

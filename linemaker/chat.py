@@ -326,6 +326,10 @@ class LinemakerChat:
             snaps = os.environ.get("LINEMAKER_SNAPSHOTS", "snapshots")
             rows, slate, remaining, warning, source = slate_for(sport, date, kind,
                                                                 bool(args.get("refresh")))
+            if kind == "props" and date == _today():
+                from .alerts import arm_pretip
+                if arm_pretip(sport, date):
+                    ctx.setdefault("armed", []).append(sport)
             cfg = volume_config() if mode == "volume" else ProConfig()
             freezer, tracker = Freezer(snaps, date), None
             if kind == "live":
@@ -423,12 +427,16 @@ class LinemakerChat:
                 except Exception as e:
                     errors.append(friendly_error(sport, e))
             reply = "\n".join(errors)   # the pick cards carry the answer
+
         elif self.provider == "gemini":
             reply = await self._gemini_reply(list(history), f"{author}: {text}", system, ctx)
         else:
             reply = await self._claude_reply(list(history), f"{author}: {text}", system, ctx)
         if not reply and not ctx.get("results"):
             reply = "I ran out of steps before finishing. Try asking a narrower question."
+        note = pretip_note(ctx.get("armed") or [])
+        if note:
+            reply = (reply + "\n" if reply else "") + note
         # Keep plain text only, so the next turn starts from a clean, append-only history.
         history.append({"role": "user", "content": f"{author}: {text}"})
         history.append({"role": "assistant", "content": reply or "\n\n".join(
@@ -582,6 +590,16 @@ def slate_for(sport: str, date: str, kind: str = "props", refresh: bool = False)
     return tuple(_SLATES[key][1:])
 
 
+def pretip_note(sports: list) -> str:
+    """'I'll re-check each NHL game before it starts' (when asking switched pre-tip scans on)."""
+    if not sports:
+        return ""
+    from .alerts import pretip_minutes
+    names = ", ".join(SPORT_DISPLAY.get(s, s) for s in sports)
+    return (f"⏰ I'll also re-check each {names} game about {pretip_minutes()} minutes before it "
+            "starts today (once lineups are in) and post anything new that clears the gates.")
+
+
 def drop_slate(sport: str, date: str, kind: str = "props"):
     """Forget a saved slate (news changed the projections, so the next ask re-prices)."""
     _SLATES.pop((sport, date, kind), None)
@@ -697,6 +715,7 @@ def summarize(lr, header: str, limit: int = 10) -> str:
 
 PLAYS_INTENT = re.compile(r"\b(best|top|good|any|today'?s|tonight'?s)\b.*\b(props?|plays?|picks?|bets?)\b"
                           r"|\b(props?|plays?|picks?)\b.*\b(today|tonight)\b", re.I)
+SPORT_DISPLAY = {"NCAAF": "college football"}
 GAME_LINE_WORDS = re.compile(r"\b(money ?lines?|ml|spreads?|totals?|over/unders?|o/u|"
                              r"winners?|who wins|game lines?)\b", re.I)
 REFRESH_WORDS = re.compile(r"\b(fresh|refresh|updated?|latest|new odds|re-?pull)\b", re.I)

@@ -138,7 +138,9 @@ updates never touch them. Logs: `sudo journalctl -u linemaker -f` and
 ## Alerts, stakes, bet log and reports
 
 - **Pre-tip scans** (`LINEMAKER_PRETIP_MINUTES`, default 45): props for each game shortly before
-  tip, posted only when something clears the gates.
+  tip, posted only when something clears the gates. Asking for a league's props ("best props
+  nhl", `/picks`) turns its pre-tip scans on for the rest of the day;
+  `LINEMAKER_PRETIP_SPORTS=all` runs them for every league daily.
 - **Injury news** (`LINEMAKER_NEWS_MINUTES`, default 12): a newly ruled-Out rotation player
   triggers a re-price of his game with the teammate usage bump (basketball).
 - **Projection adjustments** (basketball): teammate usage when someone is out, starter minutes
