@@ -323,11 +323,30 @@ def side_prices(m: ProMarket, allowed: Optional[tuple] = None) -> dict:
     return out
 
 
+def sharp_weights() -> dict:
+    """book_key -> weight in the consensus. LINEMAKER_SHARP_BOOKS, e.g. "Pinnacle:3,LowVig:2":
+    sharp books (high limits, low margins) move first and are right more often, so their
+    no-vig line counts more. Unlisted books weigh 1."""
+    out = {}
+    for part in os.environ.get("LINEMAKER_SHARP_BOOKS", "Pinnacle:3").split(","):
+        name, _, w = part.partition(":")
+        if name.strip():
+            try:
+                out[book_key(name)] = float(w) if w.strip() else 3.0
+            except ValueError:
+                continue
+    return out
+
+
 def market_probs(m: ProMarket, cfg: ProConfig):
     """(no-vig probability per side, avg hold, avg overround, vig assumed) or None.
-    With a multi-book feed, consensus is the average of each complete book's no-vig line."""
+    With a multi-book feed, consensus is the weighted average of each complete book's no-vig
+    line (sharp books such as Pinnacle count more; see sharp_weights)."""
     n = len(m.side_keys)
-    complete = [p[:n] for _, p in m.books if len(p) >= n and all(x is not None for x in p[:n])]
+    weights = sharp_weights()
+    named = [(b, p[:n]) for b, p in m.books if len(p) >= n and all(x is not None for x in p[:n])]
+    complete = [p for _b, p in named]
+    book_w = [weights.get(book_key(b), 1.0) for b, _p in named]
     if not complete and m.books and m.bet_type != "1x2":
         # One-sided feed (typical for alternate lines): average the posted side's implied
         # probability and remove an assumed hold.
@@ -341,7 +360,7 @@ def market_probs(m: ProMarket, cfg: ProConfig):
     if not complete and m.bet_type != "1x2":
         a, b = m.mkt_a_odds or m.best_a_odds, m.mkt_b_odds or m.best_b_odds
         if a is not None and b is not None:
-            complete = [[a, b]]
+            complete, book_w = [[a, b]], [1.0]
         elif a is not None or b is not None:
             p = implied_probability(a if a is not None else b) * (1 - cfg.assumed_hold)
             pa = p if a is not None else 1 - p
@@ -349,7 +368,9 @@ def market_probs(m: ProMarket, cfg: ProConfig):
     if not complete:
         return None
     fair = [no_vig(*prices, method=cfg.devig_method) for prices in complete]
-    probs = {side: sum(f[i] for f in fair) / len(fair) for i, side in enumerate(m.side_keys)}
+    total_w = sum(book_w)
+    probs = {side: sum(w * f[i] for w, f in zip(book_w, fair)) / total_w
+             for i, side in enumerate(m.side_keys)}
     avg_hold = sum(hold(*p) for p in complete) / len(complete)
     avg_over = sum(overround(*p) for p in complete) / len(complete)
     return probs, avg_hold, avg_over, False
