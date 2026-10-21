@@ -200,11 +200,18 @@ def _apply_usage(sport: str, date: str, rows: list, index: dict, hurt: dict):
             outs_by_team.setdefault(norm(hit[1]), []).append((player, hit[0]))
     for team, outs in outs_by_team.items():
         logs = {}
-        for player, aid in outs:
+
+        def fetch(item):
+            player, aid = item
             try:
-                logs[DISPLAY_NAMES.get(player, player.title())] = game_log(sport, aid, date)
+                return DISPLAY_NAMES.get(player, player.title()), game_log(sport, aid, date)
             except Exception as e:
                 log.warning("espn game log %s: %s", player, e)
+                return None
+        with ThreadPoolExecutor(max_workers=12) as pool:
+            for got in pool.map(fetch, outs):
+                if got:
+                    logs[got[0]] = got[1]
         boosts = usage_boosts(logs, by_team[team], sport)
         for r in rows:
             if norm(r["_team"]) != team:
@@ -216,6 +223,19 @@ def _apply_usage(sport: str, date: str, rows: list, index: dict, hurt: dict):
             if add > 0.05:
                 r["mean"] = f"{float(r['mean']) + add:.3f}"
                 r["notes"] += f"; +{add:.1f} with {', '.join(b['_why'])} out"
+
+
+def warm_up(sport: str, date: str):
+    """Fetch the slow, cacheable pieces ahead of the first scan: rosters and (basketball)
+    defense vs position, which reads ~200 box scores the first time each day."""
+    if sport not in PATHS:
+        return
+    index = roster_index(sport, date)
+    if sport in BASKETBALL and index:
+        from .dvp import position_factors
+        teams = {v[1] for v in index.values()} | {v[2] for v in index.values()}
+        position_factors(sport, date, teams)
+        log.info("warm-up %s: %d teams ready", sport, len(teams))
 
 
 def espn_projections(sport: str, date: str, wanted: dict) -> list:
@@ -289,7 +309,7 @@ def espn_projections(sport: str, date: str, wanted: dict) -> list:
         return rows
 
     out = []
-    with ThreadPoolExecutor(max_workers=6) as pool:
+    with ThreadPoolExecutor(max_workers=12) as pool:
         for rows in pool.map(one, wanted.items()):
             out += rows
     if sport in BASKETBALL:

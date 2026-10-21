@@ -587,7 +587,9 @@ def slate_for(sport: str, date: str, kind: str = "props", refresh: bool = False)
                             pre[1] if pre else None, pre[0] if pre else None)
     else:
         runner = run_games if kind == "games" else run_best
-        lr = runner(OddsAPI(), [sport], date, _tz(), ProConfig(), Freezer(snaps, date))
+        # Fetch and project only; every caller prices the saved rows itself, so pricing here
+        # too would run the whole slate through the engine twice.
+        lr = runner(OddsAPI(), [sport], date, _tz(), None, None)
     source = lr.result.projection_source
     # Once the ESPN model has taken over, the sample-data warning is resolved.
     warning = None if "ESPN" in source else lr.result.source_warning

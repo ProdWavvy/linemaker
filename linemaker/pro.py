@@ -14,7 +14,7 @@ from .devig import hold, no_vig, overround
 from .market import INJURY_EXCLUDE
 from .odds import expected_value, fair_odds, fmt_odds, implied_probability, parse_odds
 from .projection import Projection, ProjectionInputs, build_projection, soft_market_note
-from .sim import SimResult, default_sd, pick_dist, simulate, simulate_1x2
+from .sim import SimResult, default_sd, pick_dist, simulate, simulate_1x2, simulate_ladder
 
 def _env_num(name: str, cast):
     raw = os.environ.get(name, "").strip()
@@ -303,7 +303,9 @@ def run_sim(m: ProMarket, cfg: ProConfig) -> SimResult:
         return simulate_1x2(m.mean, m.mean_b, cfg.n_sims, seed_key=m.key)
     dist = m.dist or pick_dist(m.market, m.bet_type)
     sd = m.stdev or default_sd(dist, m.mean, m.market, m.sport, m.bet_type)
-    return simulate(m.mean, m.threshold, dist, sd, cfg.n_sims, seed_key=m.key)
+    # One simulation per player-stat (or game line); each alt line reads the same draws.
+    ladder = f"{m.date}|{m.game_id}|{m.subject}|{m.market}"
+    return simulate_ladder(m.mean, m.threshold, dist, sd, cfg.n_sims, seed_key=ladder)
 
 
 def side_prices(m: ProMarket, allowed: Optional[tuple] = None) -> dict:
@@ -460,7 +462,8 @@ def run_pro(markets: list, slate_date: str, cfg: ProConfig, freezer=None,
         from .tracking import Tracker
         tracker = Tracker(os.environ.get("LINEMAKER_TRACKING_DIR", "tracking"), slate_date)
     quals = []
-    for m in markets:
+    # Ladder lines next to each other, so they reuse one simulation (see simulate_ladder).
+    for m in sorted(markets, key=lambda m: (m.game_id, m.subject, m.market)):
         label = m.side_label("A")
         if m.date != slate_date:
             res.passes.append((label, f"not on today's slate ({m.date})"))

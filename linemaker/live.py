@@ -244,7 +244,10 @@ def price_feed(api: OddsAPI, feed: list, sports: list, projections: list, date: 
     rows, missing = merge(feed, [p for p in projections
                                  if p.get("sport", "").upper() in {s.upper() for s in sports}])
     lock_near_start(rows)
-    result = run_pro(rows_to_markets(rows), date, cfg, freezer, tracker)
+    if cfg is None:   # fetch-only (the caller prices the saved rows itself): skip the engine
+        result = ProResult(slate_date=date)
+    else:
+        result = run_pro(rows_to_markets(rows), date, cfg, freezer, tracker)
     result.slate = [g for s in sports for g in getattr(api, "slate", {}).get(s.upper(), [])]
     for p in missing:
         result.passes.append((f"{p['subject']} {p['market']}", "no odds found in the feed"))

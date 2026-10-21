@@ -62,7 +62,7 @@ log = logging.getLogger("linemaker")
 TZ = ZoneInfo(os.environ.get("LINEMAKER_TZ", "America/New_York"))
 SNAPSHOTS = os.environ.get("LINEMAKER_SNAPSHOTS", "snapshots")
 MAX_UPLOAD = 2_000_000
-CHAT_TIMEOUT = int(os.environ.get("LINEMAKER_CHAT_TIMEOUT", "150"))
+CHAT_TIMEOUT = int(os.environ.get("LINEMAKER_CHAT_TIMEOUT", "240"))
 
 
 def today() -> str:
@@ -378,6 +378,7 @@ class LinemakerBot(discord.Client):
     async def on_ready(self):
         log.info("logged in as %s (chat %s)", self.user,
                  f"on: {self.chat.provider}" if self.chat else "off")
+        asyncio.get_running_loop().create_task(_warm_up())
         if self.home is not None:
             ch = self.get_channel(self.home)
             if ch is None:
@@ -843,6 +844,16 @@ async def quota_cmd(interaction: discord.Interaction):
         await _report_error(interaction, e)
 
 
+async def _warm_up():
+    """Rosters and defense-vs-position for today, in the background (first scan is faster)."""
+    from .espn_projections import warm_up
+    for sport in _alert_sports():
+        try:
+            await asyncio.to_thread(warm_up, sport, today())
+        except Exception as e:
+            log.warning("warm-up %s: %s", sport, e)
+
+
 def _alert_sports(override: str = "") -> list:
     from .gamelogs import PATHS
     raw = (os.environ.get(override, "").strip() if override else "") or os.environ.get("LINEMAKER_SPORTS", "NBA")
@@ -968,6 +979,7 @@ async def daily_grade():
         log.exception("daily grade failed")
         return
     log.info("daily grade %s: %d tracked markets graded", day, tracked)
+    await _warm_up()
     channel_id = os.environ.get("LINEMAKER_CHANNEL_ID") or bot.home
     channel = bot.get_channel(int(channel_id)) if channel_id else None
     if channel is None or not (summary or tracked):

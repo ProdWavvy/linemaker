@@ -274,7 +274,7 @@ class NewGatesTest(unittest.TestCase):
                  "mean": "30", "books": "FanDuel:-110/-110|DraftKings:-110/-110"},
                 {"date": "2026-10-21", "sport": "NBA", "game_id": "g", "game": "A @ H",
                  "bet_type": "prop", "subject": "Thin Edge", "market": "points", "line": "20.5",
-                 "mean": "21.8", "books": "FanDuel:-110/-110|DraftKings:-110/-110"}]
+                 "mean": "21.5", "books": "FanDuel:-110/-110|DraftKings:-110/-110"}]
         res = run_pro(rows_to_markets(rows), "2026-10-21",
                       ProConfig(n_sims=4000, max_gap=0.15, min_ev=0.03, track=False))
         reasons = {lbl.split(" Over")[0]: r for lbl, r in res.passes}

@@ -133,8 +133,9 @@ def position_factors(sport: str, date: str, teams: set) -> dict:
             return team, None
         games = _team_games(sport, hit[0], date, n)
         totals, count = {}, 0
-        for eid in games:
-            s = _summary(sport, eid)
+        with ThreadPoolExecutor(max_workers=4) as inner:
+            summaries = list(inner.map(lambda eid: _summary(sport, eid), games))
+        for s in summaries:
             if not s:
                 continue
             count += 1
@@ -146,7 +147,7 @@ def position_factors(sport: str, date: str, teams: set) -> dict:
             return team, None
         return team, (count, {p: {m: v / count for m, v in st.items()} for p, st in totals.items()})
 
-    with ThreadPoolExecutor(max_workers=6) as pool:
+    with ThreadPoolExecutor(max_workers=12) as pool:
         for team, res in pool.map(one, sorted(teams)):
             if res:
                 per_team[norm(team)] = res

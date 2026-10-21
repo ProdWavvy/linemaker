@@ -120,7 +120,21 @@ def _get_web(path: str, **params) -> dict:
 
 
 def game_log(sport: str, athlete_id: str, date: str) -> list:
-    """Most recent games first, this season and last, up to SEASON_GAMES."""
+    """Most recent games first, this season and last, up to SEASON_GAMES. Cached for the day:
+    projections, injury adjustments and hit rates all read the same logs."""
+    return [dict(g) for g in _game_log(sport, athlete_id, date)]
+
+
+@functools.lru_cache(maxsize=2048)
+def _game_log_cached(sport: str, athlete_id: str, date: str) -> tuple:
+    return tuple(_game_log_fetch(sport, athlete_id, date))
+
+
+def _game_log(sport: str, athlete_id: str, date: str) -> tuple:
+    return _game_log_cached(sport, athlete_id, date)
+
+
+def _game_log_fetch(sport: str, athlete_id: str, date: str) -> list:
     year = _season_year(sport, date)
     games = []
     for season in (year, year - 1):
@@ -182,7 +196,7 @@ def roster_index(sport: str, date: str) -> dict:
         return [(a["displayName"], a["id"], name, opp, home) for a in people
                 if "displayName" in a and "id" in a]
 
-    with ThreadPoolExecutor(max_workers=6) as pool:
+    with ThreadPoolExecutor(max_workers=12) as pool:
         for players in pool.map(roster, teams):
             for display, aid, name, opp, home in players:
                 index[norm(display)] = (aid, name, opp, home)
@@ -261,7 +275,7 @@ def profiles_for(picks: list, sport: str, date: str) -> dict:
                                              opp, home, sport)
         return res
 
-    with ThreadPoolExecutor(max_workers=6) as pool:
+    with ThreadPoolExecutor(max_workers=12) as pool:
         for res in pool.map(build, wanted.items()):
             out.update(res)
     return out

@@ -142,6 +142,14 @@ def _standings_allowed(sport: str, season: int) -> dict:
     return out
 
 
+@functools.lru_cache(maxsize=256)
+def _team_stats(sport: str, team_id: str, season: int) -> dict:
+    try:
+        return _stat_map(_get(f"{PATHS[sport]}/teams/{team_id}/statistics", season=season))
+    except Exception:
+        return {}
+
+
 def team_contexts(sport: str, date: str, teams: set) -> dict:
     """norm(team) -> TeamContext for the given full team names."""
     if sport not in PATHS:
@@ -153,10 +161,17 @@ def team_contexts(sport: str, date: str, teams: set) -> dict:
     out = {}
 
     def stats_for(team_id, season):
-        try:
-            return _stat_map(_get(f"{PATHS[sport]}/teams/{team_id}/statistics", season=season))
-        except Exception:
-            return {}
+        return _team_stats(sport, team_id, season)
+
+    if sport in BASKETBALL:   # fetch every team's stats at once (they're cached for the run)
+        wanted = []
+        for full in teams:
+            hit = ids.get(norm(full))
+            if hit:
+                gp = current.get(norm(hit[1]), (0, None))[0]
+                wanted.append((hit[0], year if gp >= 10 else year - 1))
+        with ThreadPoolExecutor(max_workers=12) as pool:
+            list(pool.map(lambda a: stats_for(*a), wanted))
 
     for full in teams:
         key = norm(full)

@@ -130,6 +130,45 @@ def simulate(mean: float, line: float, dist: str, sd: float, n: int = 20000,
                      p_over=over / n, p_push=push / n, p_under=(n - over - push) / n, n=n)
 
 
+class DrawCache:
+    """Sorted draws per projection, so every line of an alt ladder (same player, stat and
+    projection) is read off one simulation instead of re-simulating each line."""
+
+    def __init__(self, size: int = 64):
+        self.size, self.store = size, {}
+
+    def get(self, key, make):
+        hit = self.store.get(key)
+        if hit is None:
+            hit = make()
+            if len(self.store) >= self.size:
+                self.store.pop(next(iter(self.store)))
+            self.store[key] = hit
+        return hit
+
+
+_DRAWS = DrawCache()
+
+
+def simulate_ladder(mean: float, line: float, dist: str, sd: float, n: int = 20000,
+                    seed_key: str = "") -> SimResult:
+    """Same as simulate(), but the draws are shared by every line with the same seed_key and
+    projection (one simulation per player-stat, then a binary search per line)."""
+    if np is None:
+        return simulate(mean, line, dist, sd, n, seed_key)
+    key = (seed_key, dist, round(mean, 6), round(sd, 6), n)
+
+    def make():
+        draws = np.sort(_np_draws(np.random.default_rng(zlib.crc32(seed_key.encode())), dist, mean, sd, n))
+        return draws, float(np.median(draws))
+    draws, median = _DRAWS.get(key, make)
+    below_or_at = int(np.searchsorted(draws, line, side="right"))
+    below = int(np.searchsorted(draws, line, side="left"))
+    over, push = n - below_or_at, below_or_at - below
+    return SimResult(dist=dist, mean=mean, sd=sd, median=median, p_over=over / n,
+                     p_push=push / n, p_under=(n - over - push) / n, n=n)
+
+
 def simulate_1x2(mean_a: float, mean_b: float, n: int = 20000, seed_key: str = "") -> SimResult:
     """Independent Poisson goals per side -> P(A win), P(draw), P(B win)."""
     if np is not None:
