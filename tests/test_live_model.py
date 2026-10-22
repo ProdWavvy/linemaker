@@ -109,6 +109,23 @@ class RunLiveTest(unittest.TestCase):
             lr = live.run_live_games(FakeAPI(), ["NBA"], "2026-10-21", TZ, ProConfig())
         self.assertEqual(lr.result.evaluated, [])
 
+    def test_after_midnight_includes_last_nights_games(self):
+        from linemaker import live
+        et = ZoneInfo("America/New_York")
+        late = dt.datetime(2026, 10, 22, 0, 30, tzinfo=et)
+        self.assertEqual(live.live_dates("2026-10-22", et, late), ["2026-10-21", "2026-10-22"])
+        self.assertEqual(live.live_dates("2026-10-22", et, late.replace(hour=19)), ["2026-10-22"])
+        tables = {2027: game_model.parse_standings(NOW), 2026: game_model.parse_standings(LAST)}
+        states = {("road bulls", "home hawks"): state(left=0.3, home=80, away=70)}
+        with mock.patch.object(game_model, "standings", lambda s, y: tables[y]), \
+                mock.patch.object(game_model, "played_yesterday", lambda s, d: set()), \
+                mock.patch.object(live_model, "live_states", lambda s, d: states if d == "2026-10-21" else {}), \
+                mock.patch.object(live, "live_dates", lambda d, tz: ["2026-10-21", "2026-10-22"]), \
+                mock.patch.dict(os.environ, {"LINEMAKER_LIVE_MAX_ODDS_AGE": "1e12"}):
+            lr = live.run_live_games(FakeAPI(), ["NBA"], "2026-10-22", TZ, ProConfig())
+        self.assertTrue(lr.result.evaluated)          # the Oct 21 game still in progress is priced
+        self.assertTrue(all(ev.market.date == "2026-10-22" for ev in lr.result.evaluated))
+
     def test_quick_path_words(self):
         from linemaker.chat import quick_kind, quick_plays_request
         self.assertEqual(quick_plays_request("any live edges right now"), ["NBA"])

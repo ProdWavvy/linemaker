@@ -588,9 +588,14 @@ def _slate_for(sport: str, date: str, kind: str, refresh: bool) -> tuple:
     snaps = os.environ.get("LINEMAKER_SNAPSHOTS", "snapshots")
     if kind == "live":
         # The pre-game line saved earlier (if any) anchors the live model.
-        pre = _SLATES.get((sport, date, "games")) or load_slate_cache(sport, date, "games")
-        lr = run_live_games(OddsAPI(), [sport], date, _tz(), ProConfig(),
-                            pre[1] if pre else None, pre[0] if pre else None)
+        from .live import live_dates
+        rows = []
+        for d in live_dates(date, _tz()):
+            pre = _SLATES.get((sport, d, "games")) or load_slate_cache(sport, d, "games")
+            if pre:   # keep only lines saved before their game started (true pre-game prices)
+                rows += [r for r in pre[1] if r.get("commence") and
+                         dt.datetime.fromisoformat(r["commence"].replace("Z", "+00:00")).timestamp() > pre[0]]
+        lr = run_live_games(OddsAPI(), [sport], date, _tz(), ProConfig(), rows, 1.0 if rows else None)
     else:
         runner = run_games if kind == "games" else run_best
         # Fetch and project only; every caller prices the saved rows itself, so pricing here

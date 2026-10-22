@@ -180,22 +180,38 @@ def live_settings(cfg: ProConfig, date: str) -> tuple:
     return cfg, tracker
 
 
+def live_dates(date: str, tz: ZoneInfo, now: Optional[dt.datetime] = None) -> list:
+    """Slate dates to look at for games in progress: today, plus yesterday until 6 AM
+    (a West Coast tip-off is still going after midnight Eastern)."""
+    now = (now or dt.datetime.now(tz)).astimezone(tz)
+    if now.date().isoformat() == date and now.hour < 6:
+        return [(now.date() - dt.timedelta(days=1)).isoformat(), date]
+    return [date]
+
+
 def run_live_games(odds: OddsAPI, sports: list, date: str, tz: ZoneInfo, cfg: ProConfig,
                    prior_rows: Optional[list] = None, prior_saved_at: Optional[float] = None) -> LiveRun:
     """In-game moneylines, spreads and totals: live FanDuel/DraftKings odds vs the live model
     (score + clock + the pre-game line). One /odds call per league, ~3 credits. Tracked in
     <tracking>/live so in-game bets never mix with the pre-game calibration."""
     from .live_model import drop_stale_books, live_projections, live_states
-    feed = drop_stale_books(fetch_feed(odds, sports, date, tz, props=False, game_lines=True))
+    dates = live_dates(date, tz)
+    feed = []
+    for d in dates:   # after midnight, last night's late games are still being played
+        feed += fetch_feed(odds, sports, d, tz, props=False, game_lines=True)
+    for fm in feed:
+        fm.date = date   # in progress now, so they belong to this live scan's slate
+    feed = drop_stale_books(feed)
     projections = []
     for sport in sports:
         s = sport.upper()
-        try:
-            states = live_states(s, date)
-        except Exception as e:
-            import logging
-            logging.getLogger("linemaker.live").warning("espn live scores %s: %s", s, e)
-            states = {}
+        states = {}
+        for d in dates:
+            try:
+                states.update(live_states(s, d))
+            except Exception as e:
+                import logging
+                logging.getLogger("linemaker.live").warning("espn live scores %s %s: %s", s, d, e)
         games = sorted({(fm.opponent, fm.subject, fm.commence) for fm in feed
                         if fm.sport.upper() == s and fm.bet_type != "prop"})
         projections += live_projections(s, date, states, games, prior_rows or [], prior_saved_at)
