@@ -628,6 +628,23 @@ def drop_slate(sport: str, date: str, kind: str = "props"):
         pass
 
 
+def track_game_lines(sport: str, date: str) -> int:
+    """Price today's not-yet-started moneylines/spreads/totals with the game model just to
+    log them for grading and weight tuning (nothing is posted). One /odds call, ~3 credits.
+    Returns how many markets were logged."""
+    from .busy import busy
+    from .game_model import SUPPORTED
+    from .live import run_games
+    if sport not in SUPPORTED or os.environ.get("LINEMAKER_TRACK_GAME_LINES", "on").lower() in ("off", "0", "no", "false"):
+        return 0
+    cfg = ProConfig()
+    cfg.max_picks = 0   # log only: nothing was posted, so nothing counts as a pick
+    with busy():
+        lr = run_games(OddsAPI(), [sport], date, _tz(), cfg, None)
+    log.info("%s game lines logged for tracking: %d markets", sport, len(lr.result.evaluated))
+    return len(lr.result.evaluated)
+
+
 def scan_events(sport: str, date: str, event_ids: set, title: str, only_if_picks: bool = True):
     """Price props for just these games and build the card. None when nothing cleared the
     gates and only_if_picks is set. Returns (messages, result)."""

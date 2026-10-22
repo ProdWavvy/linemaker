@@ -1144,6 +1144,11 @@ async def pretip_loop():
                 await _send_card(channel.send, messages)
             else:
                 log.info("pre-tip %s: nothing cleared the gates (%s)", sport, names)
+            try:   # near-closing game lines too, logged (not posted) for grading and tuning
+                from .chat import track_game_lines
+                await asyncio.to_thread(track_game_lines, sport, date)
+            except Exception as e:
+                log.warning("game-line tracking %s: %s", sport, e)
 
 
 @tasks.loop(minutes=12)

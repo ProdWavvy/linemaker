@@ -7,7 +7,7 @@ A = subject win, D = draw, B = opponent win.
 import csv
 import json
 import os
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Optional
 
 from .devig import hold, no_vig, overround
@@ -488,6 +488,13 @@ def run_pro(markets: list, slate_date: str, cfg: ProConfig, freezer=None,
         if ev is None:
             where = f" at {'/'.join(cfg.bet_books)}" if cfg.bet_books else ""
             res.passes.append((label, f"no bettable price{where}"))
+            if tracker is not None and cfg.bet_books:
+                # Not bettable at your books, but still a model-vs-market data point for
+                # calibration: price it against every book and log it, marked unbettable.
+                other = evaluate(m, replace(cfg, bet_books=None), sim)
+                if other is not None:
+                    tracker.record(other)
+                    tracker.records[m.key]["bettable"] = False
             continue
         ev.frozen_at = frozen_at
         res.evaluated.append(ev)

@@ -42,3 +42,45 @@ class LadderTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TrackEverythingTest(unittest.TestCase):
+    def test_unbettable_props_still_tracked(self):
+        import json
+        import tempfile
+        from linemaker.tracking import Tracker
+        rows = [row("Bettable Guy", "points", 20.5, 25),
+                row("Other Books Only", "points", 20.5, 25, "g2", books="BetMGM:-110/-110|Caesars:-115/-105")]
+        with tempfile.TemporaryDirectory() as d:
+            res = run_pro(rows_to_markets(rows), "2026-10-21",
+                          ProConfig(min_gap=0.0, bet_books=("FanDuel", "DraftKings")),
+                          tracker=Tracker(d, "2026-10-21"))
+            with open(os.path.join(d, "2026-10-21.json")) as f:
+                recs = {r["subject"]: r for r in json.load(f).values()}
+        self.assertEqual(set(recs), {"Bettable Guy", "Other Books Only"})
+        self.assertFalse(recs["Other Books Only"]["bettable"])
+        self.assertIsNotNone(recs["Other Books Only"]["market_prob_a"])   # usable for calibration
+        self.assertNotIn("bettable", recs["Bettable Guy"])
+        self.assertEqual([ev.market.subject for ev in res.picks], ["Bettable Guy"])   # never picked
+
+
+class TrackGameLinesTest(unittest.TestCase):
+    def test_logs_without_picks(self):
+        import json
+        import tempfile
+        from linemaker import chat, game_model
+        from tests.test_game_model import LAST, NOW
+        from tests.test_oddsapi import FakeAPI
+        tables = {2027: game_model.parse_standings(NOW), 2026: game_model.parse_standings(LAST)}
+        with tempfile.TemporaryDirectory() as d, \
+                mock.patch.dict(os.environ, {"LINEMAKER_TRACKING": "on", "LINEMAKER_TRACKING_DIR": d,
+                                             "LINEMAKER_KALSHI_WEIGHT": "0"}), \
+                mock.patch.object(chat, "OddsAPI", lambda: FakeAPI()), \
+                mock.patch.object(game_model, "standings", lambda s, y: tables[y]), \
+                mock.patch.object(game_model, "played_yesterday", lambda s, d: set()):
+            n = chat.track_game_lines("NBA", "2026-10-21")
+            with open(os.path.join(d, "2026-10-21.json")) as f:
+                recs = json.load(f).values()
+        self.assertGreater(n, 0)
+        self.assertEqual({r["inputs"]["bet_type"] for r in recs}, {"moneyline", "spread", "total"})
+        self.assertFalse(any(r["picked"] for r in recs))      # logged, never counted as picks
