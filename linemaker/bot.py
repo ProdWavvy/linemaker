@@ -342,8 +342,12 @@ def _clip_embed(e: discord.Embed, chars: int) -> discord.Embed:
 def compact_card(messages: list) -> tuple:
     """(embeds, view) for one message: summary + board (+ parlays); every pick's full
     write-up behind a dropdown, the scoping notes behind a button."""
-    header, boards, parlays, notes, picks = None, [], [], [], []
+    header, boards, parlays, notes, picks, legs = None, [], [], [], [], []
     for embeds, detail in messages:
+        if detail and "legs" in detail:      # a volume board: its legs feed the parlay builder
+            boards.extend(embeds)
+            legs = detail["legs"]
+            continue
         if detail and "ev" in detail:
             picks.append((embeds[0], detail))
             continue
@@ -370,7 +374,7 @@ def compact_card(messages: list) -> tuple:
             _clip_embed(header, max(len(header.description or "") - over, 300))
     while len(embeds) > 1 and sum(_embed_len(e) for e in embeds) > EMBED_BUDGET:
         notes.insert(0, embeds.pop())        # still too long: move the last one behind Notes
-    view = CompactView(picks, parlays, notes)
+    view = CompactView(picks, parlays, notes, legs)
     return embeds, view
 
 
@@ -378,7 +382,7 @@ class CompactView(discord.ui.View):
     """One scan, one message: a dropdown for each pick's write-up and buttons, parlay
     buttons, and a Notes button. Details answer privately (only you see them)."""
 
-    def __init__(self, picks: list, parlays: list, notes: list):
+    def __init__(self, picks: list, parlays: list, notes: list, legs: Optional[list] = None):
         super().__init__(timeout=None)
         from .staking import _money, stake_tier
         if picks:
@@ -436,10 +440,12 @@ class CompactView(discord.ui.View):
                 self.add_item(b)
                 count += 1
                 row, count = (row + 1, 0) if count == 5 else (row, count)
-        if len(picks) >= 2:
-            pkey = _remember({"picks": [d for _e, d in picks[:25]]})
-            b = discord.ui.Button(label="Turn into parlay", emoji="🎰", row=4,
-                                  style=discord.ButtonStyle.primary, custom_id=f"lm:mkparlay:{pkey}")
+        pool = [d for _e, d in picks[:25]] or list(legs or [])[:25]
+        if len(pool) >= 2:
+            pkey = _remember({"picks": pool})
+            b = discord.ui.Button(label="Turn into parlay" if picks else "Build my own parlay",
+                                  emoji="🎰", row=4, style=discord.ButtonStyle.primary,
+                                  custom_id=f"lm:mkparlay:{pkey}")
             self.add_item(b)
         if notes:
             nkey = _remember({"notes": [n.to_dict() for n in notes]})
@@ -515,11 +521,13 @@ def parlay_card(legs: list) -> tuple:
                     f"$10 pays **${10 * p.decimal:,.2f}**"))
         if missing:
             value += f"\n⚠️ Not offered here: {', '.join(missing)[:200]}"
-        embed.add_field(name=f"{emoji} {name}", value=value, inline=False)
         url = parlay_link(p)
         if url and len(url) <= 512:
             view.add_item(discord.ui.Button(label=f"Bet on {p.book}", url=url,
                                             emoji="🟦" if p.book == "FanDuel" else "🟩"))
+        elif url:   # too long for a button (Discord caps those at 512): a link in the text
+            value += f"\n🧾 [Open this {len(p.legs)}-leg slip on {p.book}]({url})"
+        embed.add_field(name=f"{emoji} {name}", value=value[:1024], inline=False)
         key = _remember({"parlays": [p]})
         b = discord.ui.Button(label=f"Log {p.book} parlay", emoji="📝", style=discord.ButtonStyle.success,
                               custom_id=f"lm:betp:{key}:0")

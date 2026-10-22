@@ -682,7 +682,8 @@ def volume_messages(sections: list, date: str, cfg, title: str = "") -> list:
         board = discord.Embed(title="✅ High-Hit-Rate Legs", color=GOLD,
                               description="```\n" + "\n".join(rows) + "\n```")
         board.set_footer(text="Hit = our estimated chance · Szn = season hit rate at this line")
-        out.append(([board], None))
+        # The legs behind the board, so "Build my own parlay" can use any of them.
+        out.append(([board], {"legs": [{"rank": i, "ev": ev} for i, ev in enumerate(legs, 1)]}))
         from .betlinks import parlay_link
         parlays = build_parlays(legs)
         for book in ("FanDuel", "DraftKings"):

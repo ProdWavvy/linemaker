@@ -1,5 +1,6 @@
 import asyncio
 import os
+from zoneinfo import ZoneInfo
 import unittest
 from unittest import mock
 
@@ -65,7 +66,7 @@ class CompactCardTest(unittest.TestCase):
         rows = [{"date": "2026-10-21", "sport": "NBA", "game_id": f"g{i}", "game": f"A{i} @ H{i}",
                  "bet_type": "prop", "subject": f"Player {i}", "market": "points", "line": "15.5",
                  "mean": "24", "stdev": "4", "books": "FanDuel:-400/+300|DraftKings:-380/+290"}
-                for i in range(4)]
+                for i in range(6)]
         cfg = volume_config()
         cfg.min_prob, cfg.min_odds, cfg.max_odds, cfg.min_gap, cfg.track = 0.5, -100, -10000, -1.0, False
         res = run_pro(rows_to_markets(rows), "2026-10-21", cfg)
@@ -79,6 +80,16 @@ class CompactCardTest(unittest.TestCase):
         self.assertLessEqual(total(embeds), 6000)
         self.assertTrue(any("Parlays" in (e.title or "") for e in embeds))
         self.assertTrue(any((getattr(c, "label", "") or "").startswith("Log ") for c in view.children))
+        self.assertTrue(any(e.title == "✅ High-Hit-Rate Legs" for e in embeds))     # the board stays
+        build = next(c for c in view.children if getattr(c, "label", "") == "Build my own parlay")
+        from linemaker import bot as _bot
+        pool = _bot.PICK_DETAILS[build.custom_id.split(":")[2]]["picks"]
+        self.assertEqual(len(pool), len(res.picks))                  # every leg, not just 2-4
+
+        async def picker():
+            return _bot.ParlayPickerView(pool)
+        sel = next(c for c in asyncio.run(picker()).children if hasattr(c, "options"))
+        self.assertEqual(sel.max_values, len(res.picks))              # choose as many as you like
 
     def test_nothing_cleared_shows_why_inline(self):
         from linemaker import bot
@@ -200,3 +211,31 @@ class RestartTest(unittest.TestCase):
         class Inter:
             data = {"custom_id": "someone-else"}
         self.assertFalse(asyncio.run(bot.route_component(Inter())))
+
+
+class BigParlayTest(unittest.TestCase):
+    def test_twelve_legs_get_a_text_link(self):
+        import json
+        from linemaker import bot
+        from linemaker.oddsapi import feed_row, parse_event_props
+        from linemaker.pro import ProConfig, rows_to_markets, run_pro
+        rows = []
+        for i in range(12):
+            event = {"id": f"e{i}", "home_team": "H", "away_team": "A", "commence_time": "2026-10-21T23:30:00Z",
+                     "bookmakers": [{"key": "fanduel", "title": "FanDuel", "markets": [{"key": "player_points", "sid": f"42.61770{i:04d}", "outcomes": [
+                         {"name": "Over", "description": f"P{i}", "price": -300, "point": 10.5,
+                          "link": f"https://sportsbook.fanduel.com/addToBetslip?marketId=42.61770{i:04d}&selectionId=4318{i:04d}"},
+                         {"name": "Under", "description": f"P{i}", "price": 240, "point": 10.5}]}]}]}
+            fm = parse_event_props(event, "NBA", ZoneInfo("America/New_York"))[0]
+            r = feed_row(fm)
+            r.update(mean="16", stdev="3")
+            rows.append(r)
+        legs = run_pro(rows_to_markets(rows), "2026-10-21", ProConfig(track=False, min_gap=-1.0)).evaluated
+
+        async def build():
+            return bot.parlay_card(legs)
+        embed, view = asyncio.run(build())
+        fd = next(f for f in embed.fields if "FanDuel" in f.name)
+        self.assertIn("Open this 12-leg slip on FanDuel", fd.value)
+        self.assertIn("hit chance", fd.value)
+        self.assertTrue(any(getattr(c, "label", "") == "Log FanDuel parlay" for c in view.children))
