@@ -38,3 +38,35 @@ class SGPTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class AutoSGPTest(unittest.TestCase):
+    def _legs(self):
+        from unittest import mock
+        legs = []
+        spec = [("g1", "A", "points", 20, .85), ("g1", "A", "points", 25, .84),   # clash: same stat
+                ("g1", "A", "rebounds", 8, .83), ("g1", "B", "assists", 6, .80),
+                ("g2", "C", "points", 18, .82), ("g2", "D", "rebounds", 9, .79),
+                ("g3", "E", "points", 12, .81)]
+        for g, who, stat, line, p in spec:
+            ev = leg(g, "prop", who, stat, line)
+            ev.best.blended = p
+            legs.append(ev)
+        return legs
+
+    def test_builds_sgp_and_sgpx(self):
+        from unittest import mock
+        from linemaker import parlay
+        with mock.patch.object(parlay, "leg_price", lambda ev, book: -300):
+            out = parlay.build_sgps(self._legs(), books=("DraftKings",))
+        kinds = {p.kind: p for p in out}
+        sgp, sgpx = kinds["SGP"], kinds["SGPx"]
+        self.assertEqual({ev.market.game_id for ev, _o in sgp.legs}, {"g1"})
+        self.assertEqual(len(sgp.legs), 3)
+        self.assertEqual(sgp_check([ev for ev, _o in sgp.legs], "DraftKings")["blocked"], [])
+        self.assertEqual(len(sgpx.legs), 4)
+        self.assertEqual({ev.market.game_id for ev, _o in sgpx.legs}, {"g1", "g2"})
+        self.assertEqual(sgp_check([ev for ev, _o in sgpx.legs], "DraftKings")["blocked"], [])
+        with mock.patch.object(parlay, "leg_price", lambda ev, book: -300):
+            self.assertEqual({p.kind for p in parlay.build_sgps(self._legs(), books=("FanDuel",))},
+                             {"SGP", "SGP+"})

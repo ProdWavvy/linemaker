@@ -672,7 +672,7 @@ def stats_page(detail: dict) -> discord.Embed:
 
 def volume_messages(sections: list, date: str, cfg, title: str = "") -> list:
     """[(embeds, None)]: header, high-hit-rate legs, parlays per book, notes."""
-    from .parlay import build_parlays
+    from .parlay import build_parlays, build_sgps
     sections = _norm_sections(sections)
     for _sport, res, ex in sections:
         apply_hit_gate(res, ex["profiles"], floor=cfg.min_prob)
@@ -719,7 +719,7 @@ def volume_messages(sections: list, date: str, cfg, title: str = "") -> list:
         out.append(([board], {"legs": [{"rank": i, "ev": ev} for i, ev in enumerate(legs, 1)],
                               "books": books}))
         from .betlinks import parlay_link
-        parlays = build_parlays(legs, books=books)
+        parlays = build_parlays(legs, books=books) + build_sgps(legs, books=books)
         for book in books:
             mine = [p for p in parlays if p.book == book]
             if not mine:
@@ -730,18 +730,22 @@ def volume_messages(sections: list, date: str, cfg, title: str = "") -> list:
             for p in mine:
                 legs_txt = "\n".join(f"• {ev.best.label} ({fmt_odds(o)})" for ev, o in p.legs)
                 url = parlay_link(p)
-                slip = f"\n[🧾 Open this {len(p.legs)}-leg slip on {bname}]({url})" if url else ""
+                tag = f" {p.kind}" if p.kind else ""
+                slip = f"\n[🧾 Open this {len(p.legs)}-leg{tag} slip on {bname}]({url})" if url else ""
                 if url:
-                    buttons.append((f"{len(p.legs)}-leg on {bname}", url))
+                    buttons.append((f"{len(p.legs)}-leg{tag} on {bname}", url))
                 from .staking import stake_line
                 body = (f"{legs_txt}\nHit chance **{_pct(p.prob)}** · $100 pays "
                         f"**${p.payout:,.0f}** · EV {fmt_money(p.ev)}\n"
                         + stake_line(p.prob, p.american, parlay=True))
-                e.add_field(name=f"🔒 {len(p.legs)}-Leg · {fmt_odds(p.american)}",
+                if p.kind:
+                    body += f"\n🔗 Same-game legs: {bname} prices the {p.kind} itself, lower than shown."
+                e.add_field(name=f"{'🔗' if p.kind else '🔒'} {len(p.legs)}-Leg{tag} · {fmt_odds(p.american)}",
                             value=body + slip if len(body + slip) <= 1024 else _clip(body, 1024),
                             inline=False)
-            e.set_footer(text="One leg per game · payout multiplies the legs' prices; the book's "
-                              "parlay price may differ slightly · check every leg before you bet")
+            e.set_footer(text="🔒 one leg per game · 🔗 same-game legs on one ticket · payout "
+                              "multiplies the legs' prices; the book's parlay price may differ "
+                              "(more so for SGPs) · check every leg before you bet")
             out.append(([e], {"links": buttons, "parlays": mine}))
     notes = discord.Embed(title="🧠 Volume Mode, Honestly", color=PURPLE, description=(
         "These legs are picked to **hit often**, not because the price is wrong. Parlaying "

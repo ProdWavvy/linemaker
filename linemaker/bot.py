@@ -217,7 +217,7 @@ class PickView(discord.ui.View):
             legs = [leg_from_eval(ev, odds=o, book=p.book) for ev, o in p.legs]
             await interaction.response.send_modal(BetModal(
                 legs, p.american, p.book, suggested_dollars(p.prob, p.american, parlay=True),
-                f"{len(p.legs)}-leg parlay"))
+                f"{len(p.legs)}-leg {getattr(p, 'kind', '') or 'parlay'}"))
         return callback
 
     @staticmethod
@@ -436,18 +436,21 @@ class CompactView(discord.ui.View):
                 self.add_item(b)
                 count += 1
                 row, count = (row + 1, 0) if count == 5 else (row, count)
+        many = sum(len(d.get("parlays") or []) for _e, d in parlays) > 6
         for _embed, detail in [p for p in parlays if "parlays" in p[1]]:
             key = _remember(detail)
-            for label, url in detail.get("links") or []:
+            # Lots of parlays: the slip links are already in the card text, keep room for Log.
+            for label, url in ([] if many else detail.get("links") or []):
                 if url and len(url) <= 512 and row <= 3:
                     self.add_item(discord.ui.Button(label=label[:80], url=url, row=row,
                                                     emoji="🟦" if "FanDuel" in label else "🟩"))
                     count += 1
                     row, count = (row + 1, 0) if count == 5 else (row, count)
-            for i, p in enumerate((detail.get("parlays") or [])[:4]):
+            for i, p in enumerate((detail.get("parlays") or [])[:6]):
                 if row > 3:
                     break
-                b = discord.ui.Button(label=f"Log {len(p.legs)}-leg {p.book}", emoji="📝", row=row,
+                tag = f" {p.kind}" if getattr(p, "kind", "") else ""
+                b = discord.ui.Button(label=f"Log {len(p.legs)}-leg{tag} {p.book}", emoji="📝", row=row,
                                       style=discord.ButtonStyle.success,
                                       custom_id=f"lm:betp:{key}:{i}")
                 self.add_item(b)
