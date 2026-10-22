@@ -74,7 +74,12 @@ class ProConfig:
     min_odds: Optional[int] = field(default_factory=lambda: _env_num("LINEMAKER_ODDS_MIN", int))
     max_odds: Optional[int] = field(default_factory=lambda: _env_num("LINEMAKER_ODDS_MAX", int))
     confirmed_only: bool = False       # only price games with confirmed lineups/inactives
-    max_picks: int = 10
+    # Up to 25 picks (the card's dropdown holds 25). LINEMAKER_MAX_PICKS to change.
+    max_picks: int = field(default_factory=lambda: _env_num("LINEMAKER_MAX_PICKS", int) or 25)
+    # One line per player-stat (or per game market): an alt ladder's best line only, not
+    # 25.5 and 26.5 PRA for the same player. LINEMAKER_ONE_PER_STAT=off allows them all.
+    one_per_stat: bool = field(default_factory=lambda: os.environ.get(
+        "LINEMAKER_ONE_PER_STAT", "on").lower() not in ("off", "0", "false", "no"))
     # Best price is shopped only at these books; consensus still uses every book.
     bet_books: Optional[tuple] = field(default_factory=_default_bet_books)
     # Volume mode: rank by hit chance instead of gap and allow a slightly negative edge.
@@ -91,7 +96,7 @@ def volume_config(**overrides) -> "ProConfig":
         min_gap=_env_num("LINEMAKER_VOLUME_MIN_GAP", float) if os.environ.get(
             "LINEMAKER_VOLUME_MIN_GAP", "").strip() else -0.02,
         max_gap=_env_num("LINEMAKER_MAX_GAP", float), min_ev=None,
-        max_picks=_env_num("LINEMAKER_VOLUME_LEGS", int) or 15,
+        max_picks=_env_num("LINEMAKER_VOLUME_LEGS", int) or 25,
         require_model_edge=False, rank_by="prob")
     for k, v in overrides.items():
         setattr(cfg, k, v)
@@ -521,6 +526,16 @@ def run_pro(markets: list, slate_date: str, cfg: ProConfig, freezer=None,
 
     quals.sort(key=(lambda e: e.best.blended) if cfg.rank_by == "prob" else (lambda e: e.best.gap),
                reverse=True)
+    if cfg.one_per_stat:
+        seen, kept = {}, []
+        for ev in quals:   # best-ranked line of each ladder first; the rest are near-duplicates
+            k = (ev.market.game_id, ev.market.subject, ev.market.market)
+            if k in seen:
+                res.passes.append((ev.best.label, f"similar line already on the board ({seen[k]})"))
+                continue
+            seen[k] = ev.best.label
+            kept.append(ev)
+        quals = kept
     for ev in quals[cfg.max_picks:]:
         res.passes.append((ev.best.label, f"qualified (gap {ev.best.gap:+.1%}) but below cutoff"))
     res.picks = quals[:cfg.max_picks]

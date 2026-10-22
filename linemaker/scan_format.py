@@ -388,6 +388,7 @@ PASS_GROUPS = (   # pass reason prefix -> plain-English label for the summary
     ("no bettable price", "no FanDuel/DraftKings price"),
     ("injury status", "player ruled out"),
     ("qualified", "qualified but outside the top plays"),
+    ("similar line", "a better line on the same player-stat is already on the board"),
 )
 
 
