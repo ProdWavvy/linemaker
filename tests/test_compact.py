@@ -152,7 +152,7 @@ class ParlayButtonTest(unittest.TestCase):
         labels = [getattr(c, "label", "") for c in view.children]
         self.assertIn("Log FanDuel parlay", labels)
         select = next(c for c in picker.children if hasattr(c, "options"))
-        self.assertEqual((select.min_values, select.max_values), (2, 3))
+        self.assertEqual((select.min_values, select.max_values), (1, 3))
 
 
 def discord_embed(title):
@@ -322,3 +322,27 @@ class OneBookTest(unittest.TestCase):
         self.assertTrue(any("DraftKings" in f.name for f in embed.fields))
         self.assertNotIn("FD ", embed.description)
         self.assertFalse(any("FanDuel" in getattr(c, "label", "") for c in view.children))
+
+
+class LiveSlipTest(unittest.TestCase):
+    def test_slip_reprices_as_legs_change(self):
+        from linemaker import bot
+        legs = ParlayButtonTest._legs(ParlayButtonTest())
+        picks = [{"rank": i, "ev": ev} for i, ev in enumerate(legs, 1)]
+
+        async def build(chosen):
+            return bot.slip_message(picks, None, chosen)
+        one, v1 = asyncio.run(build([0]))
+        self.assertIn("Add at least one more leg", one.description)
+        two, v2 = asyncio.run(build([0, 1]))
+        self.assertEqual(two.title, "🎰 Your 2-Leg Parlay · live slip")
+        self.assertIn("hit chance", two.fields[0].value)
+        self.assertIn("EV", two.fields[0].value)
+        sel = next(c for c in v2.children if hasattr(c, "options"))
+        self.assertEqual([o.default for o in sel.options], [True, True, False])   # remembers picks
+        self.assertIn("FD", sel.options[0].description)
+        labels = [getattr(c, "label", "") for c in v2.children]
+        self.assertIn("Log FanDuel parlay", labels)
+        self.assertIn("Clear", labels)
+        three, _v = asyncio.run(build([0, 1, 2]))
+        self.assertEqual(three.title, "🎰 Your 3-Leg Parlay · live slip")

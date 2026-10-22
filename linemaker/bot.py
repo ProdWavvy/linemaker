@@ -476,8 +476,9 @@ class CompactView(discord.ui.View):
                     ephemeral=True)
                 return
             await interaction.response.send_message(
-                "🎰 **Build a parlay:** pick the legs below (or **Use all picks**). I'll price it "
-                f"at {' and '.join(detail.get('books') or PARLAY_BOOKS)} with each book's own odds.",
+                "🎰 **Build a parlay:** tap legs in the menu to add or remove them. Each time the "
+                "menu closes, this slip re-prices at "
+                f"{' and '.join(detail.get('books') or PARLAY_BOOKS)}: hit chance, EV, payout.",
                 view=ParlayPickerView(detail["picks"], detail.get("books")), ephemeral=True)
         return callback
 
@@ -567,33 +568,73 @@ def parlay_card(legs: list, books: Optional[tuple] = None) -> tuple:
 
 
 class ParlayPickerView(discord.ui.View):
-    """Private menu: choose the legs from a scan's picks, or use them all."""
+    """Private live slip: choose legs from a scan's picks and the message re-prices itself
+    every time the menu closes (hit chance, EV, payout and odds at each book), so you can
+    keep adding or removing legs. The Bet and Log buttons follow the current slip."""
 
-    def __init__(self, picks: list, books: Optional[tuple] = None):
-        super().__init__(timeout=900)
-        self.picks, self.books = picks, books
-        options = [discord.SelectOption(label=f"{d['rank']}. {d['ev'].best.label}"[:100],
-                                        description=f"{fmt_odds(d['ev'].best.best_odds)} "
-                                                    f"{d['ev'].best.best_book} · {d['ev'].best.blended:.0%} hit"[:100],
-                                        value=str(i))
-                   for i, d in enumerate(picks)]
-        select = discord.ui.Select(placeholder="Choose 2 or more legs", options=options,
-                                   min_values=2, max_values=len(options))
-        select.callback = self._build(select)
+    def __init__(self, picks: list, books: Optional[tuple] = None, selected=(), slip=None):
+        super().__init__(timeout=1800)
+        self.picks, self.books, self.selected = picks, books, list(selected)
+        from .parlay import leg_price
+        short = {"FanDuel": "FD", "DraftKings": "DK"}
+        options = []
+        for i, d in enumerate(picks):
+            ev = d["ev"]
+            prices = " · ".join(f"{short.get(b, b)} {fmt_odds(o)}" for b in (books or PARLAY_BOOKS)
+                                for o in [leg_price(ev, b)] if o)
+            options.append(discord.SelectOption(
+                label=f"{d['rank']}. {ev.best.label}"[:100], value=str(i), default=i in self.selected,
+                description=f"{prices or fmt_odds(ev.best.best_odds)} · {ev.best.blended:.0%} hit"[:100]))
+        select = discord.ui.Select(placeholder="➕➖ Tap legs to add or remove, then close the menu",
+                                   options=options, min_values=1, max_values=len(options), row=0)
+        select.callback = self._pick(select)
         self.add_item(select)
-        everything = discord.ui.Button(label=f"Use all {len(picks)} picks", emoji="🎯",
+        everything = discord.ui.Button(label=f"Use all {len(picks)} picks", emoji="🎯", row=1,
                                        style=discord.ButtonStyle.primary)
-        everything.callback = self._build(None)
+        everything.callback = self._set(list(range(len(picks))))
         self.add_item(everything)
+        if self.selected:
+            clear = discord.ui.Button(label="Clear", emoji="🧹", row=1, style=discord.ButtonStyle.secondary)
+            clear.callback = self._set([])
+            self.add_item(clear)
+        for i, item in enumerate(slip.children if slip else []):   # Bet / Log for this slip
+            item.row = 2 + i // 5
+            self.add_item(item)
 
-    def _build(self, select):
+    def _pick(self, select):
         async def callback(interaction: discord.Interaction):
-            chosen = ([self.picks[int(v)] for v in select.values] if select is not None
-                      else self.picks)
-            embed, view = parlay_card([d["ev"] for d in chosen], self.books)
-            await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
-            await asyncio.to_thread(save_details)
+            await self._show(interaction, [int(v) for v in select.values])
         return callback
+
+    def _set(self, chosen):
+        async def callback(interaction: discord.Interaction):
+            await self._show(interaction, chosen)
+        return callback
+
+    async def _show(self, interaction, chosen: list):
+        embed, view = slip_message(self.picks, self.books, chosen)
+        await interaction.response.edit_message(content=None, embed=embed, view=view)
+        await asyncio.to_thread(save_details)
+
+
+def slip_message(picks: list, books: Optional[tuple], chosen: list) -> tuple:
+    """(embed, picker view) for the live slip with these legs picked."""
+    chosen = sorted(set(chosen))
+    if len(chosen) >= 2:
+        embed, slip = parlay_card([picks[i]["ev"] for i in chosen], books)
+        embed.title += " · live slip"
+        return embed, ParlayPickerView(picks, books, chosen, slip)
+    from .parlay import leg_price
+    if chosen:
+        ev = picks[chosen[0]]["ev"]
+        prices = " · ".join(f"{b} {fmt_odds(o)}" for b in (books or PARLAY_BOOKS)
+                            for o in [leg_price(ev, b)] if o)
+        desc = (f"• **{ev.best.label}** · {prices} · {ev.best.blended:.0%} hit\n\n"
+                "Add at least one more leg to see the parlay price, EV and payout.")
+    else:
+        desc = "No legs yet. Open the menu and tap the legs you want."
+    embed = discord.Embed(title="🎰 Your Parlay · live slip", color=0xF1C40F, description=desc)
+    return embed, ParlayPickerView(picks, books, chosen)
 
 
 async def _send_card(send, messages: list, markdown=None, filename=None, text: str = ""):
