@@ -132,6 +132,7 @@ class FeedMarket:
     books: list = field(default_factory=list)   # [(book title, [odds per side])]
     links: dict = field(default_factory=dict)   # book -> [{"link", "msid", "sid"} | None per side]
     updated: dict = field(default_factory=dict)  # book -> ISO time the price last changed
+    multipliers: dict = field(default_factory=dict)  # book -> [payout multiplier per side] (pick'em)
 
 
 def configured_keys() -> list:
@@ -228,6 +229,8 @@ class OddsAPI:
         if links_on():   # betslip deep links for the Bet buttons
             p["includeLinks"] = "true"
             p["includeSids"] = "true"
+        if getattr(self, "include_multipliers", False):
+            p["includeMultipliers"] = "true"   # pick'em payout multipliers (goblins / demons)
         if self.bookmakers:
             p["bookmakers"] = self.bookmakers   # overrides regions
         else:
@@ -295,6 +298,12 @@ class _Grouper:
         stamp = (market or {}).get("last_update") or updated
         if stamp:
             fm.updated[book] = stamp
+        if outcome and outcome.get("multiplier") is not None:
+            mults = fm.multipliers.setdefault(book, [None] * n_sides)
+            try:
+                mults[side] = float(outcome["multiplier"])
+            except (TypeError, ValueError):
+                pass
         if outcome and (outcome.get("link") or outcome.get("sid")):
             slots = fm.links.setdefault(book, [None] * n_sides)
             slots[side] = {"link": outcome.get("link") or "", "sid": outcome.get("sid") or "",

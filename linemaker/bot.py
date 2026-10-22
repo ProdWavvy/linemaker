@@ -237,7 +237,9 @@ class PPLogModal(discord.ui.Modal):
             await interaction.response.send_message("Enter an amount like 5.", ephemeral=True)
             return
         e = self.entry
-        legs = [dict(leg_from_eval(ev, book="PrizePicks"), folder="pp") for ev in e.legs]
+        from .pp import leg_mult
+        legs = [dict(leg_from_eval(ev, book="PrizePicks"), folder="pp", pp_mult=leg_mult(ev))
+                for ev in e.legs]
         add_bet(legs, decimal_to_american(e.payouts[0]), stake, "PrizePicks", str(interaction.user),
                 kind="pp", pp_kind=e.kind)
         await interaction.response.send_message(
@@ -583,6 +585,9 @@ def build_auto(sports: list, date: str, cfg: ProConfig, kind: str = "props",
             cfg, freezer = pp_config(), None
             tracker = Tracker(os.path.join(TRACKING, "pp"), date)
         res = run_pro(rows_to_markets(rows), date, cfg, freezer, tracker)
+        if kind == "pp":
+            from .pp import select_legs
+            res.picks = select_legs(res.picks, cfg.pp_floor)
         res.slate, res.source_warning, res.projection_source = slate, warning, source
         res.kind = kind
         from .chat import slate_age_minutes

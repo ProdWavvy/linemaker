@@ -721,17 +721,17 @@ def volume_messages(sections: list, date: str, cfg, title: str = "") -> list:
 
 def pp_messages(sections: list, date: str, title: str = "") -> list:
     """[(embeds, detail)] for a PrizePicks scan: header, legs board, best entries."""
-    from .pp import best_entries, break_even, line_gap, power_table
+    from .pp import best_entries, break_even, leg_mult, leg_value, line_gap, power_table, tier_icon
     sections = _norm_sections(sections)
-    legs = sorted((ev for _s, res, _e in sections for ev in res.picks),
-                  key=lambda ev: ev.best.blended, reverse=True)
+    legs = sorted((ev for _s, res, _e in sections for ev in res.picks), key=leg_value, reverse=True)
     name = "Cross-Sport" if len(sections) > 1 else SPORT_NAMES.get(sections[0][0], sections[0][0])
     be = break_even()
     priced = sum(len(res.evaluated) for _s, res, _e in sections)
-    intro = [f"PrizePicks lines scored with the props model ({priced} lines priced). Every leg "
-             f"below hits **{be:.1%}+** by our estimate, the break-even for "
-             f"{min(power_table() or {2: 3})}-pick Power. Where FanDuel/DraftKings post the same "
-             "number, their no-vig price is blended in; PrizePicks' own price isn't counted."]
+    intro = [f"PrizePicks lines scored with the props model ({priced} lines priced, goblins 🟢 "
+             f"and demons 😈 included). Every leg below has hit chance × payout multiplier of "
+             f"**{be:.1%}+**, the break-even for {min(power_table() or {2: 3})}-pick Power. Where "
+             "FanDuel/DraftKings post the same number, their no-vig price is blended in; "
+             "PrizePicks' own price isn't counted."]
     if not legs:
         intro.append("**No PrizePicks legs cleared the break-even rate.** Lines may not be up yet, "
                      "or they match the books closely tonight.")
@@ -740,27 +740,29 @@ def pp_messages(sections: list, date: str, title: str = "") -> list:
     header.set_footer(text=odds_age_note(sections))
     out = [([header], None)]
     if legs:
-        rows = [f"{'#':>2} {'Pick':<34} {'Hit':>5} {'Gap':>6}"]
+        rows = [f"{'#':>2} {'Pick':<33} {'Hit':>5} {'x':>5} {'Gap':>5}"]
         for i, ev in enumerate(legs[:25], 1):
             side = "More" if ev.best.side == "A" else "Less"
-            pick = f"{ev.market.subject} {side} {ev.market.line:g} {ev.market.market}"
+            mark = {"🟢 ": "G ", "😈 ": "D "}.get(tier_icon(ev), "")
+            pick = f"{mark}{ev.market.subject} {side} {ev.market.line:g} {ev.market.market}"
             gap = line_gap(ev)
             gtxt = f"{gap:+.1f}" if gap is not None else "—"
-            rows.append(f"{i:>2} {pick[:34]:<34} {_pct(ev.best.blended):>5} {gtxt:>6}")
+            rows.append(f"{i:>2} {pick[:33]:<33} {_pct(ev.best.blended):>5} {leg_mult(ev):>4.2g}x {gtxt:>5}")
         board = discord.Embed(title="✅ PrizePicks Legs", color=0x8E44AD,
                               description="```\n" + "\n".join(rows) + "\n```")
-        board.set_footer(text="Hit = our chance · Gap = books' main line minus PrizePicks' line "
-                              "(+ means PrizePicks is lower: easier More)")
+        board.set_footer(text="G = goblin, D = demon · Hit = our chance · x = payout multiplier · "
+                              "Gap = books' main line minus PrizePicks' line (+ = PP lower: easier More)")
         out.append(([board], None))
         entries = best_entries(legs)
         entries.sort(key=lambda e: (e.size, e.kind))
         if entries:
             e_embed = discord.Embed(title="🎟️ Best Entries", color=0x8E44AD)
             for en in entries[:10]:
-                legs_txt = "\n".join(f"• {ev.market.subject} {'More' if ev.best.side == 'A' else 'Less'} "
+                legs_txt = "\n".join(f"• {tier_icon(ev)}{ev.market.subject} "
+                                     f"{'More' if ev.best.side == 'A' else 'Less'} "
                                      f"{ev.market.line:g} {ev.market.market} ({_pct(ev.best.blended)})"
                                      for ev in en.legs)
-                pays = " / ".join(f"{m:g}x" for m in en.payouts)
+                pays = " / ".join(f"{m:.3g}x" for m in en.payouts)
                 e_embed.add_field(
                     name=f"{en.size}-Pick {en.kind} · {pays}",
                     value=_clip(f"{legs_txt}\nHit all **{_pct(en.p_all)}** · EV **{en.ev:+.0f}%** per $100",

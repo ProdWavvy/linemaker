@@ -76,7 +76,9 @@ class EndToEndTest(unittest.TestCase):
         self.assertIn("books' line 24.5", star["notes"])           # PP 22.5 vs books 24.5
         big = next(r for r in rows if r["subject"] == "Big Man")
         self.assertIn("FanDuel", big["books"])                     # same number: books anchor it
-        res = run_pro(rows_to_markets(rows), "2026-10-21", pp.pp_config())
+        cfg = pp.pp_config()
+        res = run_pro(rows_to_markets(rows), "2026-10-21", cfg)
+        res.picks = pp.select_legs(res.picks, cfg.pp_floor)
         self.assertEqual(len(res.picks), 2)
         self.assertTrue(all(ev.best.blended >= pp.break_even() for ev in res.picks))
         self.assertAlmostEqual(pp.line_gap(next(e for e in res.picks if e.market.subject == "Star Guard")), 2.0)
@@ -106,6 +108,72 @@ if __name__ == "__main__":
     unittest.main()
 
 
+def alt_event(eid, home, away, lines):
+    """PrizePicks alternate market: goblins / demons, More only, with multipliers."""
+    return {"id": eid, "home_team": home, "away_team": away, "commence_time": "2026-10-21T23:30:00Z",
+            "bookmakers": [{"key": "prizepicks", "title": "PrizePicks", "markets": [
+                {"key": "player_points_alternate", "outcomes": [
+                    {"name": "Over", "description": p, "price": -119, "point": line, "multiplier": m}
+                    for p, line, m in lines]}]}]}
+
+
+class FakePPAlt(FakePP):
+    def event_odds(self, sport, eid, markets):
+        self.calls.append((eid, markets))
+        if "alternate" in markets:
+            return {"e1": alt_event("e1", "Home Hawks", "Road Bulls",
+                                    [("Star Guard", 17.5, 0.5), ("Star Guard", 29.5, 2.0)]),
+                    "e2": alt_event("e2", "H2", "A2", [("Big Man", 12.5, 1.5)])}[eid]
+        return super().event_odds(sport, eid, markets)
+
+
+class GoblinDemonTest(unittest.TestCase):
+    slate = [{"sport": "NBA", "subject": "Star Guard", "market": "points", "line": "24.5", "mean": "27",
+              "stdev": "5", "books": "FanDuel:-110/-110|DraftKings:-115/-105"},
+             {"sport": "NBA", "subject": "Big Man", "market": "points", "line": "10.5", "mean": "14",
+              "stdev": "3", "books": "FanDuel:-120/+100|DraftKings:-118/-102"}]
+
+    def legs(self, env=None):
+        from linemaker.pro import rows_to_markets, run_pro
+        with mock.patch.dict(os.environ, dict({"LINEMAKER_SKIP_STARTED": "off"}, **(env or {}))):
+            api = FakePPAlt()
+            rows, feed = pp.run_pp(api, "NBA", "2026-10-21", TZ, self.slate)
+            cfg = pp.pp_config()
+            res = run_pro(rows_to_markets(rows), "2026-10-21", cfg)
+        return rows, res, pp.select_legs(res.picks, cfg.pp_floor), api
+
+    def test_multipliers_flow_and_value_ranking(self):
+        rows, res, legs, api = self.legs()
+        self.assertTrue(api.include_multipliers)
+        mults = sorted(float(r["pp_mult"]) for r in rows)
+        self.assertEqual(mults, [0.5, 1.0, 1.0, 1.5, 2.0])
+        demon = next(ev for ev in res.evaluated if ev.market.multiplier == 1.5)
+        self.assertEqual(pp.tier(demon), "demon")
+        self.assertEqual(demon.best.side, "A")                              # More only
+        # one line per player-stat, chosen by hit chance x multiplier
+        self.assertEqual(len({(e.market.subject, e.market.market) for e in legs}), len(legs))
+        for ev in legs:
+            same = [e for e in res.picks if e.market.subject == ev.market.subject]
+            self.assertEqual(pp.leg_value(ev), max(pp.leg_value(e) for e in same))
+        big = next(e for e in legs if e.market.subject == "Big Man")
+        self.assertEqual(big.market.multiplier, 1.5)                         # 14 avg vs 12.5 at 1.5x wins
+
+    def test_entry_payout_scales_with_multipliers(self):
+        _rows, _res, legs, _api = self.legs()
+        e = pp.price_entry("Power", legs[:2])
+        scale = pp.leg_mult(legs[0]) * pp.leg_mult(legs[1])
+        self.assertAlmostEqual(e.payouts[0], 3.0 * scale)
+        bet = {"stake": 10, "pp_kind": "Power", "legs": [{"pp_mult": 1.5}, {"pp_mult": 1.0}]}
+        self.assertEqual(pp.settle_entry(bet, ["won", "won"]), ("won", 35.0))   # 3x * 1.5 = 4.5x
+
+    def test_switches_and_fallbacks(self):
+        rows, *_ = self.legs({"LINEMAKER_PP_DEMONS": "off"})
+        self.assertNotIn(2.0, [float(r["pp_mult"]) for r in rows])
+        self.assertNotIn(1.5, [float(r["pp_mult"]) for r in rows])
+        rows, *_ = self.legs({"LINEMAKER_PP_GOBLINS": "off", "LINEMAKER_PP_DEMONS": "off"})
+        self.assertEqual({float(r["pp_mult"]) for r in rows}, {1.0})
+
+
 class SettleFlowTest(unittest.TestCase):
     def test_logged_entry_settles_from_pp_tracking(self):
         import json
@@ -121,3 +189,25 @@ class SettleFlowTest(unittest.TestCase):
             self.assertEqual(bets.settle(), 1)
             b = bets.load_bets()[0]
         self.assertEqual((b["status"], b["profit"]), ("won", 10.0))      # 2-pick Power 3x on $5
+
+
+class NoMultiplierTest(unittest.TestCase):
+    def test_skipped_unless_env_fallback(self):
+        class NoMult(FakePPAlt):
+            def event_odds(self, sport, eid, markets):
+                d = super().event_odds(sport, eid, markets)
+                for bk in d["bookmakers"]:
+                    for mk in bk["markets"]:
+                        for o in mk["outcomes"]:
+                            o.pop("multiplier", None)
+                return d
+        slate = GoblinDemonTest.slate
+        with mock.patch.dict(os.environ, {"LINEMAKER_SKIP_STARTED": "off"}):
+            rows, _ = pp.run_pp(NoMult(), "NBA", "2026-10-21", TZ, slate)
+        self.assertEqual({float(r["pp_mult"]) for r in rows}, {1.0})            # unknown payout: skipped
+        with mock.patch.dict(os.environ, {"LINEMAKER_SKIP_STARTED": "off", "LINEMAKER_PP_GOBLIN_MULT": "0.75",
+                                          "LINEMAKER_PP_DEMON_MULT": "1.6"}):
+            rows, _ = pp.run_pp(NoMult(), "NBA", "2026-10-21", TZ, slate)
+        got = sorted(float(r["pp_mult"]) for r in rows)
+        self.assertIn(0.75, got)                                                 # 17.5 < 22.5: goblin
+        self.assertIn(1.6, got)                                                  # 29.5 > 22.5: demon

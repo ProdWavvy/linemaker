@@ -344,6 +344,9 @@ class LinemakerChat:
                 cfg, tracker = live_settings(cfg, date)
                 freezer = None
             res = run_pro(rows_to_markets(rows), date, cfg, freezer, tracker)
+            if kind == "pp":
+                from .pp import select_legs
+                res.picks = select_legs(res.picks, cfg.pp_floor)
             res.slate = slate
             res.source_warning = warning
             res.projection_source = source

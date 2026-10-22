@@ -133,6 +133,7 @@ class ProMarket:
     mean_b: Optional[float] = None             # 1x2: opponent's projected goals
     commence: str = ""                         # ISO start time, when known
     links: dict = field(default_factory=dict)  # book -> [betslip link info per side]
+    multiplier: Optional[float] = None         # pick'em payout multiplier (goblin < 1 < demon)
 
     @property
     def key(self) -> str:
@@ -297,6 +298,7 @@ def rows_to_markets(rows) -> list:
             mean_b=_opt_float(r.get("mean_b")),
             commence=(r.get("commence") or "").strip(),
             links=_links(r.get("links")),
+            multiplier=_opt_float(r.get("pp_mult")),
         ))
     return out
 
