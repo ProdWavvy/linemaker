@@ -239,3 +239,45 @@ class BigParlayTest(unittest.TestCase):
         self.assertIn("Open this 12-leg slip on FanDuel", fd.value)
         self.assertIn("hit chance", fd.value)
         self.assertTrue(any(getattr(c, "label", "") == "Log FanDuel parlay" for c in view.children))
+
+
+class MoneylineParlayTest(unittest.TestCase):
+    def test_game_card_gets_parlay_moneylines_button(self):
+        import json
+        from linemaker import bot
+        from linemaker.oddsapi import feed_row, parse_game_odds
+        from linemaker.pro import ProConfig, rows_to_markets, run_pro
+        from linemaker.scan_format import scan_messages
+        path = os.path.join(os.path.dirname(__file__), "fixtures", "oddsapi_nba_odds.json")
+        with open(path) as f:
+            events = json.load(f)[:1]
+        twin = json.loads(json.dumps(events[0]).replace(events[0]["home_team"], "Twin Home")
+                          .replace(events[0]["away_team"], "Twin Away"))
+        twin["id"] = "twin"
+        events.append(twin)
+        rows = []
+        for fm in parse_game_odds(events, "NBA", ZoneInfo("America/New_York")):
+            if fm.bet_type == "moneyline":
+                r = feed_row(fm)
+                r.update(mean="3", stdev="12")
+                rows.append(r)
+        date = rows[0]["date"]
+        res = run_pro(rows_to_markets(rows), date, ProConfig(track=False))
+        res.kind = "games"
+        games = {ev.market.game_id for ev in res.evaluated}
+        self.assertGreaterEqual(len(games), 2)
+        msgs = scan_messages([("NBA", res, {"profiles": {}})], date, ProConfig(track=False))
+
+        async def build():
+            return bot.compact_card(msgs)
+        _embeds, view = asyncio.run(build())
+        btn = next(c for c in view.children if getattr(c, "label", "") == "Parlay moneylines")
+        pool = bot.PICK_DETAILS[btn.custom_id.split(":")[2]]["picks"]
+        self.assertEqual(len(pool), len(games))          # one per game
+        for d in pool:                                   # the side the model thinks wins
+            self.assertEqual(d["ev"].best.blended, max(s.blended for s in d["ev"].sides))
+
+        async def card():
+            return bot.parlay_card([d["ev"] for d in pool])
+        embed, _v = asyncio.run(card())
+        self.assertTrue(any("hit chance" in f.value for f in embed.fields))

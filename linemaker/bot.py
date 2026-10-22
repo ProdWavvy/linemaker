@@ -342,8 +342,10 @@ def _clip_embed(e: discord.Embed, chars: int) -> discord.Embed:
 def compact_card(messages: list) -> tuple:
     """(embeds, view) for one message: summary + board (+ parlays); every pick's full
     write-up behind a dropdown, the scoping notes behind a button."""
-    header, boards, parlays, notes, picks, legs = None, [], [], [], [], []
+    header, boards, parlays, notes, picks, legs, mls = None, [], [], [], [], [], []
     for embeds, detail in messages:
+        if detail and "moneylines" in detail:   # the header: every moneyline, for the ML parlay builder
+            mls, detail = detail["moneylines"], None
         if detail and "legs" in detail:      # a volume board: its legs feed the parlay builder
             boards.extend(embeds)
             legs = detail["legs"]
@@ -374,15 +376,22 @@ def compact_card(messages: list) -> tuple:
             _clip_embed(header, max(len(header.description or "") - over, 300))
     while len(embeds) > 1 and sum(_embed_len(e) for e in embeds) > EMBED_BUDGET:
         notes.insert(0, embeds.pop())        # still too long: move the last one behind Notes
-    view = CompactView(picks, parlays, notes, legs)
+    view = CompactView(picks, parlays, notes, legs, mls)
     return embeds, view
+
+
+def moneyline_button(moneylines: list, row: int = 4) -> discord.ui.Button:
+    key = _remember({"picks": moneylines})
+    return discord.ui.Button(label="Parlay moneylines", emoji="💰", row=row,
+                             style=discord.ButtonStyle.primary, custom_id=f"lm:mkparlay:{key}")
 
 
 class CompactView(discord.ui.View):
     """One scan, one message: a dropdown for each pick's write-up and buttons, parlay
     buttons, and a Notes button. Details answer privately (only you see them)."""
 
-    def __init__(self, picks: list, parlays: list, notes: list, legs: Optional[list] = None):
+    def __init__(self, picks: list, parlays: list, notes: list, legs: Optional[list] = None,
+                 moneylines: Optional[list] = None):
         super().__init__(timeout=None)
         from .staking import _money, stake_tier
         if picks:
@@ -447,6 +456,8 @@ class CompactView(discord.ui.View):
                                   emoji="🎰", row=4, style=discord.ButtonStyle.primary,
                                   custom_id=f"lm:mkparlay:{pkey}")
             self.add_item(b)
+        if moneylines and len(moneylines) >= 2:
+            self.add_item(moneyline_button(moneylines))
         if notes:
             nkey = _remember({"notes": [n.to_dict() for n in notes]})
             b = discord.ui.Button(label="Notes & passes", emoji="ℹ️", row=4,
@@ -591,6 +602,12 @@ async def _send_card(send, messages: list, markdown=None, filename=None, text: s
     if text:
         await send(content=text[:2000])
     for embeds, detail in messages:
+        if detail and "moneylines" in detail:
+            view = discord.ui.View(timeout=None)
+            view.add_item(moneyline_button(detail["moneylines"], row=0))
+            for i, group in enumerate(chunk_embeds(embeds)):
+                await send(embeds=group, **({"view": view} if i == 0 else {}))
+            continue
         if detail is not None:
             await send(embeds=embeds, view=PickView(_remember(detail), detail))
             continue

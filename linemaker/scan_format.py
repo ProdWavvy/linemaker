@@ -239,6 +239,22 @@ def scan_embeds(sections: list, date: str, cfg, title: str = "") -> list:
     return [e for group, _detail in scan_messages(sections, date, cfg, title) for e in group]
 
 
+def moneyline_pool(results: list, n: int = 25) -> list:
+    """Every priced moneyline, one per game, on the side the model thinks wins (not just
+    the gated value plays), likeliest first: the legs for the Parlay moneylines button."""
+    import copy
+    seen, out = set(), []
+    evs = [ev for res in results for ev in res.evaluated if ev.market.bet_type == "moneyline"]
+    for ev in sorted(evs, key=lambda e: -max(s.blended for s in e.sides)):
+        if ev.market.game_id in seen or len(ev.sides) != 2:
+            continue
+        seen.add(ev.market.game_id)
+        leg = copy.copy(ev)
+        leg.chosen = max(ev.sides, key=lambda s: s.blended).side
+        out.append(leg)
+    return [{"rank": i, "ev": ev} for i, ev in enumerate(out[:n], 1)]
+
+
 def scan_messages(sections: list, date: str, cfg, title: str = "") -> list:
     """[(embeds, detail)] in reading order. Each pick is its own message, and its detail
     (pick, hit profile, game context, price history) feeds that message's buttons."""
@@ -304,6 +320,7 @@ def scan_messages(sections: list, date: str, cfg, title: str = "") -> list:
     header.set_footer(text=odds_age_note(sections))
     messages = []
     embeds = [header]
+    mls = moneyline_pool([res for _s, res, _p in sections])
     if ranked:
         board = discord.Embed(title="📊 The Board, Ranked by Probability Gap", color=GOLD,
                               description=_board([e for e, _s, _p in ranked],
@@ -312,7 +329,7 @@ def scan_messages(sections: list, date: str, cfg, title: str = "") -> list:
             board.add_field(name=f"{ranks[id(ev)]}. {_emoji(ev.market.sport)} {ev.best.label[:60]}",
                             value=_short_reason(ev, prof.get(ev.market.key)), inline=False)
         embeds.append(board)
-    messages.append((embeds, None))
+    messages.append((embeds, {"moneylines": mls} if len(mls) >= 2 else None))
 
     for sport, res, prof in sections:
         mine = [(ev, p) for ev, s, p in ranked if s == sport]
