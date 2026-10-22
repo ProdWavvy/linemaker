@@ -570,6 +570,12 @@ class GeminiBusy(RuntimeError):
 def slate_for(sport: str, date: str, kind: str = "props", refresh: bool = False) -> tuple:
     """(rows, slate, credits left, warning, source) for one league and date. Odds are bought
     at most once per LINEMAKER_PLAYS_CACHE_MINUTES; smart and volume mode share the pull."""
+    from .busy import busy
+    with busy():
+        return _slate_for(sport, date, kind, refresh)
+
+
+def _slate_for(sport: str, date: str, kind: str, refresh: bool) -> tuple:
     key = (sport, date, kind)
     hit = None if refresh else (_SLATES.get(key) or load_slate_cache(sport, date, kind))
     window = LIVE_CACHE_SECONDS if kind == "live" else PLAYS_CACHE_SECONDS
@@ -620,11 +626,13 @@ def drop_slate(sport: str, date: str, kind: str = "props"):
 def scan_events(sport: str, date: str, event_ids: set, title: str, only_if_picks: bool = True):
     """Price props for just these games and build the card. None when nothing cleared the
     gates and only_if_picks is set. Returns (messages, result)."""
+    from .busy import busy
     from .live import run_best
     from .scan_format import scan_messages
     snaps = os.environ.get("LINEMAKER_SNAPSHOTS", "snapshots")
     cfg = ProConfig()
-    lr = run_best(OddsAPI(), [sport], date, _tz(), cfg, Freezer(snaps, date), only=set(event_ids))
+    with busy():
+        lr = run_best(OddsAPI(), [sport], date, _tz(), cfg, Freezer(snaps, date), only=set(event_ids))
     res = lr.result
     res.kind, res.odds_age = "props", 0.0
     extras = enrich(res, sport, date)

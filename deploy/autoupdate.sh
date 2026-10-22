@@ -9,6 +9,23 @@ OWNER="$(stat -c %U "$DIR")"
 as_owner() { runuser -u "$OWNER" -- "$@"; }
 cd "$DIR"
 
+PENDING="$DIR/.git/linemaker-restart-pending"
+busy() {   # the bot is answering a question or scanning (marker younger than 10 minutes)
+  local f="$DIR/cache/busy"
+  [ -f "$f" ] && [ $(( $(date +%s) - $(stat -c %Y "$f") )) -lt 600 ]
+}
+restart_bot() {
+  if busy; then
+    echo "linemaker: busy answering; restart deferred to the next check"
+    touch "$PENDING"
+  else
+    systemctl restart linemaker
+    rm -f "$PENDING"
+    echo "linemaker: restarted on $(as_owner git log -1 --format='%h (%s)')"
+  fi
+}
+if [ -f "$PENDING" ]; then restart_bot; fi
+
 BRANCH="$(as_owner git rev-parse --abbrev-ref HEAD)"
 as_owner git fetch -q origin "$BRANCH"
 OLD="$(as_owner git rev-parse HEAD)"
@@ -28,5 +45,4 @@ if ! as_owner .venv/bin/python -c "import sys; sys.path.insert(0, '.'); import l
   echo "$NEW" > "$BAD"
   exit 1
 fi
-systemctl restart linemaker
-echo "linemaker: now running ${NEW:0:7} ($(as_owner git log -1 --format=%s))"
+restart_bot

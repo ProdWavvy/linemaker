@@ -628,6 +628,11 @@ class LinemakerBot(discord.Client):
     async def on_message(self, message: discord.Message):
         if message.author.bot:
             return
+        from .busy import busy
+        with busy():   # the auto-updater waits while a reply is in progress
+            await self._on_message(message)
+
+    async def _on_message(self, message: discord.Message):
         where = f"#{getattr(message.channel, 'name', 'DM')} ({message.channel.id})"
         if self.chat is None:
             log.info("message in %s skipped: chat is off (no GEMINI_API_KEY or "
