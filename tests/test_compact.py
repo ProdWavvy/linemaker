@@ -36,7 +36,7 @@ class CompactCardTest(unittest.TestCase):
         self.assertTrue(any(getattr(c, "label", "") == "Notes & passes" for c in view.children))
         # the dropdown opens the full write-up
         detail = bot.PICK_DETAILS[select.options[0].value]
-        self.assertTrue(detail["embed"].title.startswith("1. "))
+        self.assertTrue(detail["embed"]["title"].startswith("1. "))
 
     def test_send_card_posts_once(self):
         from linemaker import bot
@@ -147,3 +147,56 @@ class ParlayButtonTest(unittest.TestCase):
 def discord_embed(title):
     import discord
     return discord.Embed(title=title, description="d")
+
+
+class RestartTest(unittest.TestCase):
+    """Buttons on a card keep working after the bot restarts."""
+
+    def test_buttons_survive_restart(self):
+        import tempfile
+        from linemaker import bot
+        from linemaker.scan_format import scan_messages
+        res = PicksCardTest._result(None)
+        messages = scan_messages([("NBA", res, {})], "2026-10-21", ProConfig(track=False))
+        with tempfile.TemporaryDirectory() as d, mock.patch.dict(os.environ, {"LINEMAKER_CACHE_DIR": d}):
+            async def build():
+                return bot.compact_card(messages)
+            embeds, view = asyncio.run(build())
+            select = next(c for c in view.children if hasattr(c, "options"))
+            ids = [c.custom_id for c in view.children if getattr(c, "custom_id", None)]
+            bot.save_details()
+            bot.PICK_DETAILS.clear()                 # the restart
+            bot.load_details()
+            sent = []
+
+            class Resp:
+                async def send_message(self, *a, **kw):
+                    sent.append(kw)
+
+                async def send_modal(self, modal):
+                    sent.append({"modal": modal})
+
+            class Inter:
+                def __init__(self, cid, values=None):
+                    self.data = {"custom_id": cid, "values": values or []}
+                    self.response = Resp()
+                    self.type = None
+
+            async def press():
+                ok = await bot.route_component(Inter(select.custom_id, [select.options[0].value]))
+                for cid in ids:
+                    if cid.startswith(("lm:notes:", "lm:mkparlay:")):
+                        await bot.route_component(Inter(cid))
+                return ok
+            self.assertTrue(asyncio.run(press()))
+        self.assertTrue(sent[0]["embed"].title.startswith("1. "))      # the pick write-up
+        self.assertTrue(sent[0]["ephemeral"])
+        self.assertTrue(any("view" in kw and kw.get("ephemeral") for kw in sent[1:]))   # parlay picker
+        self.assertTrue(any("embeds" in kw for kw in sent))            # notes
+
+    def test_not_ours(self):
+        from linemaker import bot
+
+        class Inter:
+            data = {"custom_id": "someone-else"}
+        self.assertFalse(asyncio.run(bot.route_component(Inter())))

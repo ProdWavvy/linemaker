@@ -83,8 +83,74 @@ async def _save_attachment(att: discord.Attachment, suffix: str) -> str:
     return path
 
 
-PICK_DETAILS = {}          # button key -> pick detail (kept in memory until restart)
+PICK_DETAILS = {}          # button key -> pick detail (saved to disk, so buttons survive restarts)
 MAX_DETAILS = 2000
+SAVED_DETAILS = 800        # how many of the newest are kept on disk
+
+
+def _details_path() -> str:
+    return os.path.join(os.environ.get("LINEMAKER_CACHE_DIR", "cache"), "pick_details.pkl")
+
+
+def save_details():
+    """Write the newest button details to disk (skips anything that can't be saved)."""
+    import pickle
+    keep = {}
+    for k in list(PICK_DETAILS)[-SAVED_DETAILS:]:
+        try:
+            pickle.dumps(PICK_DETAILS[k])
+            keep[k] = PICK_DETAILS[k]
+        except Exception:
+            continue
+    path = _details_path()
+    try:
+        os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+        with open(path + ".tmp", "wb") as f:
+            pickle.dump(keep, f)
+        os.replace(path + ".tmp", path)
+    except OSError as e:
+        log.warning("couldn't save button details: %s", e)
+
+
+def load_details():
+    import pickle
+    try:
+        with open(_details_path(), "rb") as f:
+            PICK_DETAILS.update(pickle.load(f))
+        log.info("buttons restored for %d saved picks", len(PICK_DETAILS))
+    except (OSError, EOFError, pickle.UnpicklingError, AttributeError, ImportError) as e:
+        if not isinstance(e, FileNotFoundError):
+            log.warning("couldn't load button details: %s", e)
+
+
+async def route_component(interaction: discord.Interaction) -> bool:
+    """Answer every Linemaker button / menu press by its custom_id, so cards posted before
+    a restart keep working. Returns False for components that aren't ours."""
+    cid = (interaction.data or {}).get("custom_id", "")
+    if not cid.startswith("lm:"):
+        return False
+    parts = cid.split(":")
+    kind, key = parts[1], parts[2] if len(parts) > 2 else ""
+    pages = {k: page for k, _label, _emoji, page in BUTTONS}
+    if kind == "bet":
+        handler = PickView._bet_single(key)
+    elif kind == "betp":
+        handler = PickView._bet_parlay(key, int(parts[3]))
+    elif kind == "pick":
+        values = (interaction.data or {}).get("values") or [key]
+        handler = CompactView._show_pick(values[0])
+    elif kind == "pplog":
+        handler = _pp_log(key, int(parts[3]))
+    elif kind == "mkparlay":
+        handler = CompactView._parlay_picker(key)
+    elif kind == "notes":
+        handler = CompactView._show_notes(key)
+    elif kind in pages:
+        handler = PickView._handler(key, pages[kind])
+    else:
+        return False
+    await handler(interaction)
+    return True
 BUTTONS = (("odds", "Odds Comparison", "🏷️", odds_page), ("chart", "Hit Rate Chart", "📊", chart_page),
            ("move", "Line Movement", "📉", movement_page), ("stats", "Key Stats", "📈", stats_page))
 
@@ -105,19 +171,16 @@ class PickView(discord.ui.View):
         if "ev" in detail:
             button = discord.ui.Button(label="I bet this", emoji="📝", row=1,
                                        style=discord.ButtonStyle.success, custom_id=f"lm:bet:{key}")
-            button.callback = self._bet_single(key)
             self.add_item(button)
         for i, p in enumerate((detail.get("parlays") or [])[:4]):
             button = discord.ui.Button(label=f"Log {len(p.legs)}-leg {p.book}", emoji="📝", row=2,
                                        style=discord.ButtonStyle.success, custom_id=f"lm:betp:{key}:{i}")
-            button.callback = self._bet_parlay(key, i)
             self.add_item(button)
         if "ev" not in detail and detail:
             return   # a parlay card: bet buttons only
         for kind, label, emoji, page in BUTTONS:
             button = discord.ui.Button(label=label, emoji=emoji, style=discord.ButtonStyle.secondary,
                                        custom_id=f"lm:{kind}:{key}")
-            button.callback = self._handler(key, page)
             self.add_item(button)
 
     @staticmethod
@@ -323,7 +386,7 @@ class CompactView(discord.ui.View):
             for embed, detail in picks[:25]:
                 ev = detail["ev"]
                 s = ev.best
-                key = _remember(dict(detail, embed=embed))
+                key = _remember(dict(detail, embed=embed.to_dict()))
                 stake = stake_tier(s.blended, s.best_odds)
                 desc = f"{fmt_odds(s.best_odds)} {s.best_book} · {s.blended:.0%} hit" + (
                     f" · {_money(stake)}" if stake else "")
@@ -331,7 +394,6 @@ class CompactView(discord.ui.View):
                                                     description=desc[:100], value=key))
             pick = discord.ui.Select(placeholder="🔎 See a pick: write-up, Bet buttons, I bet this",
                                      options=options, row=0, custom_id=f"lm:pick:{options[0].value}")
-            pick.callback = self._show_pick(pick)
             self.add_item(pick)
         row, count = 1, 0
         for _embed, detail in [p for p in parlays if "pp" in p[1]]:
@@ -354,7 +416,6 @@ class CompactView(discord.ui.View):
                     break
                 b = discord.ui.Button(label=f"Log {e.size}-pick {e.kind}", emoji="📝", row=row,
                                       style=discord.ButtonStyle.success, custom_id=f"lm:pplog:{key}:{i}")
-                b.callback = _pp_log(key, i)
                 self.add_item(b)
                 count += 1
                 row, count = (row + 1, 0) if count == 5 else (row, count)
@@ -372,7 +433,6 @@ class CompactView(discord.ui.View):
                 b = discord.ui.Button(label=f"Log {len(p.legs)}-leg {p.book}", emoji="📝", row=row,
                                       style=discord.ButtonStyle.success,
                                       custom_id=f"lm:betp:{key}:{i}")
-                b.callback = PickView._bet_parlay(key, i)
                 self.add_item(b)
                 count += 1
                 row, count = (row + 1, 0) if count == 5 else (row, count)
@@ -380,13 +440,11 @@ class CompactView(discord.ui.View):
             pkey = _remember({"picks": [d for _e, d in picks[:25]]})
             b = discord.ui.Button(label="Turn into parlay", emoji="🎰", row=4,
                                   style=discord.ButtonStyle.primary, custom_id=f"lm:mkparlay:{pkey}")
-            b.callback = self._parlay_picker(pkey)
             self.add_item(b)
         if notes:
-            nkey = _remember({"notes": notes})
+            nkey = _remember({"notes": [n.to_dict() for n in notes]})
             b = discord.ui.Button(label="Notes & passes", emoji="ℹ️", row=4,
                                   style=discord.ButtonStyle.secondary, custom_id=f"lm:notes:{nkey}")
-            b.callback = self._show_notes(nkey)
             self.add_item(b)
 
     @staticmethod
@@ -405,17 +463,18 @@ class CompactView(discord.ui.View):
         return callback
 
     @staticmethod
-    def _show_pick(select):
+    def _show_pick(key):
         async def callback(interaction: discord.Interaction):
-            key = select.values[0]
             detail = PICK_DETAILS.get(key)
             if detail is None:
                 await interaction.response.send_message(
                     "This card is from before the bot restarted. Ask again for fresh numbers.",
                     ephemeral=True)
                 return
-            await interaction.response.send_message(embed=detail["embed"],
-                                                    view=PickView(key, detail), ephemeral=True)
+            embed = detail["embed"]
+            embed = discord.Embed.from_dict(embed) if isinstance(embed, dict) else embed
+            await interaction.response.send_message(embed=embed, view=PickView(key, detail),
+                                                    ephemeral=True)
         return callback
 
     @staticmethod
@@ -426,7 +485,8 @@ class CompactView(discord.ui.View):
                 await interaction.response.send_message("These notes expired with a restart.",
                                                         ephemeral=True)
                 return
-            await interaction.response.send_message(embeds=detail["notes"][:10], ephemeral=True)
+            notes = [discord.Embed.from_dict(n) if isinstance(n, dict) else n for n in detail["notes"]]
+            await interaction.response.send_message(embeds=notes[:10], ephemeral=True)
         return callback
 
 
@@ -463,7 +523,6 @@ def parlay_card(legs: list) -> tuple:
         key = _remember({"parlays": [p]})
         b = discord.ui.Button(label=f"Log {p.book} parlay", emoji="📝", style=discord.ButtonStyle.success,
                               custom_id=f"lm:betp:{key}:0")
-        b.callback = PickView._bet_parlay(key, 0)
         view.add_item(b)
     if not built:
         embed.add_field(name="Can't price this one",
@@ -506,6 +565,7 @@ class ParlayPickerView(discord.ui.View):
                       else self.picks)
             embed, view = parlay_card([d["ev"] for d in chosen])
             await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
+            await asyncio.to_thread(save_details)
         return callback
 
 
@@ -518,6 +578,7 @@ async def _send_card(send, messages: list, markdown=None, filename=None, text: s
     if card_style() == "compact" and any(d is not None for _e, d in messages):
         embeds, view = compact_card(messages)
         await send(content=text[:2000] or None, embeds=embeds, view=view)
+        await asyncio.to_thread(save_details)
         return
     if text:
         await send(content=text[:2000])
@@ -527,6 +588,7 @@ async def _send_card(send, messages: list, markdown=None, filename=None, text: s
             continue
         for group in chunk_embeds(embeds):
             await send(embeds=group)
+    await asyncio.to_thread(save_details)
 
 
 def build_pro(slate_path: str, date: str, cfg: ProConfig):
@@ -643,6 +705,7 @@ class LinemakerBot(discord.Client):
             self.chat_channels.add(self.home)
 
     async def setup_hook(self):
+        await asyncio.to_thread(load_details)   # buttons on earlier cards keep working
         # Linemaker owns this application: each sync replaces the whole command list, so
         # commands left over from whatever the bot ran before are removed.
         guild_id = os.environ.get("LINEMAKER_GUILD_ID")
@@ -687,6 +750,17 @@ class LinemakerBot(discord.Client):
     def alert_channel_id(self) -> Optional[int]:
         raw = os.environ.get("LINEMAKER_CHANNEL_ID") or self.home
         return int(raw) if raw else None
+
+    async def on_interaction(self, interaction: discord.Interaction):
+        if interaction.type == discord.InteractionType.component:
+            try:
+                await route_component(interaction)
+            except Exception as e:
+                log.exception("button failed")
+                try:
+                    await _report_error(interaction, e)
+                except Exception:
+                    pass
 
     async def on_ready(self):
         log.info("logged in as %s (chat %s)", self.user,
