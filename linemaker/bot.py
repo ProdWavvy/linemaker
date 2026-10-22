@@ -143,6 +143,8 @@ async def route_component(interaction: discord.Interaction) -> bool:
         handler = _pp_log(key, int(parts[3]))
     elif kind == "mkparlay":
         handler = CompactView._parlay_picker(key)
+    elif kind == "slip":
+        handler = _slip_tap(key, parts[3], parts[4], parts[5])
     elif kind == "notes":
         handler = CompactView._show_notes(key)
     elif kind in pages:
@@ -475,11 +477,8 @@ class CompactView(discord.ui.View):
                     "This card is from before the bot restarted. Ask again for fresh picks.",
                     ephemeral=True)
                 return
-            await interaction.response.send_message(
-                "🎰 **Build a parlay:** tap legs in the menu to add or remove them. Each time the "
-                "menu closes, this slip re-prices at "
-                f"{' and '.join(detail.get('books') or PARLAY_BOOKS)}: hit chance, EV, payout.",
-                view=ParlayPickerView(detail["picks"], detail.get("books")), ephemeral=True)
+            embed, view = slip_message(key)
+            await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
         return callback
 
     @staticmethod
@@ -567,74 +566,82 @@ def parlay_card(legs: list, books: Optional[tuple] = None) -> tuple:
     return embed, view
 
 
-class ParlayPickerView(discord.ui.View):
-    """Private live slip: choose legs from a scan's picks and the message re-prices itself
-    every time the menu closes (hit chance, EV, payout and odds at each book), so you can
-    keep adding or removing legs. The Bet and Log buttons follow the current slip."""
-
-    def __init__(self, picks: list, books: Optional[tuple] = None, selected=(), slip=None):
-        super().__init__(timeout=1800)
-        self.picks, self.books, self.selected = picks, books, list(selected)
-        from .parlay import leg_price
-        short = {"FanDuel": "FD", "DraftKings": "DK"}
-        options = []
-        for i, d in enumerate(picks):
-            ev = d["ev"]
-            prices = " · ".join(f"{short.get(b, b)} {fmt_odds(o)}" for b in (books or PARLAY_BOOKS)
-                                for o in [leg_price(ev, b)] if o)
-            options.append(discord.SelectOption(
-                label=f"{d['rank']}. {ev.best.label}"[:100], value=str(i), default=i in self.selected,
-                description=f"{prices or fmt_odds(ev.best.best_odds)} · {ev.best.blended:.0%} hit"[:100]))
-        select = discord.ui.Select(placeholder="➕➖ Tap legs to add or remove, then close the menu",
-                                   options=options, min_values=1, max_values=len(options), row=0)
-        select.callback = self._pick(select)
-        self.add_item(select)
-        everything = discord.ui.Button(label=f"Use all {len(picks)} picks", emoji="🎯", row=1,
-                                       style=discord.ButtonStyle.primary)
-        everything.callback = self._set(list(range(len(picks))))
-        self.add_item(everything)
-        if self.selected:
-            clear = discord.ui.Button(label="Clear", emoji="🧹", row=1, style=discord.ButtonStyle.secondary)
-            clear.callback = self._set([])
-            self.add_item(clear)
-        for i, item in enumerate(slip.children if slip else []):   # Bet / Log for this slip
-            item.row = 2 + i // 5
-            self.add_item(item)
-
-    def _pick(self, select):
-        async def callback(interaction: discord.Interaction):
-            await self._show(interaction, [int(v) for v in select.values])
-        return callback
-
-    def _set(self, chosen):
-        async def callback(interaction: discord.Interaction):
-            await self._show(interaction, chosen)
-        return callback
-
-    async def _show(self, interaction, chosen: list):
-        embed, view = slip_message(self.picks, self.books, chosen)
-        await interaction.response.edit_message(content=None, embed=embed, view=view)
-        await asyncio.to_thread(save_details)
+SLIP_PAGE = 15   # leg buttons per page (3 rows); the last two rows hold the controls
 
 
-def slip_message(picks: list, books: Optional[tuple], chosen: list) -> tuple:
-    """(embed, picker view) for the live slip with these legs picked."""
-    chosen = sorted(set(chosen))
+def slip_message(key: str, mask: int = 0, page: int = 0) -> tuple:
+    """(embed, view) for the live slip: one button per leg, and every tap re-prices it
+    (hit chance, EV, payout, odds at each book). State rides in the buttons' custom_ids
+    (pool key, chosen legs as a bitmask, page), so the slip never expires and survives
+    restarts."""
+    from .parlay import leg_price
+    detail = PICK_DETAILS[key]
+    picks, books = detail["picks"], detail.get("books")
+    chosen = [i for i in range(len(picks)) if mask >> i & 1]
     if len(chosen) >= 2:
         embed, slip = parlay_card([picks[i]["ev"] for i in chosen], books)
         embed.title += " · live slip"
-        return embed, ParlayPickerView(picks, books, chosen, slip)
-    from .parlay import leg_price
-    if chosen:
-        ev = picks[chosen[0]]["ev"]
-        prices = " · ".join(f"{b} {fmt_odds(o)}" for b in (books or PARLAY_BOOKS)
-                            for o in [leg_price(ev, b)] if o)
-        desc = (f"• **{ev.best.label}** · {prices} · {ev.best.blended:.0%} hit\n\n"
-                "Add at least one more leg to see the parlay price, EV and payout.")
     else:
-        desc = "No legs yet. Open the menu and tap the legs you want."
-    embed = discord.Embed(title="🎰 Your Parlay · live slip", color=0xF1C40F, description=desc)
-    return embed, ParlayPickerView(picks, books, chosen)
+        slip = None
+        if chosen:
+            ev = picks[chosen[0]]["ev"]
+            prices = " · ".join(f"{b} {fmt_odds(o)}" for b in (books or PARLAY_BOOKS)
+                                for o in [leg_price(ev, b)] if o)
+            desc = (f"• **{ev.best.label}** · {prices} · {ev.best.blended:.0%} hit\n\n"
+                    "Tap one more leg to see the parlay price, EV and payout.")
+        else:
+            desc = "Tap legs below to add them (tap again to remove). The slip re-prices on every tap."
+        embed = discord.Embed(title="🎰 Your Parlay · live slip", color=0xF1C40F, description=desc)
+    pages = max(1, -(-len(picks) // SLIP_PAGE))
+    page = min(max(page, 0), pages - 1)
+    view = discord.ui.View(timeout=None)
+    base = f"lm:slip:{key}:{mask:x}:{page}"
+    short = {"FanDuel": "FD", "DraftKings": "DK"}
+    for n, i in enumerate(range(page * SLIP_PAGE, min(len(picks), (page + 1) * SLIP_PAGE))):
+        ev, on = picks[i]["ev"], mask >> i & 1
+        price = next((f"{short.get(b, b)} {fmt_odds(o)}" for b in (books or PARLAY_BOOKS)
+                      for o in [leg_price(ev, b)] if o), fmt_odds(ev.best.best_odds))
+        view.add_item(discord.ui.Button(
+            label=(f"{'✅ ' if on else ''}{picks[i]['rank']}. {ev.best.label}"[:62]
+                   + f" · {price} · {ev.best.blended:.0%}")[:80],
+            style=discord.ButtonStyle.success if on else discord.ButtonStyle.secondary,
+            row=n // 5, custom_id=f"{base}:t{i}"))
+    if pages > 1:
+        view.add_item(discord.ui.Button(label="Prev", emoji="◀️", row=3, disabled=page == 0,
+                                        custom_id=f"{base}:p{page - 1}"))
+        view.add_item(discord.ui.Button(label=f"Next ({page + 1}/{pages})", emoji="▶️", row=3,
+                                        disabled=page == pages - 1, custom_id=f"{base}:p{page + 1}"))
+    view.add_item(discord.ui.Button(label=f"Use all {len(picks)}", emoji="🎯", row=3,
+                                    style=discord.ButtonStyle.primary, custom_id=f"{base}:all"))
+    if mask:
+        view.add_item(discord.ui.Button(label="Clear", emoji="🧹", row=3, custom_id=f"{base}:clr"))
+    for item in (slip.children if slip else []):     # Bet / Log for the current slip
+        item.row = 4
+        view.add_item(item)
+    return embed, view
+
+
+def _slip_tap(key: str, mask: str, page: str, action: str):
+    async def callback(interaction: discord.Interaction):
+        if key not in PICK_DETAILS:
+            await interaction.response.send_message(
+                "This slip's picks are gone (the card is too old). Ask again for fresh picks.",
+                ephemeral=True)
+            return
+        PICK_DETAILS[key] = PICK_DETAILS.pop(key)    # in use: keep it from being pruned
+        m, pg, n = int(mask, 16), int(page), len(PICK_DETAILS[key]["picks"])
+        if action.startswith("t"):
+            m ^= 1 << int(action[1:])
+        elif action.startswith("p"):
+            pg = int(action[1:])
+        elif action == "all":
+            m = (1 << n) - 1
+        elif action == "clr":
+            m = 0
+        embed, view = slip_message(key, m, pg)
+        await interaction.response.edit_message(content=None, embed=embed, view=view)
+        await asyncio.to_thread(save_details)
+    return callback
 
 
 async def _send_card(send, messages: list, markdown=None, filename=None, text: str = ""):

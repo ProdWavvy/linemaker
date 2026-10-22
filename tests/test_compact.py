@@ -87,9 +87,9 @@ class CompactCardTest(unittest.TestCase):
         self.assertEqual(len(pool), len(res.picks))                  # every leg, not just 2-4
 
         async def picker():
-            return _bot.ParlayPickerView(pool)
-        sel = next(c for c in asyncio.run(picker()).children if hasattr(c, "options"))
-        self.assertEqual(sel.max_values, len(res.picks))              # choose as many as you like
+            return _bot.slip_message(build.custom_id.split(":")[2], (1 << len(pool)) - 1)
+        embed, sview = asyncio.run(picker())
+        self.assertIn(f"{len(pool)}-Leg Parlay", embed.title)        # as many legs as you like
 
     def test_nothing_cleared_shows_why_inline(self):
         from linemaker import bot
@@ -141,7 +141,8 @@ class ParlayButtonTest(unittest.TestCase):
                                     [([discord_embed(f"{i}. x")], {"rank": i, "ev": ev, "profile": None})
                                      for i, ev in enumerate(legs, 1)])
             embed, view = bot.parlay_card(legs)
-            picker = bot.ParlayPickerView([{"rank": i, "ev": ev} for i, ev in enumerate(legs, 1)])
+            picker = bot.slip_message(bot._remember({"picks": [{"rank": i, "ev": ev}
+                                                              for i, ev in enumerate(legs, 1)]}))[1]
             return card, embed, view, picker
         (embeds, cview), embed, view, picker = asyncio.run(build())
         self.assertTrue(any(getattr(c, "label", "") == "Turn into parlay" for c in cview.children))
@@ -151,8 +152,7 @@ class ParlayButtonTest(unittest.TestCase):
         self.assertIn("Not offered here", embed.fields[1].value)
         labels = [getattr(c, "label", "") for c in view.children]
         self.assertIn("Log FanDuel parlay", labels)
-        select = next(c for c in picker.children if hasattr(c, "options"))
-        self.assertEqual((select.min_values, select.max_values), (1, 3))
+        self.assertEqual(sum(1 for c in picker.children if ":t" in (c.custom_id or "")), 3)
 
 
 def discord_embed(title):
@@ -325,24 +325,60 @@ class OneBookTest(unittest.TestCase):
 
 
 class LiveSlipTest(unittest.TestCase):
-    def test_slip_reprices_as_legs_change(self):
+    def test_every_tap_reprices(self):
         from linemaker import bot
         legs = ParlayButtonTest._legs(ParlayButtonTest())
-        picks = [{"rank": i, "ev": ev} for i, ev in enumerate(legs, 1)]
+        key = bot._remember({"picks": [{"rank": i, "ev": ev} for i, ev in enumerate(legs, 1)]})
 
-        async def build(chosen):
-            return bot.slip_message(picks, None, chosen)
-        one, v1 = asyncio.run(build([0]))
-        self.assertIn("Add at least one more leg", one.description)
-        two, v2 = asyncio.run(build([0, 1]))
-        self.assertEqual(two.title, "🎰 Your 2-Leg Parlay · live slip")
-        self.assertIn("hit chance", two.fields[0].value)
-        self.assertIn("EV", two.fields[0].value)
-        sel = next(c for c in v2.children if hasattr(c, "options"))
-        self.assertEqual([o.default for o in sel.options], [True, True, False])   # remembers picks
-        self.assertIn("FD", sel.options[0].description)
-        labels = [getattr(c, "label", "") for c in v2.children]
-        self.assertIn("Log FanDuel parlay", labels)
-        self.assertIn("Clear", labels)
-        three, _v = asyncio.run(build([0, 1, 2]))
-        self.assertEqual(three.title, "🎰 Your 3-Leg Parlay · live slip")
+        class Resp:
+            def __init__(self):
+                self.edited = None
+
+            async def edit_message(self, **kw):
+                self.edited = kw
+
+        class Inter:
+            def __init__(self, cid):
+                self.data = {"custom_id": cid}
+                self.response = Resp()
+
+        def tap(cid):
+            it = Inter(cid)
+            self.assertTrue(asyncio.run(bot.route_component(it)))
+            return it.response.edited["embed"], it.response.edited["view"]
+
+        def btn(view, suffix):
+            return next(c for c in view.children if (c.custom_id or "").endswith(suffix))
+
+        async def first():
+            return bot.slip_message(key)
+        _e, v = asyncio.run(first())
+        e, v = tap(btn(v, ":t0").custom_id)
+        self.assertIn("Tap one more leg", e.description)
+        self.assertTrue(btn(v, ":t0").label.startswith("✅"))
+        e, v = tap(btn(v, ":t1").custom_id)
+        self.assertEqual(e.title, "🎰 Your 2-Leg Parlay · live slip")
+        self.assertIn("hit chance", e.fields[0].value)
+        self.assertIn("EV", e.fields[0].value)
+        self.assertIn("Log FanDuel parlay", [c.label for c in v.children])
+        e, v = tap(btn(v, ":t2").custom_id)
+        self.assertEqual(e.title, "🎰 Your 3-Leg Parlay · live slip")
+        e, v = tap(btn(v, ":t0").custom_id)                          # tap again removes it
+        self.assertEqual(e.title, "🎰 Your 2-Leg Parlay · live slip")
+        self.assertFalse(btn(v, ":t0").label.startswith("✅"))
+        e, v = tap(btn(v, ":clr").custom_id)
+        self.assertIn("Tap legs below", e.description)
+        self.assertTrue(all(len(c.custom_id or "") <= 100 and len(c.label or "") <= 80 for c in v.children))
+
+    def test_pages_for_25_legs(self):
+        from linemaker import bot
+        legs = ParlayButtonTest._legs(ParlayButtonTest())
+        key = bot._remember({"picks": [{"rank": i, "ev": legs[i % 3]} for i in range(1, 26)]})
+
+        async def build(page):
+            return bot.slip_message(key, (1 << 25) - 1, page)
+        _e, v0 = asyncio.run(build(0))
+        _e, v1 = asyncio.run(build(1))
+        self.assertEqual(sum(":t" in c.custom_id for c in v0.children if c.custom_id), 15)
+        self.assertEqual(sum(":t" in c.custom_id for c in v1.children if c.custom_id), 10)
+        self.assertLessEqual(len(v0.children), 25)
