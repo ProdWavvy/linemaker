@@ -286,7 +286,7 @@ def _log_link_sample(feed: list):
     with_links = sum(1 for fm in feed if fm.links)
     log.info("bet links: %d of %d markets have them; samples: %s", with_links, len(feed),
              "; ".join(f"{b} {e.get('link') or 'sid=' + str(e.get('sid'))}"
-                       for b, e in seen.items() if b in ("FanDuel", "DraftKings")) or "none")
+                       for b, e in seen.items() if b in ("FanDuel", "DraftKings", "PrizePicks")) or "none")
 
 
 def board_lines(feed: list) -> list:
