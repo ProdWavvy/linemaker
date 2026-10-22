@@ -215,11 +215,147 @@ def _remember(detail: dict) -> str:
     return key
 
 
-async def _send_card(send, messages: list, markdown=None, filename=None):
-    """Post a value scan: header and board, then one message per pick with its buttons,
-    then the long-term and scoping notes. Plain embed lists are posted as-is."""
+EMBED_BUDGET = 5800   # Discord allows 6000 characters across one message's embeds
+
+
+def card_style() -> str:
+    """compact (default): one message per scan; full: one message per pick."""
+    return "full" if os.environ.get("LINEMAKER_CARD_STYLE", "compact").strip().lower() == "full" else "compact"
+
+
+def _embed_len(e: discord.Embed) -> int:
+    n = len(e.title or "") + len(e.description or "") + len(e.footer.text or "" if e.footer else "")
+    return n + sum(len(f.name) + len(f.value) for f in e.fields)
+
+
+def _clip_embed(e: discord.Embed, chars: int) -> discord.Embed:
+    d = e.description or ""
+    if len(d) > chars:
+        e.description = d[:max(chars - 1, 0)].rsplit("\n", 1)[0] + "…"
+    return e
+
+
+def compact_card(messages: list) -> tuple:
+    """(embeds, view) for one message: summary + board (+ parlays); every pick's full
+    write-up behind a dropdown, the scoping notes behind a button."""
+    header, boards, parlays, notes, picks = None, [], [], [], []
+    for embeds, detail in messages:
+        if detail and "ev" in detail:
+            picks.append((embeds[0], detail))
+            continue
+        if detail and "parlays" in detail:
+            parlays.append((embeds[0], detail))
+            continue
+        for e in embeds:
+            title, desc = e.title or "", e.description or ""
+            if header is None:
+                header = e
+            elif title.startswith(("📊", "✅")):
+                boards.append(e)
+            elif " from " in desc and desc.rstrip(".").split()[-1] in ("game", "games"):
+                continue          # "🏀 NBA · 10 plays from 6 games" section labels
+            else:
+                notes.append(e)
+    embeds = [e for e in [header] + boards + [p[0] for p in parlays] if e is not None][:10]
+    if not picks and not parlays:        # nothing cleared: the notes are the answer
+        embeds += notes[:10 - len(embeds)]
+        notes = []
+    if header is not None:
+        over = sum(_embed_len(e) for e in embeds) - EMBED_BUDGET
+        if over > 0:
+            _clip_embed(header, max(len(header.description or "") - over, 300))
+    while len(embeds) > 1 and sum(_embed_len(e) for e in embeds) > EMBED_BUDGET:
+        notes.insert(0, embeds.pop())        # still too long: move the last one behind Notes
+    view = CompactView(picks, parlays, notes)
+    return embeds, view
+
+
+class CompactView(discord.ui.View):
+    """One scan, one message: a dropdown for each pick's write-up and buttons, parlay
+    buttons, and a Notes button. Details answer privately (only you see them)."""
+
+    def __init__(self, picks: list, parlays: list, notes: list):
+        super().__init__(timeout=None)
+        from .staking import _money, stake_tier
+        if picks:
+            options = []
+            for embed, detail in picks[:25]:
+                ev = detail["ev"]
+                s = ev.best
+                key = _remember(dict(detail, embed=embed))
+                stake = stake_tier(s.blended, s.best_odds)
+                desc = f"{fmt_odds(s.best_odds)} {s.best_book} · {s.blended:.0%} hit" + (
+                    f" · {_money(stake)}" if stake else "")
+                options.append(discord.SelectOption(label=f"{detail['rank']}. {s.label}"[:100],
+                                                    description=desc[:100], value=key))
+            pick = discord.ui.Select(placeholder="🔎 See a pick: write-up, Bet buttons, I bet this",
+                                     options=options, row=0, custom_id=f"lm:pick:{options[0].value}")
+            pick.callback = self._show_pick(pick)
+            self.add_item(pick)
+        row, count = 1, 0
+        for _embed, detail in parlays:
+            key = _remember(detail)
+            for label, url in detail.get("links") or []:
+                if url and len(url) <= 512 and row <= 3:
+                    self.add_item(discord.ui.Button(label=label[:80], url=url, row=row,
+                                                    emoji="🟦" if "FanDuel" in label else "🟩"))
+                    count += 1
+                    row, count = (row + 1, 0) if count == 5 else (row, count)
+            for i, p in enumerate((detail.get("parlays") or [])[:4]):
+                if row > 3:
+                    break
+                b = discord.ui.Button(label=f"Log {len(p.legs)}-leg {p.book}", emoji="📝", row=row,
+                                      style=discord.ButtonStyle.success,
+                                      custom_id=f"lm:betp:{key}:{i}")
+                b.callback = PickView._bet_parlay(key, i)
+                self.add_item(b)
+                count += 1
+                row, count = (row + 1, 0) if count == 5 else (row, count)
+        if notes:
+            nkey = _remember({"notes": notes})
+            b = discord.ui.Button(label="Notes & passes", emoji="ℹ️", row=4,
+                                  style=discord.ButtonStyle.secondary, custom_id=f"lm:notes:{nkey}")
+            b.callback = self._show_notes(nkey)
+            self.add_item(b)
+
+    @staticmethod
+    def _show_pick(select):
+        async def callback(interaction: discord.Interaction):
+            key = select.values[0]
+            detail = PICK_DETAILS.get(key)
+            if detail is None:
+                await interaction.response.send_message(
+                    "This card is from before the bot restarted. Ask again for fresh numbers.",
+                    ephemeral=True)
+                return
+            await interaction.response.send_message(embed=detail["embed"],
+                                                    view=PickView(key, detail), ephemeral=True)
+        return callback
+
+    @staticmethod
+    def _show_notes(key):
+        async def callback(interaction: discord.Interaction):
+            detail = PICK_DETAILS.get(key)
+            if detail is None:
+                await interaction.response.send_message("These notes expired with a restart.",
+                                                        ephemeral=True)
+                return
+            await interaction.response.send_message(embeds=detail["notes"][:10], ephemeral=True)
+        return callback
+
+
+async def _send_card(send, messages: list, markdown=None, filename=None, text: str = ""):
+    """Post a value scan. Compact (default): one message with a pick dropdown. Full: header
+    and board, then one message per pick with its buttons, then the notes. Plain embed
+    lists are posted as-is."""
     if messages and not isinstance(messages[0], tuple):
         messages = [(messages, None)]
+    if card_style() == "compact" and any(d is not None for _e, d in messages):
+        embeds, view = compact_card(messages)
+        await send(content=text[:2000] or None, embeds=embeds, view=view)
+        return
+    if text:
+        await send(content=text[:2000])
     for embeds, detail in messages:
         if detail is not None:
             await send(embeds=embeds, view=PickView(_remember(detail), detail))
@@ -452,19 +588,22 @@ class LinemakerBot(discord.Client):
             else:
                 cards = scan_messages(turn.results, today(), ProConfig())
         none = discord.AllowedMentions.none()
-        for i, chunk in enumerate(chunks):
-            last = i == len(chunks) - 1
-            send = message.reply if i == 0 else message.channel.send
-            await send(chunk, files=files if last else [], allowed_mentions=none)
+        # A short reply (the "I'll re-check before tip" note) rides on the card itself.
+        inline = cards and not files and card_style() == "compact" and len(chunks) <= 1
+        if not inline:
+            for i, chunk in enumerate(chunks):
+                last = i == len(chunks) - 1
+                send = message.reply if i == 0 else message.channel.send
+                await send(chunk, files=files if last else [], allowed_mentions=none)
         if cards:
-            first = not chunks
+            first = inline or not chunks
 
             async def send_cards(**kw):
                 nonlocal first
                 fn = message.reply if first else message.channel.send
                 first = False
                 return await fn(allowed_mentions=none, **kw)
-            await _send_card(send_cards, cards)
+            await _send_card(send_cards, cards, text=chunks[0] if inline and chunks else "")
 
 
 bot = LinemakerBot()
