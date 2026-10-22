@@ -69,3 +69,35 @@ def build_parlays(legs: list, sizes=(2, 3, 4), books=PARLAY_BOOKS) -> list:
                 p.decimal *= american_to_decimal(odds)
             out.append(p)
     return out
+
+
+def custom_parlays(legs: list, books=PARLAY_BOOKS) -> list:
+    """Your own parlay from chosen picks, priced at each book with that book's leg prices.
+    Returns [(Parlay, [labels of legs that book doesn't offer])]. Same-game legs are kept
+    (it's your slip) but flagged by same_game()."""
+    out = []
+    for book in books:
+        priced, missing = [], []
+        for ev in legs:
+            odds = leg_price(ev, book)
+            if odds is None:
+                missing.append(ev.best.label)
+            else:
+                priced.append((ev, odds))
+        if len(priced) < 2:
+            continue
+        p = Parlay(book=book, legs=priced)
+        for ev, odds in priced:
+            p.prob *= ev.best.blended
+            p.decimal *= american_to_decimal(odds)
+        out.append((p, missing))
+    return out
+
+
+def same_game(legs: list) -> list:
+    """Game labels with more than one chosen leg (results move together; books may price
+    them as a same-game parlay instead)."""
+    seen = {}
+    for ev in legs:
+        seen.setdefault(ev.market.game_id, []).append(ev)
+    return [v[0].market.game for v in seen.values() if len(v) > 1]

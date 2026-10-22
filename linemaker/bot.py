@@ -311,12 +311,33 @@ class CompactView(discord.ui.View):
                 self.add_item(b)
                 count += 1
                 row, count = (row + 1, 0) if count == 5 else (row, count)
+        if len(picks) >= 2:
+            pkey = _remember({"picks": [d for _e, d in picks[:25]]})
+            b = discord.ui.Button(label="Turn into parlay", emoji="🎰", row=4,
+                                  style=discord.ButtonStyle.primary, custom_id=f"lm:mkparlay:{pkey}")
+            b.callback = self._parlay_picker(pkey)
+            self.add_item(b)
         if notes:
             nkey = _remember({"notes": notes})
             b = discord.ui.Button(label="Notes & passes", emoji="ℹ️", row=4,
                                   style=discord.ButtonStyle.secondary, custom_id=f"lm:notes:{nkey}")
             b.callback = self._show_notes(nkey)
             self.add_item(b)
+
+    @staticmethod
+    def _parlay_picker(key):
+        async def callback(interaction: discord.Interaction):
+            detail = PICK_DETAILS.get(key)
+            if detail is None:
+                await interaction.response.send_message(
+                    "This card is from before the bot restarted. Ask again for fresh picks.",
+                    ephemeral=True)
+                return
+            await interaction.response.send_message(
+                "🎰 **Build a parlay:** pick the legs below (or **Use all picks**). I'll price it "
+                "at FanDuel and DraftKings with each book's own odds.",
+                view=ParlayPickerView(detail["picks"]), ephemeral=True)
+        return callback
 
     @staticmethod
     def _show_pick(select):
@@ -341,6 +362,85 @@ class CompactView(discord.ui.View):
                                                         ephemeral=True)
                 return
             await interaction.response.send_message(embeds=detail["notes"][:10], ephemeral=True)
+        return callback
+
+
+def parlay_card(legs: list) -> tuple:
+    """(embed, view) for a parlay you built: price, payout and hit chance at each book,
+    with Bet buttons that load every leg and Log buttons."""
+    from .betlinks import parlay_link
+    from .odds import fmt_odds as _fo
+    from .parlay import custom_parlays, leg_price, same_game
+    from .staking import _money, stake_tier
+    lines = []
+    for ev in legs:
+        fd, dk = leg_price(ev, "FanDuel"), leg_price(ev, "DraftKings")
+        lines.append(f"• **{ev.best.label}** · FD {_fo(fd) if fd else '—'} · DK {_fo(dk) if dk else '—'}"
+                     f" · {ev.best.blended:.0%}")
+    embed = discord.Embed(title=f"🎰 Your {len(legs)}-Leg Parlay", color=0xF1C40F,
+                          description="\n".join(lines)[:3500])
+    built = custom_parlays(legs)
+    view = discord.ui.View(timeout=None)
+    for p, missing in built:
+        stake = stake_tier(p.prob, p.american, parlay=True)
+        from .discord_format import _style
+        name, _tag, emoji, _c = _style(p.book)
+        value = (f"**{_fo(p.american)}** · hit chance **{p.prob:.0%}** · EV {p.ev:+.1f}%\n"
+                 + (f"{_money(stake)} pays **{_money(stake * p.decimal)}**" if stake else
+                    f"$10 pays **${10 * p.decimal:,.2f}**"))
+        if missing:
+            value += f"\n⚠️ Not offered here: {', '.join(missing)[:200]}"
+        embed.add_field(name=f"{emoji} {name}", value=value, inline=False)
+        url = parlay_link(p)
+        if url and len(url) <= 512:
+            view.add_item(discord.ui.Button(label=f"Bet on {p.book}", url=url,
+                                            emoji="🟦" if p.book == "FanDuel" else "🟩"))
+        key = _remember({"parlays": [p]})
+        b = discord.ui.Button(label=f"Log {p.book} parlay", emoji="📝", style=discord.ButtonStyle.success,
+                              custom_id=f"lm:betp:{key}:0")
+        b.callback = PickView._bet_parlay(key, 0)
+        view.add_item(b)
+    if not built:
+        embed.add_field(name="Can't price this one",
+                        value="Neither FanDuel nor DraftKings offers at least two of these legs.",
+                        inline=False)
+    notes = ["Hit chance multiplies each leg's estimate, so it assumes the legs are independent. "
+             "Books' parlay prices can differ slightly from the multiplied odds."]
+    sg = same_game(legs)
+    if sg:
+        notes.insert(0, f"⚠️ **Same-game legs** ({'; '.join(sg)[:300]}): these move together and "
+                        "the book will treat them as a same-game parlay with its own (usually "
+                        "worse) price. Check the slip before you bet.")
+    embed.set_footer(text=" ".join(n.replace("**", "") for n in notes)[:2048])
+    return embed, view
+
+
+class ParlayPickerView(discord.ui.View):
+    """Private menu: choose the legs from a scan's picks, or use them all."""
+
+    def __init__(self, picks: list):
+        super().__init__(timeout=900)
+        self.picks = picks
+        options = [discord.SelectOption(label=f"{d['rank']}. {d['ev'].best.label}"[:100],
+                                        description=f"{fmt_odds(d['ev'].best.best_odds)} "
+                                                    f"{d['ev'].best.best_book} · {d['ev'].best.blended:.0%} hit"[:100],
+                                        value=str(i))
+                   for i, d in enumerate(picks)]
+        select = discord.ui.Select(placeholder="Choose 2 or more legs", options=options,
+                                   min_values=2, max_values=len(options))
+        select.callback = self._build(select)
+        self.add_item(select)
+        everything = discord.ui.Button(label=f"Use all {len(picks)} picks", emoji="🎯",
+                                       style=discord.ButtonStyle.primary)
+        everything.callback = self._build(None)
+        self.add_item(everything)
+
+    def _build(self, select):
+        async def callback(interaction: discord.Interaction):
+            chosen = ([self.picks[int(v)] for v in select.values] if select is not None
+                      else self.picks)
+            embed, view = parlay_card([d["ev"] for d in chosen])
+            await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
         return callback
 
 

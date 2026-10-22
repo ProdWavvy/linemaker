@@ -94,3 +94,56 @@ class CompactCardTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ParlayButtonTest(unittest.TestCase):
+    def _legs(self, games=("g0", "g1", "g2")):
+        from linemaker.pro import ProConfig, rows_to_markets, run_pro
+        rows = [{"date": "2026-10-21", "sport": "NBA", "game_id": g, "game": f"A @ H{i}",
+                 "bet_type": "prop", "subject": f"Player {i}", "market": "points", "line": "15.5",
+                 "mean": "24", "stdev": "4",
+                 "books": "FanDuel:-400/+300|DraftKings:-350/+280" if i else "FanDuel:-300/+240"}
+                for i, g in enumerate(games)]
+        cfg = ProConfig(track=False, min_gap=-1.0)
+        return run_pro(rows_to_markets(rows), "2026-10-21", cfg).evaluated
+
+    def test_custom_parlay_math(self):
+        from linemaker.odds import american_to_decimal
+        from linemaker.parlay import custom_parlays, same_game
+        legs = self._legs()
+        built = dict((p.book, (p, miss)) for p, miss in custom_parlays(legs))
+        fd, missing = built["FanDuel"]
+        self.assertEqual(len(fd.legs), 3)
+        self.assertAlmostEqual(fd.decimal, american_to_decimal(-300) * american_to_decimal(-400) ** 2)
+        dk, dk_missing = built["DraftKings"]
+        self.assertEqual(len(dk.legs), 2)                       # Player 0 isn't on DraftKings
+        self.assertEqual(dk_missing, ["Player 0 Over 15.5 points"])
+        self.assertEqual(same_game(legs), [])
+        self.assertEqual(len(same_game(self._legs(("g0", "g0", "g1")))), 1)
+
+    def test_card_and_buttons(self):
+        from linemaker import bot
+
+        async def build():
+            legs = self._legs()
+            card = bot.compact_card([([discord_embed("🎯 h")], None)] +
+                                    [([discord_embed(f"{i}. x")], {"rank": i, "ev": ev, "profile": None})
+                                     for i, ev in enumerate(legs, 1)])
+            embed, view = bot.parlay_card(legs)
+            picker = bot.ParlayPickerView([{"rank": i, "ev": ev} for i, ev in enumerate(legs, 1)])
+            return card, embed, view, picker
+        (embeds, cview), embed, view, picker = asyncio.run(build())
+        self.assertTrue(any(getattr(c, "label", "") == "Turn into parlay" for c in cview.children))
+        self.assertEqual(embed.title, "🎰 Your 3-Leg Parlay")
+        self.assertEqual([f.name for f in embed.fields], ["🟦 FanDuel", "🟩 DraftKings"])
+        self.assertIn("hit chance", embed.fields[0].value)
+        self.assertIn("Not offered here", embed.fields[1].value)
+        labels = [getattr(c, "label", "") for c in view.children]
+        self.assertIn("Log FanDuel parlay", labels)
+        select = next(c for c in picker.children if hasattr(c, "options"))
+        self.assertEqual((select.min_values, select.max_values), (2, 3))
+
+
+def discord_embed(title):
+    import discord
+    return discord.Embed(title=title, description="d")
