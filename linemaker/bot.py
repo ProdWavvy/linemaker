@@ -517,7 +517,7 @@ def parlay_card(legs: list, books: Optional[tuple] = None) -> tuple:
     with Bet buttons that load every leg and Log buttons."""
     from .betlinks import parlay_link
     from .odds import fmt_odds as _fo
-    from .parlay import custom_parlays, leg_price, same_game
+    from .parlay import custom_parlays, leg_price, sgp_check
     from .staking import _money, stake_tier
     books = tuple(books or PARLAY_BOOKS)
     short = {"FanDuel": "FD", "DraftKings": "DK"}
@@ -539,6 +539,14 @@ def parlay_card(legs: list, books: Optional[tuple] = None) -> tuple:
                     f"$10 pays **${10 * p.decimal:,.2f}**"))
         if missing:
             value += f"\n⚠️ Not offered here: {', '.join(missing)[:200]}"
+        sgp = sgp_check([ev for ev, _o in p.legs], p.book)
+        if sgp["blocked"]:
+            value += (f"\n⛔ **{p.book} won't take this as one ticket:** "
+                      + "; ".join(sgp["blocked"])[:300] + ". Drop one of those legs.")
+        elif sgp["kind"]:
+            games = ", ".join(f"{g} ({n} legs)" for g, n in sgp["groups"])
+            value += (f"\n🔗 **Works as a {p.book} {sgp['kind']}**: {games}"[:400]
+                      + ". The book prices same-game legs together, so expect a lower price than shown.")
         url = parlay_link(p)
         if url and len(url) <= 512:
             view.add_item(discord.ui.Button(label=f"Bet on {p.book}", url=url,
@@ -557,11 +565,10 @@ def parlay_card(legs: list, books: Optional[tuple] = None) -> tuple:
                         inline=False)
     notes = ["Hit chance multiplies each leg's estimate, so it assumes the legs are independent. "
              "Books' parlay prices can differ slightly from the multiplied odds."]
-    sg = same_game(legs)
-    if sg:
-        notes.insert(0, f"⚠️ **Same-game legs** ({'; '.join(sg)[:300]}): these move together and "
-                        "the book will treat them as a same-game parlay with its own (usually "
-                        "worse) price. Check the slip before you bet.")
+    if any(sgp_check(legs, b)["groups"] for b in books):
+        notes.insert(0, "Same-game legs move together, so the hit chance here (which treats legs "
+                        "as independent) is only a guide for those; check the book's SGP price "
+                        "on the slip before you bet.")
     embed.set_footer(text=" ".join(n.replace("**", "") for n in notes)[:2048])
     return embed, view
 

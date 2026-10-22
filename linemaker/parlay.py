@@ -101,3 +101,49 @@ def same_game(legs: list) -> list:
     for ev in legs:
         seen.setdefault(ev.market.game_id, []).append(ev)
     return [v[0].market.game for v in seen.values() if len(v) > 1]
+
+
+SGP_NAMES = {"DraftKings": ("SGP", "SGPx"), "FanDuel": ("SGP", "SGP+")}
+
+
+def sgp_check(legs: list, book: str) -> dict:
+    """Can these legs go on one ticket at this book as a same-game parlay?
+
+    Both books take most same-game combos (player props, moneyline, spread, totals) as an
+    SGP, and several SGPs plus other games as SGPx (DraftKings) / SGP+ (FanDuel). What they
+    refuse: both sides of one market, two lines of the same player stat (or game total, or
+    spread), and usually a moneyline with a spread on the same game. Rule-based: the books
+    don't publish their SGP menus, so it can't know a market that's simply not SGP-eligible.
+
+    Returns {"groups": [(game, n legs)], "blocked": [reason], "kind": "", "SGP", "SGPx"...}.
+    """
+    games = {}
+    for ev in legs:
+        games.setdefault(ev.market.game_id, []).append(ev)
+    groups, blocked = [], []
+    for evs in games.values():
+        if len(evs) < 2:
+            continue
+        groups.append((evs[0].market.game, len(evs)))
+        seen = {}
+        for ev in evs:
+            m = ev.market
+            stat = (m.bet_type, m.subject if m.bet_type == "prop" else "", m.market)
+            if m.bet_type in ("moneyline", "spread", "1x2"):
+                stat = ("side", "", m.bet_type)
+            if stat in seen:
+                other = seen[stat]
+                why = ("both sides of one market" if other.market.key == m.key
+                       else "two lines of the same market")
+                blocked.append(f"{other.best.label} + {ev.best.label} ({why})")
+            else:
+                seen[stat] = ev
+        if ("side", "", "moneyline") in seen and ("side", "", "spread") in seen:
+            blocked.append(f"{seen[('side', '', 'moneyline')].best.label} + "
+                           f"{seen[('side', '', 'spread')].best.label} (moneyline with spread on one "
+                           "game: usually not allowed)")
+    one, multi = SGP_NAMES.get(book, ("SGP", "SGP+"))
+    kind = ""
+    if groups:
+        kind = one if len(groups) == 1 and len(games) == 1 else multi
+    return {"groups": groups, "blocked": blocked, "kind": kind}
