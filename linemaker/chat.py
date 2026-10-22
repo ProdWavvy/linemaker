@@ -174,10 +174,11 @@ TOOLS = [
                 "refresh": {"type": "boolean",
                             "description": "true only when the user asks for fresh/updated "
                                            "odds; otherwise odds under 30 minutes old are reused"},
-                "kind": {"type": "string", "enum": ["props", "games", "live"],
+                "kind": {"type": "string", "enum": ["props", "games", "live", "pp"],
                          "description": "props (default); games = pre-game moneyline, spread, "
                                         "total; live = in-game moneyline/spread/total for games "
-                                        "in progress (score + clock model)"},
+                                        "in progress (score + clock model); pp = PrizePicks "
+                                        "lines with Power/Flex entries"},
                 "mode": {"type": "string", "enum": ["smart", "volume"],
                          "description": "smart = best edges (default); volume = likeliest legs "
                                         "for parlays, ranked by hit chance, with parlays built"},
@@ -332,6 +333,12 @@ class LinemakerChat:
                     ctx.setdefault("armed", []).append(sport)
             cfg = volume_config() if mode == "volume" else ProConfig()
             freezer, tracker = Freezer(snaps, date), None
+            if kind == "pp":
+                from .pp import pp_config
+                from .tracking import Tracker
+                cfg, freezer = pp_config(), None
+                if os.environ.get("LINEMAKER_TRACKING", "on").lower() not in ("off", "0", "false", "no"):
+                    tracker = Tracker(os.path.join(os.environ.get("LINEMAKER_TRACKING_DIR", "tracking"), "pp"), date)
             if kind == "live":
                 from .live import live_settings
                 cfg, tracker = live_settings(cfg, date)
@@ -586,6 +593,19 @@ def _slate_for(sport: str, date: str, kind: str, refresh: bool) -> tuple:
         return tuple(hit[1:])
     from .live import run_best, run_games, run_live_games
     snaps = os.environ.get("LINEMAKER_SNAPSHOTS", "snapshots")
+    if kind == "pp":
+        # PrizePicks lines, joined to the props projections (bought or reused first).
+        from .pp import run_pp
+        props_rows = slate_for(sport, date, "props")[0]
+        rows, feed = run_pp(OddsAPI(bookmakers="prizepicks"), sport, date, _tz(), props_rows)
+        log.info("prizepicks %s: %d lines, %d matched to projections", sport, len(feed), len(rows))
+        from .live import _log_link_sample
+        _log_link_sample(feed)
+        props = _SLATES.get((sport, date, "props"))
+        _SLATES[key] = (time.time(), rows, props[2] if props else [], None, None,
+                        "PrizePicks lines vs the props model")
+        save_slate_cache(sport, date, _SLATES[key], kind)
+        return tuple(_SLATES[key][1:])
     if kind == "live":
         # The pre-game line saved earlier (if any) anchors the live model.
         from .live import live_dates
@@ -759,6 +779,7 @@ TIPS_WORDS = re.compile(r"[!/]?(betting )?tips[?!.]*|how (should|do) i think abo
 GAME_LINE_WORDS = re.compile(r"\b(money ?lines?|ml|spreads?|totals?|over/unders?|o/u|"
                              r"winners?|who wins|game lines?)\b", re.I)
 REFRESH_WORDS = re.compile(r"\b(fresh|refresh|updated?|latest|new odds|re-?pull)\b", re.I)
+PP_WORDS = re.compile(r"\b(prize ?picks?|pp|pick ?em)\b", re.I)
 LIVE_WORDS = re.compile(r"\b(live|in[- ]?game|in[- ]?play|right now|currently on)\b", re.I)
 LIVE_INTENT = re.compile(LIVE_WORDS.pattern + r".*\b(bets?|edges?|plays?|picks?|lines?|games?|odds|"
                          r"money ?lines?|ml|spreads?|totals?|value|props?)\b|\b(bets?|edges?|plays?|"
@@ -788,6 +809,8 @@ def quick_mode(text: str) -> str:
 
 def quick_kind(text: str) -> str:
     """games for moneyline/spread/total questions, props otherwise."""
+    if PP_WORDS.search(text):
+        return "pp"
     if LIVE_WORDS.search(text):
         return "live"
     return "games" if GAME_LINE_WORDS.search(text) else "props"
@@ -796,7 +819,7 @@ def quick_kind(text: str) -> str:
 def quick_plays_request(text: str) -> Optional[list]:
     """Sports for a plain 'best props tonight?' question, answered without the AI model."""
     if not (PLAYS_INTENT.search(text) or GAMES_INTENT.search(text) or LIVE_INTENT.search(text)
-            or quick_mode(text) == "volume"):
+            or PP_WORDS.search(text) or quick_mode(text) == "volume"):
         return None
     if re.search(r"\b(i have|i think|i got|projection|my number|at \d)", text, re.I):
         return None   # the user supplied their own number: let the model read it

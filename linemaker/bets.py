@@ -44,10 +44,11 @@ def leg_from_eval(ev, live: bool = False, odds: Optional[int] = None, book: str 
             "book": book or s.best_book, "live": live, "model_prob": round(s.blended, 4)}
 
 
-def add_bet(legs: list, odds: int, stake: float, book: str, user: str = "") -> dict:
+def add_bet(legs: list, odds: int, stake: float, book: str, user: str = "", **extra) -> dict:
     bet = {"id": uuid.uuid4().hex[:10], "placed": dt.datetime.now().isoformat(timespec="seconds"),
            "user": user, "kind": "parlay" if len(legs) > 1 else "single", "legs": legs,
            "odds": int(odds), "stake": round(float(stake), 2), "book": book, "status": "open"}
+    bet.update(extra)
     bets = load_bets()
     bets.append(bet)
     save_bets(bets)
@@ -55,7 +56,8 @@ def add_bet(legs: list, odds: int, stake: float, book: str, user: str = "") -> d
 
 
 def _record(leg: dict, cache: dict) -> Optional[dict]:
-    folder = os.path.join(_dir(), "live") if leg.get("live") else _dir()
+    folder = os.path.join(_dir(), "live") if leg.get("live") else (
+        os.path.join(_dir(), leg["folder"]) if leg.get("folder") else _dir())
     path = os.path.join(folder, f"{leg['date']}.json")
     if path not in cache:
         try:
@@ -84,6 +86,17 @@ def settle() -> int:
         if bet["status"] != "open":
             continue
         outcomes = [leg_outcome(l, cache) for l in bet["legs"]]
+        if bet.get("kind") == "pp":   # PrizePicks: Power / Flex payout tables
+            from .pp import settle_entry
+            got = settle_entry(bet, outcomes)
+            if got is None:
+                continue
+            bet["status"], bet["profit"] = got
+            for leg, o in zip(bet["legs"], outcomes):
+                leg["outcome"] = o
+            bet["settled"] = dt.datetime.now().isoformat(timespec="seconds")
+            n += 1
+            continue
         if "lost" in outcomes:
             bet["status"], bet["profit"] = "lost", -bet["stake"]
         elif None in outcomes:

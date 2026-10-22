@@ -46,6 +46,17 @@ def grade_day(date: str, rows: list, auto: bool):
                 rows += [r for r in prop_results(recs, date)
                          if (r["game_id"], r["subject"], r["market"]) not in have]
                 have = {(r["game_id"], r["subject"], r["market"]) for r in rows}
+    pp_track = os.path.join(TRACKING, "pp", f"{date}.json")
+    if auto and os.path.exists(pp_track):   # PrizePicks legs: same ESPN box scores (free)
+        import json as _json
+        from .boxscores import prop_results
+        from .tracking import apply_results
+        with open(pp_track) as f:
+            pp_rows = prop_results(_json.load(f), date)
+        if pp_rows:
+            n_pp = apply_results(pp_track, pp_rows)
+            if n_pp:
+                summary_live.append(f"- 🟣 PrizePicks lines graded: **{n_pp}**")
     summary = []
     if rows and os.path.exists(snap):
         md = grade(snap, rows)

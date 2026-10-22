@@ -206,6 +206,45 @@ class BetModal(discord.ui.Modal):
             ephemeral=True)
 
 
+def _pp_log(key, i):
+    async def callback(interaction: discord.Interaction):
+        detail = PICK_DETAILS.get(key)
+        if detail is None:
+            await interaction.response.send_message(
+                "This card is from before the bot restarted, so I can't log it.", ephemeral=True)
+            return
+        await interaction.response.send_modal(PPLogModal(detail["pp"][i]))
+    return callback
+
+
+class PPLogModal(discord.ui.Modal):
+    """Log a PrizePicks entry: just the amount (payouts come from the entry's table)."""
+
+    def __init__(self, entry):
+        super().__init__(title=f"Log {entry.size}-pick {entry.kind}", timeout=600)
+        self.entry = entry
+        self.stake = discord.ui.TextInput(label="Entry amount ($)", placeholder="5", max_length=10)
+        self.add_item(self.stake)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        from .bets import add_bet, leg_from_eval
+        from .odds import decimal_to_american
+        try:
+            stake = float(str(self.stake.value).replace("$", "").strip())
+            if stake <= 0:
+                raise ValueError
+        except ValueError:
+            await interaction.response.send_message("Enter an amount like 5.", ephemeral=True)
+            return
+        e = self.entry
+        legs = [dict(leg_from_eval(ev, book="PrizePicks"), folder="pp") for ev in e.legs]
+        add_bet(legs, decimal_to_american(e.payouts[0]), stake, "PrizePicks", str(interaction.user),
+                kind="pp", pp_kind=e.kind)
+        await interaction.response.send_message(
+            f"✅ Logged **${stake:,.2f}** {e.size}-pick {e.kind}. It settles after grading; "
+            "`/record` shows your results.", ephemeral=True)
+
+
 def _remember(detail: dict) -> str:
     import uuid
     key = uuid.uuid4().hex[:16]
@@ -243,7 +282,7 @@ def compact_card(messages: list) -> tuple:
         if detail and "ev" in detail:
             picks.append((embeds[0], detail))
             continue
-        if detail and "parlays" in detail:
+        if detail and ("parlays" in detail or "pp" in detail):
             parlays.append((embeds[0], detail))
             continue
         for e in embeds:
@@ -293,7 +332,31 @@ class CompactView(discord.ui.View):
             pick.callback = self._show_pick(pick)
             self.add_item(pick)
         row, count = 1, 0
-        for _embed, detail in parlays:
+        for _embed, detail in [p for p in parlays if "pp" in p[1]]:
+            from .pp import board_link, entry_link
+            key = _remember(detail)
+            links = [(e, entry_link(e)) for e in detail["pp"]]
+            if not any(u for _e, u in links):
+                self.add_item(discord.ui.Button(label="Open PrizePicks", url=board_link(), row=row,
+                                                emoji="🟣"))
+                count += 1
+            for i, (e, url) in enumerate(links[:8]):
+                if row > 3:
+                    break
+                if url and len(url) <= 512:
+                    self.add_item(discord.ui.Button(label=f"{e.size}-pick {e.kind}", url=url, row=row,
+                                                    emoji="🟣"))
+                    count += 1
+                    row, count = (row + 1, 0) if count == 5 else (row, count)
+                if row > 3:
+                    break
+                b = discord.ui.Button(label=f"Log {e.size}-pick {e.kind}", emoji="📝", row=row,
+                                      style=discord.ButtonStyle.success, custom_id=f"lm:pplog:{key}:{i}")
+                b.callback = _pp_log(key, i)
+                self.add_item(b)
+                count += 1
+                row, count = (row + 1, 0) if count == 5 else (row, count)
+        for _embed, detail in [p for p in parlays if "parlays" in p[1]]:
             key = _remember(detail)
             for label, url in detail.get("links") or []:
                 if url and len(url) <= 512 and row <= 3:
@@ -490,7 +553,8 @@ FP_CHOICES = [app_commands.Choice(name=k, value=k)
               for k in ("NBA", "WNBA", "NFL", "NCAAF", "MLB", "NHL")]
 KIND_CHOICES = [app_commands.Choice(name="Player props", value="props"),
                 app_commands.Choice(name="Moneylines, spreads, totals", value="games"),
-                app_commands.Choice(name="Live in-game lines", value="live")]
+                app_commands.Choice(name="Live in-game lines", value="live"),
+                app_commands.Choice(name="PrizePicks", value="pp")]
 
 
 ARMED_NOW = []   # leagues whose pre-tip scans the last /picks switched on
@@ -513,12 +577,20 @@ def build_auto(sports: list, date: str, cfg: ProConfig, kind: str = "props",
             from .live import live_settings
             cfg, tracker = live_settings(ProConfig(), date)
             freezer = None
+        if kind == "pp":
+            from .pp import pp_config
+            from .tracking import Tracker
+            cfg, freezer = pp_config(), None
+            tracker = Tracker(os.path.join(TRACKING, "pp"), date)
         res = run_pro(rows_to_markets(rows), date, cfg, freezer, tracker)
         res.slate, res.source_warning, res.projection_source = slate, warning, source
         res.kind = kind
         from .chat import slate_age_minutes
         res.odds_age = slate_age_minutes(sport, date, kind)
         sections.append((sport, res, enrich(res, sport, date)))
+    if kind == "pp":
+        from .scan_format import pp_messages
+        return pp_messages(sections, date), None
     return scan_messages(sections, date, cfg), None
 
 
@@ -686,7 +758,10 @@ class LinemakerBot(discord.Client):
         files = [discord.File(io.BytesIO(md.encode()), filename=name) for name, md in turn.files]
         cards = []
         if turn.results:
-            if all((ex or {}).get("mode") == "volume" for _s, _r, ex in turn.results):
+            if all(getattr(r, "kind", "") == "pp" for _s, r, _ex in turn.results):
+                from .scan_format import pp_messages
+                cards = pp_messages(turn.results, today())
+            elif all((ex or {}).get("mode") == "volume" for _s, _r, ex in turn.results):
                 from .pro import volume_config
                 from .scan_format import volume_messages
                 cards = volume_messages(turn.results, today(), volume_config())

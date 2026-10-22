@@ -342,6 +342,9 @@ def sharp_weights() -> dict:
                 out[book_key(name)] = float(w) if w.strip() else 3.0
             except ValueError:
                 continue
+    # Pick'em sites post flat indicative prices, not a market: they never move the consensus.
+    for dfs in ("prizepicks", "underdog", "pick6", "dabble"):
+        out.setdefault(dfs, 0.0)
     return out
 
 
@@ -376,6 +379,8 @@ def market_probs(m: ProMarket, cfg: ProConfig):
         return None
     fair = [no_vig(*prices, method=cfg.devig_method) for prices in complete]
     total_w = sum(book_w)
+    if total_w <= 0:   # only pick'em prices: fall back to them, evenly
+        book_w, total_w = [1.0] * len(fair), float(len(fair))
     probs = {side: sum(w * f[i] for w, f in zip(book_w, fair)) / total_w
              for i, side in enumerate(m.side_keys)}
     avg_hold = sum(hold(*p) for p in complete) / len(complete)
