@@ -281,3 +281,44 @@ class MoneylineParlayTest(unittest.TestCase):
             return bot.parlay_card([d["ev"] for d in pool])
         embed, _v = asyncio.run(card())
         self.assertTrue(any("hit chance" in f.value for f in embed.fields))
+
+
+class OneBookTest(unittest.TestCase):
+    def test_quick_book(self):
+        from linemaker.chat import quick_book, quick_kind, quick_plays_request
+        self.assertEqual(quick_book("best fanduel picks"), "FanDuel")
+        self.assertEqual(quick_book("best fd props tonight"), "FanDuel")
+        self.assertEqual(quick_book("best draftkings picks nba"), "DraftKings")
+        self.assertEqual(quick_book("top dk plays"), "DraftKings")
+        self.assertIsNone(quick_book("best fanduel and draftkings picks"))
+        self.assertIsNone(quick_book("best nba props"))
+        self.assertIsNotNone(quick_plays_request("best fanduel picks"))
+        self.assertEqual(quick_kind("best prizepick"), "pp")
+        self.assertEqual(quick_kind("best pp nba"), "pp")
+
+    def test_parlay_card_one_book(self):
+        from linemaker import bot
+        from linemaker.oddsapi import feed_row, parse_event_props
+        from linemaker.pro import ProConfig, rows_to_markets, run_pro
+        rows = []
+        for i in range(3):
+            books = [{"key": k, "title": t, "markets": [{"key": "player_points", "outcomes": [
+                {"name": "Over", "description": f"P{i}", "price": -150, "point": 10.5},
+                {"name": "Under", "description": f"P{i}", "price": 120, "point": 10.5}]}]}
+                for k, t in (("fanduel", "FanDuel"), ("draftkings", "DraftKings"))]
+            event = {"id": f"e{i}", "home_team": "H", "away_team": "A",
+                     "commence_time": "2026-10-21T23:30:00Z", "bookmakers": books}
+            r = feed_row(parse_event_props(event, "NBA", ZoneInfo("America/New_York"))[0])
+            r.update(mean="14", stdev="3")
+            rows.append(r)
+        cfg = ProConfig(track=False, min_gap=-1.0, bet_books=("DraftKings",))
+        legs = run_pro(rows_to_markets(rows), "2026-10-21", cfg).evaluated
+        self.assertTrue(all(ev.best.best_book == "DraftKings" for ev in legs))
+
+        async def build():
+            return bot.parlay_card(legs, ("DraftKings",))
+        embed, view = asyncio.run(build())
+        self.assertEqual([f.name for f in embed.fields if "FanDuel" in f.name], [])
+        self.assertTrue(any("DraftKings" in f.name for f in embed.fields))
+        self.assertNotIn("FD ", embed.description)
+        self.assertFalse(any("FanDuel" in getattr(c, "label", "") for c in view.children))

@@ -239,6 +239,16 @@ def scan_embeds(sections: list, date: str, cfg, title: str = "") -> list:
     return [e for group, _detail in scan_messages(sections, date, cfg, title) for e in group]
 
 
+def books_of(results: list) -> tuple:
+    """The books a scan was priced at: just one when you asked for FanDuel or DraftKings."""
+    out = []
+    for res in results:
+        for b in getattr(res, "books", None) or ("FanDuel", "DraftKings"):
+            if b not in out:
+                out.append(b)
+    return tuple(out)
+
+
 def moneyline_pool(results: list, n: int = 25) -> list:
     """Every priced moneyline, one per game, on the side the model thinks wins (not just
     the gated value plays), likeliest first: the legs for the Parlay moneylines button."""
@@ -278,10 +288,12 @@ def scan_messages(sections: list, date: str, cfg, title: str = "") -> list:
         return f"{SPORT_NAMES.get(sp, sp)} ({n} game{'s' if n != 1 else ''})"
     scanned = ", ".join(_scope(sp, res) for sp, res, _p in sections)
     live = all(getattr(res, "kind", "") == "live" for _s, res, _p in sections)
-    title = title or ("Cross-Sport " if len(sections) > 1 else
+    only = books_of([res for _s, res, _p in sections])
+    title = title or (f"{only[0]} " if len(only) == 1 else "") + ("Cross-Sport " if len(sections) > 1 else
                       f"{SPORT_NAMES.get(sections[0][0], sections[0][0])} ") + (
         "Live Edge Scan" if live else "Value Scan")
-    intro = [f"I swept every market with a projection and a live FanDuel/DraftKings price on "
+    books = books_of([res for _s, res, _p in sections])
+    intro = [f"I swept every market with a projection and a live {'/'.join(books)} price on "
              f"today's date: {scanned}. Only games starting today were priced; anything "
              "tomorrow was cut before pricing."]
     sources = sorted({getattr(res, "projection_source", "") for _s, res, _p in sections} - {""})
@@ -329,7 +341,7 @@ def scan_messages(sections: list, date: str, cfg, title: str = "") -> list:
             board.add_field(name=f"{ranks[id(ev)]}. {_emoji(ev.market.sport)} {ev.best.label[:60]}",
                             value=_short_reason(ev, prof.get(ev.market.key)), inline=False)
         embeds.append(board)
-    messages.append((embeds, {"moneylines": mls} if len(mls) >= 2 else None))
+    messages.append((embeds, {"moneylines": mls, "books": books} if len(mls) >= 2 else None))
 
     for sport, res, prof in sections:
         mine = [(ev, p) for ev, s, p in ranked if s == sport]
@@ -348,7 +360,7 @@ def scan_messages(sections: list, date: str, cfg, title: str = "") -> list:
             hist = (ex.get("history") or {}).get(ev.market.key)
             from .betlinks import pick_links
             detail = {"rank": r, "ev": ev, "profile": pr, "context": ctx, "history": hist,
-                      "links": pick_links(ev)}
+                      "links": pick_links(ev, books), "books": books}
             messages.append(([_pick_embed(r, ev, pr, [x for x in by_game[ev.market.game_id] if x != r],
                                           r == 1, ctx, hist)], detail))
 
@@ -667,8 +679,9 @@ def volume_messages(sections: list, date: str, cfg, title: str = "") -> list:
     legs = sorted((ev for _s, res, _e in sections for ev in res.picks),
                   key=lambda ev: ev.best.blended, reverse=True)[:cfg.max_picks]
     profiles = {k: v for _s, _r, ex in sections for k, v in ex["profiles"].items()}
+    books = books_of([res for _s, res, _e in sections])
     name = "Cross-Sport" if len(sections) > 1 else SPORT_NAMES.get(sections[0][0], sections[0][0])
-    title = title or f"{name} Volume Mode"
+    title = title or (f"{books[0]} " if len(books) == 1 else "") + f"{name} Volume Mode"
 
     def _scope(sp, res):
         n = len(res.slate) or res.games
@@ -688,22 +701,26 @@ def volume_messages(sections: list, date: str, cfg, title: str = "") -> list:
     header.set_footer(text=odds_age_note(sections))
     out = [([header], None)]
     if legs:
-        rows = [f"{'#':>2} {'Leg':<36} {'FD':>6} {'DK':>6} {'Hit':>6} {'Szn':>5}"]
+        short = {"FanDuel": "FD", "DraftKings": "DK"}
+        rows = [f"{'#':>2} {'Leg':<36} " + " ".join(f"{short.get(b, b[:2]):>6}" for b in books)
+                + f" {'Hit':>6} {'Szn':>5}"]
         from .parlay import leg_price
         for i, ev in enumerate(legs, 1):
-            fd, dk = leg_price(ev, "FanDuel"), leg_price(ev, "DraftKings")
+            prices = [leg_price(ev, b) for b in books]
             prof = profiles.get(ev.market.key)
             szn = _pct(prof.season.rate) if prof and prof.season else "—"
-            rows.append(f"{i:>2} {ev.best.label[:36]:<36} {fmt_odds(fd) if fd else '—':>6} "
-                        f"{fmt_odds(dk) if dk else '—':>6} {_pct(ev.best.blended):>6} {szn:>5}")
+            rows.append(f"{i:>2} {ev.best.label[:36]:<36} "
+                        + " ".join(f"{fmt_odds(o) if o else '—':>6}" for o in prices)
+                        + f" {_pct(ev.best.blended):>6} {szn:>5}")
         board = discord.Embed(title="✅ High-Hit-Rate Legs", color=GOLD,
                               description="```\n" + "\n".join(rows) + "\n```")
         board.set_footer(text="Hit = our estimated chance · Szn = season hit rate at this line")
         # The legs behind the board, so "Build my own parlay" can use any of them.
-        out.append(([board], {"legs": [{"rank": i, "ev": ev} for i, ev in enumerate(legs, 1)]}))
+        out.append(([board], {"legs": [{"rank": i, "ev": ev} for i, ev in enumerate(legs, 1)],
+                              "books": books}))
         from .betlinks import parlay_link
-        parlays = build_parlays(legs)
-        for book in ("FanDuel", "DraftKings"):
+        parlays = build_parlays(legs, books=books)
+        for book in books:
             mine = [p for p in parlays if p.book == book]
             if not mine:
                 continue

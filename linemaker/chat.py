@@ -174,6 +174,10 @@ TOOLS = [
                 "refresh": {"type": "boolean",
                             "description": "true only when the user asks for fresh/updated "
                                            "odds; otherwise odds under 30 minutes old are reused"},
+                "book": {"type": "string", "enum": ["FanDuel", "DraftKings"],
+                         "description": "only when the user asks for one sportsbook's picks "
+                                        "(e.g. best FanDuel picks): price and parlay at that "
+                                        "book only"},
                 "kind": {"type": "string", "enum": ["props", "games", "live", "pp"],
                          "description": "props (default); games = pre-game moneyline, spread, "
                                         "total; live = in-game moneyline/spread/total for games "
@@ -343,7 +347,16 @@ class LinemakerChat:
                 from .live import live_settings
                 cfg, tracker = live_settings(cfg, date)
                 freezer = None
+            book = args.get("book") if kind != "pp" else None
+            if book in ("FanDuel", "DraftKings"):
+                # Same odds pull (no extra credits), only that book's prices are bettable.
+                # Not tracked: the full two-book scan is the one graded for tuning.
+                from dataclasses import replace as _replace
+                cfg, tracker = _replace(cfg, bet_books=(book,), track=False), None
+            else:
+                book = None
             res = run_pro(rows_to_markets(rows), date, cfg, freezer, tracker)
+            res.books = (book,) if book else ("FanDuel", "DraftKings")
             if kind == "pp":
                 from .pp import select_legs
                 res.picks = select_legs(res.picks, cfg.pp_floor)
@@ -365,7 +378,7 @@ class LinemakerChat:
                 " (moneylines, spreads, totals)" if kind == "games" else
                 " (live in-game lines)" if kind == "live" else "")
             out = summarize(_LR, f"{sport} {date} ({mode} mode, {what}): {source} projections "
-                                 f"matched {len(rows)} posted FanDuel/DraftKings lines; Odds API "
+                                 f"matched {len(rows)} posted {'/'.join(res.books)} lines; Odds API "
                                  f"credits left {remaining}.")
             ctx.setdefault("results", []).append((sport, res, extras))
             ctx.setdefault("summaries", []).append(out)
@@ -432,14 +445,16 @@ class LinemakerChat:
             return Turn(reply, ctx["files"], [])
         if quick:
             mode, kind = quick_mode(text), quick_kind(text)
+            book = None if kind == "pp" else quick_book(text)
             refresh = bool(REFRESH_WORDS.search(text))
-            log.info("quick path: %s %s %s, no AI model", ",".join(quick), mode, kind)
+            log.info("quick path: %s %s %s%s, no AI model", ",".join(quick), mode, kind,
+                     f" ({book} only)" if book else "")
             errors = []
             for sport in quick:
                 try:
                     await asyncio.to_thread(self.run_tool, "find_plays",
                                             {"sport": sport, "mode": mode, "kind": kind,
-                                             "refresh": refresh}, ctx)
+                                             "refresh": refresh, "book": book}, ctx)
                 except Exception as e:
                     errors.append(friendly_error(sport, e))
             reply = "\n".join(errors)   # the pick cards carry the answer
@@ -783,6 +798,8 @@ GAME_LINE_WORDS = re.compile(r"\b(money ?lines?|ml|spreads?|totals?|over/unders?
                              r"winners?|who wins|game lines?)\b", re.I)
 REFRESH_WORDS = re.compile(r"\b(fresh|refresh|updated?|latest|new odds|re-?pull)\b", re.I)
 PP_WORDS = re.compile(r"\b(prize ?picks?|pp|pick ?em)\b", re.I)
+BOOK_WORDS = {"FanDuel": re.compile(r"\b(fan ?duel|fd)\b", re.I),
+              "DraftKings": re.compile(r"\b(draft ?kings?|dk)\b", re.I)}
 LIVE_WORDS = re.compile(r"\b(live|in[- ]?game|in[- ]?play|right now|currently on)\b", re.I)
 LIVE_INTENT = re.compile(LIVE_WORDS.pattern + r".*\b(bets?|edges?|plays?|picks?|lines?|games?|odds|"
                          r"money ?lines?|ml|spreads?|totals?|value|props?)\b|\b(bets?|edges?|plays?|"
@@ -817,6 +834,12 @@ def quick_kind(text: str) -> str:
     if LIVE_WORDS.search(text):
         return "live"
     return "games" if GAME_LINE_WORDS.search(text) else "props"
+
+
+def quick_book(text: str) -> Optional[str]:
+    """FanDuel or DraftKings when the ask names just one of them ("best fanduel picks")."""
+    named = [b for b, pat in BOOK_WORDS.items() if pat.search(text)]
+    return named[0] if len(named) == 1 else None
 
 
 def quick_plays_request(text: str) -> Optional[list]:

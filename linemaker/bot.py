@@ -343,7 +343,9 @@ def compact_card(messages: list) -> tuple:
     """(embeds, view) for one message: summary + board (+ parlays); every pick's full
     write-up behind a dropdown, the scoping notes behind a button."""
     header, boards, parlays, notes, picks, legs, mls = None, [], [], [], [], [], []
+    books = None
     for embeds, detail in messages:
+        books = (detail or {}).get("books") or books
         if detail and "moneylines" in detail:   # the header: every moneyline, for the ML parlay builder
             mls, detail = detail["moneylines"], None
         if detail and "legs" in detail:      # a volume board: its legs feed the parlay builder
@@ -376,12 +378,12 @@ def compact_card(messages: list) -> tuple:
             _clip_embed(header, max(len(header.description or "") - over, 300))
     while len(embeds) > 1 and sum(_embed_len(e) for e in embeds) > EMBED_BUDGET:
         notes.insert(0, embeds.pop())        # still too long: move the last one behind Notes
-    view = CompactView(picks, parlays, notes, legs, mls)
+    view = CompactView(picks, parlays, notes, legs, mls, books)
     return embeds, view
 
 
-def moneyline_button(moneylines: list, row: int = 4) -> discord.ui.Button:
-    key = _remember({"picks": moneylines})
+def moneyline_button(moneylines: list, row: int = 4, books: Optional[tuple] = None) -> discord.ui.Button:
+    key = _remember({"picks": moneylines, "books": books})
     return discord.ui.Button(label="Parlay moneylines", emoji="💰", row=row,
                              style=discord.ButtonStyle.primary, custom_id=f"lm:mkparlay:{key}")
 
@@ -391,7 +393,7 @@ class CompactView(discord.ui.View):
     buttons, and a Notes button. Details answer privately (only you see them)."""
 
     def __init__(self, picks: list, parlays: list, notes: list, legs: Optional[list] = None,
-                 moneylines: Optional[list] = None):
+                 moneylines: Optional[list] = None, books: Optional[tuple] = None):
         super().__init__(timeout=None)
         from .staking import _money, stake_tier
         if picks:
@@ -451,13 +453,13 @@ class CompactView(discord.ui.View):
                 row, count = (row + 1, 0) if count == 5 else (row, count)
         pool = [d for _e, d in picks[:25]] or list(legs or [])[:25]
         if len(pool) >= 2:
-            pkey = _remember({"picks": pool})
+            pkey = _remember({"picks": pool, "books": books})
             b = discord.ui.Button(label="Turn into parlay" if picks else "Build my own parlay",
                                   emoji="🎰", row=4, style=discord.ButtonStyle.primary,
                                   custom_id=f"lm:mkparlay:{pkey}")
             self.add_item(b)
         if moneylines and len(moneylines) >= 2:
-            self.add_item(moneyline_button(moneylines))
+            self.add_item(moneyline_button(moneylines, books=books))
         if notes:
             nkey = _remember({"notes": [n.to_dict() for n in notes]})
             b = discord.ui.Button(label="Notes & passes", emoji="ℹ️", row=4,
@@ -475,8 +477,8 @@ class CompactView(discord.ui.View):
                 return
             await interaction.response.send_message(
                 "🎰 **Build a parlay:** pick the legs below (or **Use all picks**). I'll price it "
-                "at FanDuel and DraftKings with each book's own odds.",
-                view=ParlayPickerView(detail["picks"]), ephemeral=True)
+                f"at {' and '.join(detail.get('books') or PARLAY_BOOKS)} with each book's own odds.",
+                view=ParlayPickerView(detail["picks"], detail.get("books")), ephemeral=True)
         return callback
 
     @staticmethod
@@ -507,21 +509,26 @@ class CompactView(discord.ui.View):
         return callback
 
 
-def parlay_card(legs: list) -> tuple:
+PARLAY_BOOKS = ("FanDuel", "DraftKings")
+
+
+def parlay_card(legs: list, books: Optional[tuple] = None) -> tuple:
     """(embed, view) for a parlay you built: price, payout and hit chance at each book,
     with Bet buttons that load every leg and Log buttons."""
     from .betlinks import parlay_link
     from .odds import fmt_odds as _fo
     from .parlay import custom_parlays, leg_price, same_game
     from .staking import _money, stake_tier
+    books = tuple(books or PARLAY_BOOKS)
+    short = {"FanDuel": "FD", "DraftKings": "DK"}
     lines = []
     for ev in legs:
-        fd, dk = leg_price(ev, "FanDuel"), leg_price(ev, "DraftKings")
-        lines.append(f"• **{ev.best.label}** · FD {_fo(fd) if fd else '—'} · DK {_fo(dk) if dk else '—'}"
-                     f" · {ev.best.blended:.0%}")
+        prices = " · ".join(f"{short.get(b, b)} {_fo(o) if o else '—'}"
+                            for b, o in ((b, leg_price(ev, b)) for b in books))
+        lines.append(f"• **{ev.best.label}** · {prices} · {ev.best.blended:.0%}")
     embed = discord.Embed(title=f"🎰 Your {len(legs)}-Leg Parlay", color=0xF1C40F,
                           description="\n".join(lines)[:3500])
-    built = custom_parlays(legs)
+    built = custom_parlays(legs, books)
     view = discord.ui.View(timeout=None)
     for p, missing in built:
         stake = stake_tier(p.prob, p.american, parlay=True)
@@ -545,7 +552,8 @@ def parlay_card(legs: list) -> tuple:
         view.add_item(b)
     if not built:
         embed.add_field(name="Can't price this one",
-                        value="Neither FanDuel nor DraftKings offers at least two of these legs.",
+                        value=("Neither FanDuel nor DraftKings" if len(books) > 1 else books[0])
+                              + " offers at least two of these legs.",
                         inline=False)
     notes = ["Hit chance multiplies each leg's estimate, so it assumes the legs are independent. "
              "Books' parlay prices can differ slightly from the multiplied odds."]
@@ -561,9 +569,9 @@ def parlay_card(legs: list) -> tuple:
 class ParlayPickerView(discord.ui.View):
     """Private menu: choose the legs from a scan's picks, or use them all."""
 
-    def __init__(self, picks: list):
+    def __init__(self, picks: list, books: Optional[tuple] = None):
         super().__init__(timeout=900)
-        self.picks = picks
+        self.picks, self.books = picks, books
         options = [discord.SelectOption(label=f"{d['rank']}. {d['ev'].best.label}"[:100],
                                         description=f"{fmt_odds(d['ev'].best.best_odds)} "
                                                     f"{d['ev'].best.best_book} · {d['ev'].best.blended:.0%} hit"[:100],
@@ -582,7 +590,7 @@ class ParlayPickerView(discord.ui.View):
         async def callback(interaction: discord.Interaction):
             chosen = ([self.picks[int(v)] for v in select.values] if select is not None
                       else self.picks)
-            embed, view = parlay_card([d["ev"] for d in chosen])
+            embed, view = parlay_card([d["ev"] for d in chosen], self.books)
             await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
             await asyncio.to_thread(save_details)
         return callback
@@ -604,7 +612,7 @@ async def _send_card(send, messages: list, markdown=None, filename=None, text: s
     for embeds, detail in messages:
         if detail and "moneylines" in detail:
             view = discord.ui.View(timeout=None)
-            view.add_item(moneyline_button(detail["moneylines"], row=0))
+            view.add_item(moneyline_button(detail["moneylines"], row=0, books=detail.get("books")))
             for i, group in enumerate(chunk_embeds(embeds)):
                 await send(embeds=group, **({"view": view} if i == 0 else {}))
             continue
