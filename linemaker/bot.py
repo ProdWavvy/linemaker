@@ -1045,18 +1045,20 @@ async def grade_cmd(interaction: discord.Interaction, results: Optional[discord.
             if results.size > MAX_UPLOAD:
                 raise ValueError("results file too large")
             rows = list(csv.DictReader(io.StringIO((await results.read()).decode("utf-8-sig"))))
+        from .grade_report import day_records, grade_report, graded_keys
+        before = graded_keys(day_records(date))
         summary, remaining, tracked = await asyncio.to_thread(grade_day, date, rows, auto)
-        if not summary and not tracked:
+        embeds, table = await asyncio.to_thread(grade_report, date, summary, before, remaining)
+        if not summary and not tracked and table is None:
             await interaction.followup.send(f"Nothing graded for {date} yet: games may not be "
                                             "final, or nothing was tracked that day.")
             return
-        lines = summary + [f"- 📊 Results logged for **{tracked}** tracked markets "
-                           "(`/calibrate` shows the full report)"]
-        embed = discord.Embed(title=f"📈 Grading · {date}", description="\n".join(lines),
-                              color=BLUE_BOARD)
-        if remaining is not None:
-            embed.set_footer(text=f"Game lines scored from final scores · credits left: {remaining}")
-        await interaction.followup.send(embed=embed)
+        groups = chunk_embeds(embeds)
+        for i, group in enumerate(groups):
+            last = i == len(groups) - 1
+            files = ([discord.File(io.BytesIO(table.encode()), filename=f"graded_{date}.csv")]
+                     if last and table else [])
+            await interaction.followup.send(embeds=group, files=files)
     except Exception as e:
         await _report_error(interaction, e)
 
@@ -1467,8 +1469,11 @@ async def weekly_post():
 @tasks.loop(time=dt.time(9, 30, tzinfo=TZ))
 async def daily_grade():
     day = (dt.datetime.now(TZ).date() - dt.timedelta(days=1)).isoformat()
+    from .grade_report import day_records, grade_report, graded_keys
     try:
+        before = graded_keys(day_records(day))
         summary, remaining, tracked = await asyncio.to_thread(grade_day, day, [], True)
+        embeds, table = await asyncio.to_thread(grade_report, day, summary, before, remaining)
     except Exception:
         log.exception("daily grade failed")
         return
@@ -1478,12 +1483,12 @@ async def daily_grade():
     channel = bot.get_channel(int(channel_id)) if channel_id else None
     if channel is None or not (summary or tracked):
         return
-    embed = discord.Embed(title=f"📈 Morning grade · {day}", color=BLUE_BOARD,
-                          description="\n".join(summary + [f"- 📊 Results logged for **{tracked}** "
-                                                           "tracked markets"])[:4000])
-    if remaining is not None:
-        embed.set_footer(text=f"Credits left: {remaining}")
-    await channel.send(embed=embed)
+    embeds[0].title = f"📈 Morning Grade · {day}"
+    groups = chunk_embeds(embeds)
+    for i, group in enumerate(groups):
+        files = ([discord.File(io.BytesIO(table.encode()), filename=f"graded_{day}.csv")]
+                 if i == len(groups) - 1 and table else [])
+        await channel.send(embeds=group, files=files)
 
 
 @tasks.loop(time=dt.time(11, 0, tzinfo=TZ))
