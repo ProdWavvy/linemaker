@@ -350,9 +350,11 @@ class LinemakerChat:
             book = args.get("book") if kind != "pp" else None
             if book in ("FanDuel", "DraftKings"):
                 # Same odds pull (no extra credits), only that book's prices are bettable.
-                # Not tracked: the full two-book scan is the one graded for tuning.
+                # Still tracked (one record per market, so no double counting): your bets
+                # from this card settle from those records, and tuning reads the model and
+                # no-vig market numbers, which don't depend on the book filter.
                 from dataclasses import replace as _replace
-                cfg, tracker = _replace(cfg, bet_books=(book,), track=False), None
+                cfg = _replace(cfg, bet_books=(book,))
             else:
                 book = None
             res = run_pro(rows_to_markets(rows), date, cfg, freezer, tracker)
