@@ -1,5 +1,9 @@
 import os
 
+# Tests must not pick up the live settings.env / Discord overrides from the repo.
+os.environ.setdefault("LINEMAKER_NO_LAYERS", "1")
+import os
+
 # Sample slates use many books; tests opt out of the FanDuel/DraftKings default.
 os.environ.setdefault("LINEMAKER_BET_BOOKS", "all")
 os.environ.setdefault("LINEMAKER_TRACKING", "off")   # tests that need it turn it on

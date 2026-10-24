@@ -16,7 +16,8 @@ class SettingsLayersTest(unittest.TestCase):
             f.write("LINEMAKER_MIN_GAP=0.02\nODDS_API_KEY=fromrepo\n")
         self.env = mock.patch.dict(os.environ, {}, clear=False)
         self.env.start()
-        for k in ("ODDS_API_KEY", "LINEMAKER_MIN_GAP", "LINEMAKER_MAX_PICKS", "LINEMAKER_OWNER_IDS"):
+        for k in ("ODDS_API_KEY", "LINEMAKER_MIN_GAP", "LINEMAKER_MAX_PICKS", "LINEMAKER_OWNER_IDS",
+                  "LINEMAKER_NO_LAYERS"):
             os.environ.pop(k, None)
         self.root_patch = mock.patch("linemaker.envfile.root_dir", return_value=self.root)
         self.root_patch.start()

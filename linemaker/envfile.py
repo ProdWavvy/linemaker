@@ -63,6 +63,8 @@ def read_env(path: str) -> dict:
 
 def load_all(root: str = None) -> None:
     root = root or root_dir()
+    if os.environ.get("LINEMAKER_NO_LAYERS"):   # tests: only the real environment counts
+        return
     load_env(override_path(root))
     for key, value in read_env(os.path.join(root, "settings.env")).items():
         if value and not SECRET.search(key) and key not in os.environ:
