@@ -137,3 +137,33 @@ class SportSettingsTest(unittest.TestCase):
             res = run_pro(rows_to_markets(rows), "2026-10-21", ProConfig(n_sims=4000, track=False))
         self.assertEqual({e.market.sport for e in res.picks}, {"WNBA"})
         self.assertTrue(any(l.startswith("Nba Guy") and "no gap" in r for l, r in res.passes))
+
+
+class BiasTest(unittest.TestCase):
+    def _recs(self, n, ratio, seed=1, mean=20.0, bias_applied=1.0):
+        rng = random.Random(seed)
+        out = []
+        for i in range(n):
+            actual = max(0.0, rng.gauss(mean * ratio, 6))
+            out.append({"sport": "NBA", "market": "points", "game_id": f"g{i // 8}", "subject": f"p{i}",
+                        "inputs": {"bet_type": "prop", "line": 19.5, "mean": mean * bias_applied,
+                                   "mean_bias": bias_applied},
+                        "result": {"actual": actual, "winner": "A"}})
+        return out
+
+    def test_high_projections_get_trimmed(self):
+        bias, changes = autotune.tune_bias(self._recs(1500, 0.92), {})
+        self.assertAlmostEqual(bias["NBA points"], 0.96)          # one capped step toward ~0.92
+        self.assertIn("NBA points projections ×1.00 → ×0.96", changes[0])
+        bias2, _ = autotune.tune_bias(self._recs(1500, 0.92), {"bias": bias})
+        self.assertAlmostEqual(bias2["NBA points"], 1 + 1500 / 1650 * -0.08, delta=0.006)   # shrunk toward 1
+
+    def test_noise_doesnt_move_it(self):
+        bias, changes = autotune.tune_bias(self._recs(200, 1.0, seed=3), {})
+        self.assertEqual((bias, changes), ({}, []))
+
+    def test_alt_lines_count_once_and_raw_mean_is_used(self):
+        recs = self._recs(1500, 0.92, bias_applied=0.95)            # already corrected by 0.95
+        ladder = [dict(r, inputs=dict(r["inputs"], line=29.5)) for r in recs]
+        bias, _ = autotune.tune_bias(recs + ladder, {"bias": {"NBA points": 0.95}})
+        self.assertAlmostEqual(bias["NBA points"], 1 + 1500 / 1650 * -0.08, delta=0.006)   # target from raw means

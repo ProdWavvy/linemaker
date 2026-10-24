@@ -384,6 +384,13 @@ def espn_projections(sport: str, date: str, wanted: dict) -> list:
         _apply_goalies(date, out)
     if sport == "MLB":
         _apply_mlb(date, out)
+    from .autotune import bias_for
+    for r in out:   # learned projection-bias correction (autotune.tune_bias)
+        f = bias_for(sport, r["market"])
+        if abs(f - 1) > 1e-9:
+            r["mean"] = f"{float(r['mean']) * f:.3f}"
+            r["mean_bias"] = f"{f:.3f}"
+            r["notes"] += f"; ×{f:.2f} bias correction (graded results)"
     for r in out:
         r.pop("_team", None)
         r.pop("_opp", None)

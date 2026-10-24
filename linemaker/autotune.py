@@ -199,6 +199,65 @@ def tune(records: list, current: dict) -> tuple:
     return new, changes
 
 
+# ---- projection bias ------------------------------------------------------------------
+# If a market's projections keep landing high (or low), every price built on them is off in
+# the same direction, which no blend weight fixes. Per sport + market ("NBA points"), with one
+# outcome per player-stat (alt lines share an actual), the raw projections' bias is
+#   ratio = sum(actual) / sum(raw projection)          raw = tracked mean / correction applied
+# and the correction becomes 1 + n/(n+150) x (ratio - 1), but only when the ratio is off by
+# more than twice its noise (measured game by game) and 1%; it moves at most 0.04 per run and
+# stays within 0.80-1.20. New projections are multiplied by it.
+BIAS_MIN, BIAS_STEP, BIAS_LOW, BIAS_HIGH = 75, 0.04, 0.80, 1.20
+
+
+def tune_bias(records: list, current: dict) -> tuple:
+    """({"NBA points": 0.97, ...}, [changes]) from graded prop records."""
+    one = {}
+    for r in records:
+        inp = r.get("inputs") or {}
+        res = r.get("result") or {}
+        if inp.get("bet_type") != "prop" or res.get("actual") is None or not inp.get("mean"):
+            continue
+        one.setdefault((r.get("game_id"), r.get("subject"), r.get("sport"), r.get("market")), r)
+    groups = {}
+    for (gid, _s, sport, market), r in one.items():
+        raw = float(r["inputs"]["mean"]) / float(r["inputs"].get("mean_bias") or 1.0)
+        groups.setdefault(f"{sport} {market}", []).append((gid, raw, float(r["result"]["actual"])))
+    bias, changes = dict(current.get("bias", {})), []
+    for name, rows in sorted(groups.items()):
+        n = len(rows)
+        if n < BIAS_MIN:
+            continue
+        m_sum, a_sum = sum(x[1] for x in rows), sum(x[2] for x in rows)
+        if m_sum <= 0:
+            continue
+        ratio = a_sum / m_sum
+        by_game = {}
+        for gid, m, a in rows:
+            g = by_game.setdefault(gid, [0.0, 0.0])
+            g[0] += m
+            g[1] += a
+        se = math.sqrt(sum((a - ratio * m) ** 2 for m, a in by_game.values())) / m_sum
+        old = bias.get(name, 1.0)
+        if abs(ratio - 1) < max(0.01, 2 * se):
+            target = old if abs(old - 1) > 1e-9 else 1.0   # noise: hold where it is
+        else:
+            target = 1 + n / (n + SHRINK) * (ratio - 1)
+        new = round(min(BIAS_HIGH, max(BIAS_LOW, old + max(-BIAS_STEP, min(BIAS_STEP, target - old)))), 3)
+        if abs(new - 1) < 0.005:
+            bias.pop(name, None)
+        else:
+            bias[name] = new
+        if abs(new - old) >= 0.001:
+            changes.append(f"{name} projections ×{old:.2f} → ×{new:.2f} (actual/projected {ratio:.3f}, "
+                           f"{n} outcomes)")
+    return bias, changes
+
+
+def bias_for(sport: str, market: str) -> float:
+    return float(load_weights().get("bias", {}).get(f"{sport} {market}", 1.0))
+
+
 def tune_live(records: list, current: dict) -> tuple:
     """(live weight, [changes]): the in-game blend, fit on graded live reads only."""
     graded = _graded(records)
@@ -220,6 +279,11 @@ def run_autotune(tracking_dir: str, today: str) -> list:
     records = load_records(tracking_dir, days, today)
     current = load_weights()
     new, changes = tune(records, current)
+    new["bias"], bias_changes = tune_bias(records, current)
+    if bias_changes:
+        changes = changes + bias_changes
+        new["history"] = (new.get("history", []) + [{"date": dt.date.today().isoformat(),
+                                                    "changes": bias_changes}])[-30:]
     live_w, live_changes = tune_live(load_records(os.path.join(tracking_dir, "live"), days, today),
                                      current)
     new["live_weight"] = live_w
@@ -247,7 +311,10 @@ def current_summary() -> str:
     parts += [f"{k} {v:.2f}" for k, v in sorted(w.get("markets", {}).items())]
     if w.get("live_weight") is not None:
         parts.append(f"live {w['live_weight']:.2f}")
-    return "Auto-tuned weights: " + ", ".join(parts)
+    out = "Auto-tuned weights: " + ", ".join(parts)
+    if w.get("bias"):
+        out += "\nProjection corrections: " + ", ".join(f"{k} ×{v:.2f}" for k, v in sorted(w["bias"].items()))
+    return out
 
 
 def tuned(name: str) -> Optional[float]:

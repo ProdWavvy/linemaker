@@ -66,6 +66,7 @@ class Tracker:
             "subject": m.subject, "opponent": m.opponent, "market": m.market,
             "position": m.position, "threshold": m.threshold,
             "inputs": {"bet_type": m.bet_type, "line": m.line, "mean": m.mean,
+                       "mean_bias": getattr(m, "mean_bias", 1.0),
                        "mean_b": m.mean_b, "stdev": m.stdev, "dist": ev.sim.dist},
             "sim": {"sd": ev.sim.sd, "median": ev.sim.median, "p_over": ev.sim.p_over,
                     "p_push": ev.sim.p_push, "p_under": ev.sim.p_under},

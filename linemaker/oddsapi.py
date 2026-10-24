@@ -442,7 +442,7 @@ def proj_key(sport: str, subject: str, market: str) -> tuple:
 
 # Projection columns copied straight into the pro slate row.
 PROJ_COLUMNS = (
-    "lineup_confirmed", "position", "mean", "mean_b", "stdev", "dist", "season_games",
+    "lineup_confirmed", "position", "mean", "mean_b", "mean_bias", "stdev", "dist", "season_games",
     "opp_season", "opp_recent", "opp_recent_games", "opp_override", "rate_season",
     "rate_recent", "rate_recent_games", "rate_expected", "matchup_factor", "pace_factor",
     "venue_factor", "rest_factor", "news_fresh", "injury_status", "notes",

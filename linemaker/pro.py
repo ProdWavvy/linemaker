@@ -213,6 +213,7 @@ class ProMarket:
     commence: str = ""                         # ISO start time, when known
     links: dict = field(default_factory=dict)  # book -> [betslip link info per side]
     multiplier: Optional[float] = None         # pick'em payout multiplier (goblin < 1 < demon)
+    mean_bias: float = 1.0                     # projection-bias correction already in `mean`
 
     @property
     def key(self) -> str:
@@ -378,6 +379,7 @@ def rows_to_markets(rows) -> list:
             commence=(r.get("commence") or "").strip(),
             links=_links(r.get("links")),
             multiplier=_opt_float(r.get("pp_mult")),
+            mean_bias=_opt_float(r.get("mean_bias")) or 1.0,
         ))
     return out
 
