@@ -290,6 +290,92 @@ def pruned(sport: str, market: str) -> Optional[str]:
     return load_weights().get("pruned", {}).get(f"{sport} {market}")
 
 
+# ---- probability calibration ------------------------------------------------------------
+# Are the hit chances honest? Per sport, every graded two-way market's final hit chance for
+# side A (after the model/market blend) is fit against what happened:
+#   calibrated = 1 / (1 + e^-(a + b x logit(p)))          (Platt scaling)
+# b < 1 means the extremes are too confident (a "90%" that hits 86%). It's used where the hit
+# chance itself is the product: volume legs, parlays and PrizePicks. Kept only when it beats
+# the raw chances on log loss by more than the game-to-game noise, and pulled toward "no
+# change" by n / (n + 500) unique outcomes so a thin sample can't bend it far.
+CAL_MIN, CAL_SHRINK = 300, 500
+
+
+def _logit(p: float) -> float:
+    p = min(max(p, 1e-4), 1 - 1e-4)
+    return math.log(p / (1 - p))
+
+
+def _platt(xs: list, ys: list) -> tuple:
+    """Fit a, b by Newton's method on log loss."""
+    a, b = 0.0, 1.0
+    for _ in range(25):
+        ga = gb = haa = hab = hbb = 0.0
+        for x, y in zip(xs, ys):
+            p = 1 / (1 + math.exp(-(a + b * x)))
+            d, w = p - y, p * (1 - p)
+            ga += d
+            gb += d * x
+            haa += w
+            hab += w * x
+            hbb += w * x * x
+        det = haa * hbb - hab * hab
+        if det <= 1e-12:
+            break
+        da, db = (hbb * ga - hab * gb) / det, (haa * gb - hab * ga) / det
+        a, b = a - da, b - db
+        if abs(da) + abs(db) < 1e-7:
+            break
+    return a, b
+
+
+def tune_calibration(records: list) -> tuple:
+    """({"NBA": [a, b, n], ...}, [notes])."""
+    by_sport = {}
+    for r in records:
+        res = r.get("result") or {}
+        a = next((s for s in r.get("sides", []) if s.get("side") == "A"), None)
+        if not a or res.get("winner") not in ("A", "B") or len(r.get("sides", [])) != 2:
+            continue
+        by_sport.setdefault(r.get("sport"), []).append(
+            (r.get("game_id"), (r.get("game_id"), r.get("subject"), r.get("market")),
+             _logit(a["blended"]), 1.0 if res["winner"] == "A" else 0.0))
+    out, notes = {}, []
+    for sport, rows in sorted(by_sport.items()):
+        n = len({u for _g, u, _x, _y in rows})
+        if n < CAL_MIN:
+            continue
+        xs, ys = [x for _g, _u, x, _y in rows], [y for _g, _u, _x, y in rows]
+        a, b = _platt(xs, ys)
+        w = n / (n + CAL_SHRINK)
+        a, b = w * a, 1 + w * (b - 1)
+
+        def loss(x, y, aa, bb):
+            p = min(max(1 / (1 + math.exp(-(aa + bb * x))), 1e-4), 1 - 1e-4)
+            return -(y * math.log(p) + (1 - y) * math.log(1 - p))
+        gains, counts = {}, {}
+        for g, _u, x, y in rows:
+            gains[g] = gains.get(g, 0.0) + loss(x, y, 0, 1) - loss(x, y, a, b)
+            counts[g] = counts.get(g, 0) + 1
+        total = len(rows)
+        mean = sum(gains.values()) / total
+        se = math.sqrt(sum((v - mean * counts[g]) ** 2 for g, v in gains.items())) / total   # by game
+        if mean > max(0.0005, 2 * se):
+            out[sport] = [round(a, 4), round(b, 4), n]
+            notes.append(f"{sport} hit chances recalibrated (a {a:+.2f}, b {b:.2f}; {n} outcomes): "
+                         f"a raw 90% now reads {calibrate_p(0.9, a, b):.0%}")
+    return out, notes
+
+
+def calibrate_p(p: float, a: float, b: float) -> float:
+    return 1 / (1 + math.exp(-(a + b * _logit(p))))
+
+
+def calibrated(p: float, sport: str) -> float:
+    c = load_weights().get("calibration", {}).get(sport)
+    return calibrate_p(p, c[0], c[1]) if c else p
+
+
 def bias_for(sport: str, market: str) -> float:
     return float(load_weights().get("bias", {}).get(f"{sport} {market}", 1.0))
 
@@ -317,6 +403,9 @@ def run_autotune(tracking_dir: str, today: str) -> list:
     new, changes = tune(records, current)
     new["bias"], bias_changes = tune_bias(records, current)
     new["pruned"], _ = tune_prune(records)
+    new["calibration"], cal_notes = tune_calibration(records)
+    if new["calibration"] != current.get("calibration", {}):
+        bias_changes += cal_notes
     before = current.get("pruned", {})
     bias_changes += [f"⏸️ Paused {k}: {v}" for k, v in new["pruned"].items() if k not in before]
     bias_changes += [f"▶️ {k} back on (no longer losing on both counts)" for k in before if k not in new["pruned"]]
@@ -352,6 +441,9 @@ def current_summary() -> str:
     if w.get("live_weight") is not None:
         parts.append(f"live {w['live_weight']:.2f}")
     out = "Auto-tuned weights: " + ", ".join(parts)
+    if w.get("calibration"):
+        out += "\nHit-chance calibration (volume, parlays, PrizePicks): " + ", ".join(
+            f"{k} 90%→{calibrate_p(0.9, v[0], v[1]):.0%}" for k, v in sorted(w["calibration"].items()))
     if w.get("pruned"):
         out += "\nPaused markets: " + ", ".join(f"{k} ({v})" for k, v in sorted(w["pruned"].items()))
     if w.get("bias"):

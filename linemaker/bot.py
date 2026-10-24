@@ -534,7 +534,7 @@ def parlay_card(legs: list, books: Optional[tuple] = None, boost: float = 0.0) -
     from .betlinks import parlay_link
     from .odds import fmt_odds as _fo
     from .parlay import custom_parlays, leg_price, sgp_check
-    from .parlay_math import leg_value
+    from .parlay_math import hit_chance, leg_value
     from .staking import _money, stake_tier
     books = tuple(books or PARLAY_BOOKS)
     short = {"FanDuel": "FD", "DraftKings": "DK"}
@@ -544,7 +544,7 @@ def parlay_card(legs: list, books: Optional[tuple] = None, boost: float = 0.0) -
         prices = " · ".join(f"{short.get(b, b)} {_fo(o) if o else '—'}" for b, o in quotes)
         best = max((leg_value(ev, o) for _b, o in quotes if o), default=None)
         val = "" if best is None else (f" · ✅ {best - 1:+.0%} EV" if best > 1 else f" · {best - 1:+.0%} EV")
-        lines.append(f"• **{ev.best.label}** · {prices} · {ev.best.blended:.0%}{val}")
+        lines.append(f"• **{ev.best.label}** · {prices} · {hit_chance(ev):.0%}{val}")
     embed = discord.Embed(title=f"🎰 Your {len(legs)}-Leg Parlay", color=0xF1C40F,
                           description="\n".join(lines)[:3500])
     built = custom_parlays(legs, books, boost)
@@ -653,6 +653,7 @@ def slip_message(key: str, mask: int = 0, page: int = 0, boost_i: int = 0) -> tu
     (pool key, chosen legs as a bitmask, page), so the slip never expires and survives
     restarts."""
     from .parlay import leg_price
+    from .parlay_math import hit_chance
     detail = PICK_DETAILS[key]
     picks, books = detail["picks"], detail.get("books")
     chosen = [i for i in range(len(picks)) if mask >> i & 1]
@@ -682,7 +683,7 @@ def slip_message(key: str, mask: int = 0, page: int = 0, boost_i: int = 0) -> tu
                       for o in [leg_price(ev, b)] if o), fmt_odds(ev.best.best_odds))
         view.add_item(discord.ui.Button(
             label=(f"{'✅ ' if on else ''}{picks[i]['rank']}. {ev.best.label}"[:62]
-                   + f" · {price} · {ev.best.blended:.0%}")[:80],
+                   + f" · {price} · {hit_chance(ev):.0%}")[:80],
             style=discord.ButtonStyle.success if on else discord.ButtonStyle.secondary,
             row=n // 5, custom_id=f"{base}:t{i}"))
     if chosen:   # whole-slip views: odds, hit rates, line moves, key stats for the chosen legs

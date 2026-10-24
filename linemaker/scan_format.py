@@ -10,7 +10,7 @@ from zoneinfo import ZoneInfo
 import discord
 
 from .discord_format import BOOK_STYLE, GOLD, GREY, _book_key, _clip, _emoji, _kickoff, _style
-from .odds import fmt_money, fmt_odds
+from .odds import american_to_decimal, fmt_money, fmt_odds
 from .gamelogs import MIN_SEASON_GAMES, apply_hit_gate
 from .pro import book_prices
 
@@ -723,7 +723,9 @@ def volume_messages(sections: list, date: str, cfg, title: str = "") -> list:
         n = len(res.slate) or res.games
         return f"{SPORT_NAMES.get(sp, sp)} ({n} game{'s' if n != 1 else ''})"
     sources = sorted({getattr(res, "projection_source", "") for _s, res, _e in sections} - {""})
-    intro = [f"Volume mode: legs ranked by **how often they should hit**, not by edge. Scanned "
+    intro = [f"Volume mode: legs ranked by **how often they should hit**, nudged toward legs that "
+             "beat their price, one per player. Hit chances are calibrated to how past legs at "
+             "that level actually landed. Scanned "
              + ", ".join(_scope(sp, res) for sp, res, _e in sections) + "."
              + (f" Projections: {', '.join(sources)}." if sources else ""),
              f"Each leg is priced {fmt_odds(cfg.min_odds)} to {fmt_odds(cfg.max_odds)}, has an "
@@ -738,19 +740,23 @@ def volume_messages(sections: list, date: str, cfg, title: str = "") -> list:
     out = [([header], None)]
     if legs:
         short = {"FanDuel": "FD", "DraftKings": "DK"}
-        rows = [f"{'#':>2} {'Leg':<36} " + " ".join(f"{short.get(b, b[:2]):>6}" for b in books)
-                + f" {'Hit':>6} {'Szn':>5}"]
+        rows = [f"{'#':>2} {'Leg':<32} " + " ".join(f"{short.get(b, b[:2]):>6}" for b in books)
+                + f" {'Hit':>5} {'EV':>4} {'Szn':>4}"]
         from .parlay import leg_price
         for i, ev in enumerate(legs, 1):
             prices = [leg_price(ev, b) for b in books]
             prof = profiles.get(ev.market.key)
             szn = _pct(prof.season.rate) if prof and prof.season else "—"
-            rows.append(f"{i:>2} {ev.best.label[:36]:<36} "
+            best_o = max((o for o in prices if o), key=lambda o: american_to_decimal(o), default=None)
+            evp = f"{ev.best.blended * american_to_decimal(best_o) - 1:+.0%}" if best_o else "—"
+            rows.append(f"{i:>2} {ev.best.label[:32]:<32} "
                         + " ".join(f"{fmt_odds(o) if o else '—':>6}" for o in prices)
-                        + f" {_pct(ev.best.blended):>6} {szn:>5}")
+                        + f" {_pct(ev.best.blended):>5} {evp:>4} {szn:>4}")
         board = discord.Embed(title="✅ High-Hit-Rate Legs", color=GOLD,
                               description="```\n" + "\n".join(rows) + "\n```")
-        board.set_footer(text="Hit = our estimated chance · Szn = season hit rate at this line")
+        board.set_footer(text="Hit = our hit chance, calibrated to how past picks actually landed · EV = "
+                              "value at the best price (+ beats it) · Szn = season hit rate at this line · "
+                              "one leg per player")
         # The legs behind the board, so "Build my own parlay" can use any of them.
         out.append(([board], {"legs": [{"rank": i, "ev": ev, "profile": profiles.get(ev.market.key)}
                                        for i, ev in enumerate(legs, 1)],

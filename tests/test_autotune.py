@@ -167,3 +167,40 @@ class BiasTest(unittest.TestCase):
         ladder = [dict(r, inputs=dict(r["inputs"], line=29.5)) for r in recs]
         bias, _ = autotune.tune_bias(recs + ladder, {"bias": {"NBA points": 0.95}})
         self.assertAlmostEqual(bias["NBA points"], 1 + 1500 / 1650 * -0.08, delta=0.006)   # target from raw means
+
+
+class CalibrationTest(unittest.TestCase):
+    def _recs(self, n, truth, seed=1):
+        rng = random.Random(seed)
+        out = []
+        for i in range(n):
+            p = rng.uniform(0.55, 0.97)
+            out.append({"sport": "NBA", "market": "points", "game_id": f"g{i // 20}", "subject": f"p{i}",
+                        "sides": [{"side": "A", "blended": p}, {"side": "B", "blended": 1 - p}],
+                        "result": {"winner": "A" if rng.random() < truth(p) else "B"}})
+        return out
+
+    def test_overconfident_extremes_get_pulled_in(self):
+        over = lambda p: 0.5 + (p - 0.5) * 0.75          # a "90%" really hits 80%
+        cal, notes = autotune.tune_calibration(self._recs(4000, over))
+        a, b, n = cal["NBA"]
+        self.assertLess(autotune.calibrate_p(0.9, a, b), 0.87)
+        self.assertIn("NBA hit chances recalibrated", notes[0])
+
+    def test_honest_chances_left_alone(self):
+        cal, _ = autotune.tune_calibration(self._recs(4000, lambda p: p, seed=2))
+        self.assertEqual(cal, {})
+
+
+class VolumeSelectionTest(unittest.TestCase):
+    def test_score_prefers_the_line_that_pays_for_its_risk_and_one_leg_per_player(self):
+        from linemaker.pro import rows_to_markets, run_pro, volume_config
+        base = {"date": "2026-10-21", "sport": "NBA", "game_id": "g", "game": "A @ H", "bet_type": "prop",
+                "subject": "Star", "mean": "28", "stdev": "4"}
+        rows = [dict(base, market="points", line="20.5", books="FanDuel:-900/+600|DraftKings:-900/+600"),
+                dict(base, market="points", line="22.5", books="FanDuel:-420/+320|DraftKings:-420/+320"),
+                dict(base, market="PRA", line="30.5", mean="40", books="FanDuel:-500/+380|DraftKings:-500/+380")]
+        with mock.patch.dict(os.environ, {"LINEMAKER_TRACKING": "off"}):
+            res = run_pro(rows_to_markets(rows), "2026-10-21", volume_config(track=False, n_sims=4000))
+        self.assertEqual(len(res.picks), 1)                                   # one leg for Star
+        self.assertTrue(any("same player already" in r for _l, r in res.passes))

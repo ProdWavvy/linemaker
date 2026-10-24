@@ -118,9 +118,22 @@ def _cholesky(m: list) -> Optional[list]:
     return L
 
 
+def hit_chance(ev) -> float:
+    """A leg's hit chance for parlay math: calibrated to how past legs landed (autotune),
+    unless the scan already calibrated it (volume mode)."""
+    p = ev.best.blended
+    if getattr(ev, "calibrated", False) or not hasattr(ev.market, "sport") or not hasattr(ev.market, "side_keys"):
+        return p
+    if len(ev.market.side_keys) != 2:
+        return p
+    from .autotune import calibrated
+    p_a = calibrated(p if ev.best.side == "A" else 1 - p, ev.market.sport)
+    return p_a if ev.best.side == "A" else 1 - p_a
+
+
 def joint_prob(legs: list, probs: Optional[list] = None) -> float:
     """P(every leg hits), same-game legs correlated (see the module notes)."""
-    probs = probs if probs is not None else [ev.best.blended for ev in legs]
+    probs = probs if probs is not None else [hit_chance(ev) for ev in legs]
     n = len(legs)
     if n == 0:
         return 1.0
@@ -154,7 +167,7 @@ def joint_prob(legs: list, probs: Optional[list] = None) -> float:
 def leg_value(ev, odds: int) -> float:
     """Hit chance x decimal odds: above 1.0 the leg is +EV at that price."""
     from .odds import american_to_decimal
-    return ev.best.blended * american_to_decimal(odds)
+    return hit_chance(ev) * american_to_decimal(odds)
 
 
 def boosted(decimal: float, boost: float) -> float:

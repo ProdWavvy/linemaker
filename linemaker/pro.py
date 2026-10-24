@@ -147,6 +147,8 @@ class ProConfig:
     force_model_weight: Optional[float] = None   # market-edge mode: 0 = the sharp consensus alone
     min_books: int = 0                 # complete two-sided books needed in the consensus
     pick_tag: str = "model"            # what a pick is logged as in tracking ("model" / "market")
+    calibrate: bool = False            # use calibrated hit chances (volume, PrizePicks: see autotune)
+    one_per_player: bool = False       # at most one leg per player (volume: his legs move together)
     # Log every priced market (not just picks) to tracking/<date>.json for calibration.
     track: bool = field(default_factory=lambda: os.environ.get(
         "LINEMAKER_TRACKING", "on").lower() not in ("off", "0", "false", "no"))
@@ -199,6 +201,32 @@ def market_config(**overrides) -> "ProConfig":
     return cfg
 
 
+def apply_calibration(ev):
+    """Replace each side's hit chance with the calibrated one (autotune.tune_calibration) and
+    re-derive gap, EV and fair odds. Two-way markets only; tracking keeps the raw numbers."""
+    from .autotune import calibrated
+    if len(ev.market.side_keys) != 2:
+        return
+    push = getattr(ev.sim, "p_push", 0.0) or 0.0
+    ev.calibrated = True
+    for s in ev.sides:
+        p_a = s.blended if s.side == "A" else 1 - s.blended
+        p_a = calibrated(p_a, ev.market.sport)
+        s.blended = p_a if s.side == "A" else 1 - p_a
+        s.gap = s.blended - s.best_implied
+        s.ev = expected_value(s.blended, s.best_odds, 100, push)
+        s.fair = fair_odds(min(max(s.blended, 0.001), 0.999))
+
+
+def volume_score(ev) -> float:
+    """Volume ranking: hit chance, nudged by price. A leg priced 5% better than fair moves up
+    as if it were 2.5 points likelier; 5% worse, down 2.5. Between two lines of the same
+    ladder this prefers the one that pays for its risk."""
+    from .odds import american_to_decimal
+    s = ev.best
+    return s.blended + 0.5 * (s.blended * american_to_decimal(s.best_odds) - 1)
+
+
 def consensus_books(m: "ProMarket") -> int:
     """Books with both sides priced (what the no-vig consensus is built from)."""
     n = len(m.side_keys)
@@ -216,7 +244,8 @@ def volume_config(**overrides) -> "ProConfig":
         max_gap=_env_num("LINEMAKER_MAX_GAP", float), min_ev=None,
         max_picks=_env_num("LINEMAKER_VOLUME_LEGS", int) or 25,
         require_model_edge=False, rank_by="prob", over_min_gap=None, sport_settings=False,
-        pick_tag="volume")   # parlay legs: logged apart from the model's own picks
+        pick_tag="volume",   # parlay legs: logged apart from the model's own picks
+        calibrate=True, one_per_player=True)
     for k, v in overrides.items():
         setattr(cfg, k, v)
     return cfg
@@ -637,6 +666,8 @@ def run_pro(markets: list, slate_date: str, cfg: ProConfig, freezer=None,
             freezer.record(ev)
         if tracker is not None:
             tracker.record(ev)
+        if cfg.calibrate:   # after tracking: the record keeps the raw hit chances for the next fit
+            apply_calibration(ev)
         c = sport_cfg(cfg, m.sport, per_sport)   # this sport's own gates, if any
         if cfg.pick_tag == "model" and cfg.sport_settings:
             from .autotune import pruned
@@ -666,7 +697,7 @@ def run_pro(markets: list, slate_date: str, cfg: ProConfig, freezer=None,
             res.passes.append((best.label, f"gap {best.gap:+.1%} too large to trust: check injuries "
                                            f"and the line before betting"))
             continue
-        if (c.max_move_against and cfg.pick_tag == "model" and tracker is not None
+        if (c.max_move_against and cfg.pick_tag in ("model", "volume") and tracker is not None
                 and m.key in tracker.records and len(m.side_keys) == 2):
             from .tracking import market_move
             move = market_move(tracker.records[m.key], best.side)
@@ -686,14 +717,23 @@ def run_pro(markets: list, slate_date: str, cfg: ProConfig, freezer=None,
             continue
         quals.append(ev)
 
-    quals.sort(key=(lambda e: e.best.blended) if cfg.rank_by == "prob" else (lambda e: e.best.gap),
-               reverse=True)
+    quals.sort(key=(volume_score if cfg.rank_by == "prob" else (lambda e: e.best.gap)), reverse=True)
     if cfg.one_per_stat:
         seen, kept = {}, []
         for ev in quals:   # best-ranked line of each ladder first; the rest are near-duplicates
             k = (ev.market.game_id, ev.market.subject, ev.market.market)
             if k in seen:
                 res.passes.append((ev.best.label, f"similar line already on the board ({seen[k]})"))
+                continue
+            seen[k] = ev.best.label
+            kept.append(ev)
+        quals = kept
+    if cfg.one_per_player:
+        seen, kept = {}, []
+        for ev in quals:   # a player's legs rise and fall together: keep his best one
+            k = (ev.market.game_id, ev.market.subject) if ev.market.bet_type == "prop" else id(ev)
+            if k in seen:
+                res.passes.append((ev.best.label, f"same player already on the board ({seen[k]})"))
                 continue
             seen[k] = ev.best.label
             kept.append(ev)

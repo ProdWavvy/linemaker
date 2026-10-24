@@ -47,10 +47,10 @@ class Parlay:
 def price(book: str, chosen: list, kind: str = "", style: str = "safest", boost: float = 0.0) -> Parlay:
     """A Parlay for [(ev, odds at this book)]: payout multiplies the prices (plus any boost),
     hit chance is the correlated joint chance (parlay_math)."""
-    from .parlay_math import boosted, joint_prob
+    from .parlay_math import boosted, hit_chance, joint_prob
     p = Parlay(book=book, legs=list(chosen), kind=kind, style=style, boost=boost)
     for ev, odds in p.legs:
-        p.indep_prob *= ev.best.blended
+        p.indep_prob *= hit_chance(ev)
         p.decimal *= american_to_decimal(odds)
     p.decimal = boosted(p.decimal, boost) if boost else p.decimal
     p.prob = joint_prob([ev for ev, _o in p.legs])
