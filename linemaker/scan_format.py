@@ -835,8 +835,8 @@ def odds_board(details: list) -> discord.Embed:
         ev = d["ev"]
         fd, dk = leg_price(ev, "FanDuel"), leg_price(ev, "DraftKings")
         rows.append(f"{d['rank']:>2} {_short_label(ev):<26} {fmt_odds(fd) if fd else '—':>6} "
-                    f"{fmt_odds(dk) if dk else '—':>6} {fmt_odds(ev.best.fair):>6} {_pct(ev.best.blended):>4}")
-    return _board_embed("🏷️ Odds, Every Pick", f"{'#':>2} {'Pick':<26} {'FD':>6} {'DK':>6} {'Fair':>6} {'Us':>4}",
+                    f"{fmt_odds(dk) if dk else '—':>6} {fmt_odds(ev.best.fair):>6} {_pct(ev.best.blended):>5}")
+    return _board_embed("🏷️ Odds, Every Pick", f"{'#':>2} {'Pick':<26} {'FD':>6} {'DK':>6} {'Fair':>6} {'Us':>5}",
                         rows, "Fair = our estimate as odds · Us = our hit chance")
 
 
@@ -849,8 +849,8 @@ def hits_board(details: list) -> discord.Embed:
             w = prof.recent.get(n) if prof else None
             return _pct(w.rate) if w else "—"
         szn = _pct(prof.season.rate) if prof and prof.season else "—"
-        rows.append(f"{d['rank']:>2} {_short_label(ev):<26} {szn:>4} {rate(5):>4} {rate(10):>4} {rate(20):>4}")
-    return _board_embed("📊 Hit Rates, Every Pick", f"{'#':>2} {'Pick':<26} {'Szn':>4} {'L5':>4} {'L10':>4} {'L20':>4}",
+        rows.append(f"{d['rank']:>2} {_short_label(ev):<26} {szn:>5} {rate(5):>5} {rate(10):>5} {rate(20):>5}")
+    return _board_embed("📊 Hit Rates, Every Pick", f"{'#':>2} {'Pick':<26} {'Szn':>5} {'L5':>5} {'L10':>5} {'L20':>5}",
                         rows, "How often this side cleared this line · — = no game log (game lines)")
 
 
@@ -878,8 +878,8 @@ def stats_board(details: list) -> discord.Embed:
         m, s = ev.market, ev.best
         avg = f"{prof.recent[10].avg:.1f}" if prof and 10 in prof.recent else "—"
         rows.append(f"{d['rank']:>2} {_short_label(ev):<26} {m.mean:>5.1f} {avg:>5} "
-                    f"{_pct(s.model_prob):>4} {_pct(s.market_prob):>4}")
-    return _board_embed("📈 Key Stats, Every Pick", f"{'#':>2} {'Pick':<26} {'Proj':>5} {'L10':>5} {'Mod':>4} {'Mkt':>4}",
+                    f"{_pct(s.model_prob):>5} {_pct(s.market_prob):>5}")
+    return _board_embed("📈 Key Stats, Every Pick", f"{'#':>2} {'Pick':<26} {'Proj':>5} {'L10':>5} {'Mod':>5} {'Mkt':>5}",
                         rows, "Proj = our projection (margin/total for game lines) · L10 = last-10 average · "
                               "Mod / Mkt = model vs no-vig market chance")
 
