@@ -34,7 +34,8 @@ class TierTest(unittest.TestCase):
             self.assertEqual(staking.stake_line(0.53, 100), "💵 **Stake:** $15")
             self.assertEqual(staking.stake_line(0.505, 100), "💵 **Stake:** $2.50")
             self.assertIn("skip", staking.stake_line(0.45, 100))
-            self.assertEqual(staking.stake_tier(0.70, 100, parlay=True), 5)     # parlays: $2.50 or $5
+            self.assertEqual(staking.stake_tier(0.70, 100, parlay=True), 10)    # parlays with an edge: up to $10
+            self.assertEqual(staking.stake_tier(0.38, 180, parlay=True), 5)     # a smaller edge: $5
             self.assertIn("$2.50 (fun money", staking.stake_line(0.30, 150, parlay=True))
             self.assertEqual(staking.suggested_dollars(0.53, 100), 15)
 

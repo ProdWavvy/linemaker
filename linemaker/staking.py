@@ -9,7 +9,8 @@ that's a few points too confident.
 
 Cards show one of your usual amounts (LINEMAKER_STAKE_TIERS, default 2.5,5,10,15,20): the
 Kelly suggestion as a share of the cap picks the tier, so the strongest edges get the top
-amount. Parlays stay at the lowest tiers (they swing much harder). Set the tiers blank to
+amount. Parlays with an edge go up to LINEMAKER_PARLAY_MAX_STAKE ($10 by default) and
+parlays without one get the smallest amount (they swing much harder). Set the tiers blank to
 see Kelly percentages (and dollars, with LINEMAKER_BANKROLL) instead.
 """
 import os
@@ -61,7 +62,9 @@ def stake_tier(p: float, american: int, parlay: bool = False) -> Optional[float]
     if share <= 0:
         return levels[0] if parlay else None      # a fun-money parlay: smallest amount
     cap = _env("LINEMAKER_MAX_STAKE_PCT", 2.0) / 100
-    usable = levels[:2] if parlay else levels
+    # Parlays with an edge go up to LINEMAKER_PARLAY_MAX_STAKE (default $10): they swing harder
+    # than singles, so the top amounts stay for straight bets.
+    usable = [v for v in levels if v <= _env("LINEMAKER_PARLAY_MAX_STAKE", 10.0)] or levels[:1] if parlay else levels
     i = min(int(share / cap * len(usable) - 1e-9), len(usable) - 1)
     return usable[max(i, 0)]
 
