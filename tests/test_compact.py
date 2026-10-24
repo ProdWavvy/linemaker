@@ -148,8 +148,9 @@ class ParlayButtonTest(unittest.TestCase):
         (embeds, cview), embed, view, picker = asyncio.run(build())
         self.assertTrue(any(getattr(c, "label", "") == "Turn into parlay" for c in cview.children))
         self.assertEqual(embed.title, "🎰 Your 3-Leg Parlay")
-        self.assertEqual([f.name for f in embed.fields], ["🟦 FanDuel", "🟩 DraftKings"])
-        self.assertIn("hit chance", embed.fields[0].value)
+        self.assertEqual([f.name.split(" · ")[0] for f in embed.fields], ["🟦 FanDuel", "🟩 DraftKings"])
+        self.assertRegex(embed.fields[0].name, r"· \d+% hit")              # odds and hit chance up top
+        self.assertIn("💵", embed.fields[0].value)
         self.assertIn("Not offered here", embed.fields[1].value)
         labels = [getattr(c, "label", "") for c in view.children]
         self.assertIn("Log FanDuel parlay", labels)
@@ -238,7 +239,7 @@ class BigParlayTest(unittest.TestCase):
         embed, view = asyncio.run(build())
         fd = next(f for f in embed.fields if "FanDuel" in f.name)
         self.assertIn("Open this 12-leg slip on FanDuel", fd.value)
-        self.assertIn("hit chance", fd.value)
+        self.assertRegex(fd.name, r"% hit")
         self.assertTrue(any(getattr(c, "label", "") == "Log FanDuel parlay" for c in view.children))
 
 
@@ -281,7 +282,7 @@ class MoneylineParlayTest(unittest.TestCase):
         async def card():
             return bot.parlay_card([d["ev"] for d in pool])
         embed, _v = asyncio.run(card())
-        self.assertTrue(any("hit chance" in f.value for f in embed.fields))
+        self.assertTrue(any("% hit" in f.name for f in embed.fields))
 
 
 class OneBookTest(unittest.TestCase):
@@ -359,7 +360,7 @@ class LiveSlipTest(unittest.TestCase):
         self.assertTrue(btn(v, ":t0").label.startswith("✅"))
         e, v = tap(btn(v, ":t1").custom_id)
         self.assertEqual(e.title, "🎰 Your 2-Leg Parlay · live slip")
-        self.assertIn("hit chance", e.fields[0].value)
+        self.assertRegex(e.fields[0].name, r"% hit")
         self.assertIn("EV", e.fields[0].value)
         self.assertIn("Log FanDuel parlay", [c.label for c in v.children])
         e, v = tap(btn(v, ":t2").custom_id)
@@ -446,12 +447,12 @@ class SlipBoostSuggestTest(unittest.TestCase):
         fd0 = next(f.value for f in e0.fields if "FanDuel" in f.name)
         e, v = tap(btn(v, ":b").custom_id)                    # +10% boost
         fd1 = next(f.value for f in e.fields if "FanDuel" in f.name)
-        self.assertIn("with the +10% boost", fd1)
+        self.assertIn("🚀 +10%", fd1)
         self.assertNotEqual(fd0, fd1)
         self.assertIn("Boost +10%", btn(v, ":b").label)
         e, v = tap(btn(v, ":s").custom_id)                    # adds the third leg
         self.assertEqual(e.title, "🎰 Your 3-Leg Parlay · live slip")
-        self.assertIn("with the +10% boost", next(f.value for f in e.fields if "FanDuel" in f.name))
+        self.assertIn("🚀 +10%", next(f.value for f in e.fields if "FanDuel" in f.name))
 
     def test_old_slip_buttons_still_work(self):
         from linemaker import bot

@@ -227,17 +227,20 @@ def sharp_note(ev) -> str:
 
 
 def _board(picks: list, profiles: dict) -> str:
-    width = max([len(f"⚡{ev.best.label} (XX)") for ev in picks] + [3])
-    width = min(width, 44)
-    rows = [f"{'#':>2} {'Bet':<{width}} {'Odds':>5} {'Impl':>6} {'Ours':>6} {'Gap':>6}"]
+    """Phone-friendly board: two short lines per pick (a fixed-width table wraps on a phone)."""
+    from .parlay_format import BOOK_EMOJI, short_label
+    rows = []
     for i, ev in enumerate(picks, 1):
         s = ev.best
-        tag = _style(s.best_book)[1]
-        bet = ("⚡" if ev.model_weight and sharp_agrees(ev) else "") + f"{s.label} ({tag})"
-        rows.append(f"{i:>2} {bet[:width]:<{width}} {fmt_odds(s.best_odds):>5} {_pct(s.best_implied):>6} "
-                    f"{_pct(s.blended):>6} {_pts(s.gap):>6}")
-    return "```\n" + "\n".join(rows) + "\n```"
-
+        sharp = "⚡ " if ev.model_weight and sharp_agrees(ev) else ""
+        prof = profiles.get(ev.market.key)
+        why = (f" · season {_pct(prof.season.rate)}" if prof and prof.season
+               and prof.season.games >= MIN_SEASON_GAMES else "")
+        proj = f" · proj {ev.market.mean:.1f}" if ev.market.bet_type == "prop" else ""
+        rows.append(f"**{i}.** {sharp}{short_label(s.label)}\n"
+                    f"\u2003{BOOK_EMOJI.get(s.best_book, '')} {fmt_odds(s.best_odds)} · ours **{_pct(s.blended)}** "
+                    f"vs {_pct(s.best_implied)} · gap **{_pts(s.gap)}**{proj}{why}")
+    return "\n".join(rows)
 
 def _short_reason(ev, prof) -> str:
     if prof and prof.season and prof.season.games >= MIN_SEASON_GAMES:
@@ -372,11 +375,11 @@ def scan_messages(sections: list, date: str, cfg, title: str = "") -> list:
         board = discord.Embed(title="📊 The Board, Ranked by Probability Gap", color=GOLD,
                               description=_board([e for e, _s, _p in ranked],
                                                  {k: v for _s, _r, p in sections for k, v in p.items()}))
-        for ev, _s, prof in ranked[:10]:
-            board.add_field(name=f"{ranks[id(ev)]}. {_emoji(ev.market.sport)} {ev.best.label[:60]}",
-                            value=_short_reason(ev, prof.get(ev.market.key)), inline=False)
-        if any(sharp_agrees(ev) and ev.model_weight for ev, _s, _p in ranked):
-            board.set_footer(text="⚡ = the sharp-book consensus alone also beats this price (no model needed)")
+        board.set_footer(text="ours = our hit chance vs the price's · gap in points · proj = our "
+                              "projection · season = hit rate at this line" + (
+                                  " · ⚡ sharp books agree" if any(sharp_agrees(ev) and ev.model_weight
+                                                                  for ev, _s, _p in ranked) else "")
+                              + " · pick one in the menu for the full write-up")
         embeds.append(board)
     messages.append((embeds, {"moneylines": mls, "books": books} if len(mls) >= 2 else None))
 
@@ -742,23 +745,22 @@ def volume_messages(sections: list, date: str, cfg, title: str = "") -> list:
     out = [([header], None)]
     if legs:
         short = {"FanDuel": "FD", "DraftKings": "DK"}
-        rows = [f"{'#':>2} {'Leg':<32} " + " ".join(f"{short.get(b, b[:2]):>6}" for b in books)
-                + f" {'Hit':>5} {'EV':>4} {'Szn':>4}"]
         from .parlay import leg_price
+        from .parlay_format import short_label
+        rows = []
         for i, ev in enumerate(legs, 1):
             prices = [leg_price(ev, b) for b in books]
             prof = profiles.get(ev.market.key)
-            szn = _pct(prof.season.rate) if prof and prof.season else "—"
+            szn = f" · season {_pct(prof.season.rate)}" if prof and prof.season else ""
             best_o = max((o for o in prices if o), key=lambda o: american_to_decimal(o), default=None)
-            evp = f"{ev.best.blended * american_to_decimal(best_o) - 1:+.0%}" if best_o else "—"
-            rows.append(f"{i:>2} {ev.best.label[:32]:<32} "
-                        + " ".join(f"{fmt_odds(o) if o else '—':>6}" for o in prices)
-                        + f" {_pct(ev.best.blended):>5} {evp:>4} {szn:>4}")
+            evp = f" · EV {ev.best.blended * american_to_decimal(best_o) - 1:+.0%}" if best_o else ""
+            quotes = " · ".join(f"{short.get(b, b[:2])} {fmt_odds(o)}" for b, o in zip(books, prices) if o)
+            rows.append(f"**{i}.** {short_label(ev.best.label)} · **{_pct(ev.best.blended)}**\n"
+                        f"\u2003{quotes}{evp}{szn}")
         board = discord.Embed(title="✅ High-Hit-Rate Legs", color=GOLD,
-                              description="```\n" + "\n".join(rows) + "\n```")
-        board.set_footer(text="Hit = our hit chance, calibrated to how past picks actually landed · EV = "
-                              "value at the best price (+ beats it) · Szn = season hit rate at this line · "
-                              "one leg per player")
+                              description=_clip("\n".join(rows), 4096))
+        board.set_footer(text="Bold % = our hit chance (calibrated to past results) · EV = value at the "
+                              "best price · season = hit rate at this line · one leg per player")
         # The legs behind the board, so "Build my own parlay" can use any of them.
         out.append(([board], {"legs": [{"rank": i, "ev": ev, "profile": profiles.get(ev.market.key)}
                                        for i, ev in enumerate(legs, 1)],
@@ -781,30 +783,28 @@ def volume_messages(sections: list, date: str, cfg, title: str = "") -> list:
             bname, _tag, emoji, colour = _style(book)
             e = discord.Embed(title=f"{emoji} {bname} Parlays", color=colour)
             buttons = []
+            from .parlay_format import legs_lines, money_line
             for p in mine:
-                legs_txt = "\n".join(
-                    f"• {ev.best.label[:42]} ({fmt_odds(o)}) {'✅' if leg_value(ev, o) > 1 else ''}"
-                    for ev, o in p.legs)
                 url = parlay_link(p)
                 tag = f" {p.kind}" if p.kind else ""
-                slip = f"\n[🧾 Open this {len(p.legs)}-leg{tag} slip on {bname}]({url})" if url else ""
                 if url:
                     buttons.append((f"{len(p.legs)}-leg{tag} on {bname}", url))
-                from .staking import parlay_pay_line
-                corr = (f" ({_pct(p.indep_prob)} if independent)"
-                        if abs(p.prob - p.indep_prob) >= 0.01 else "")
-                body = (f"{legs_txt}\nHit chance **{_pct(p.prob)}**{corr} · EV {p.ev:+.1f}%\n"
-                        + parlay_pay_line(p.prob, p.american, p.decimal))
-                if p.kind:
-                    body += f"\n🔗 Same-game legs: {bname} prices the {p.kind} itself, lower than shown."
                 icon = "🔗" if p.kind else "💰" if p.style == "value" else "🔒"
-                label = " Value" if p.style == "value" and not p.kind else ""
-                e.add_field(name=f"{icon} {len(p.legs)}-Leg{tag}{label} · {fmt_odds(p.american)}",
-                            value=body + slip if len(body + slip) <= 1024 else _clip(body, 1024),
-                            inline=False)
-            e.set_footer(text="🔒 safest legs, one per game · 💰 legs that beat their price (+EV) · 🔗 "
-                              "same-game legs on one ticket · ✅ leg is +EV at this price · hit chance "
-                              "counts legs from one game moving together · check every leg before you bet")
+                kind = p.kind or ("Value" if p.style == "value" else "Safest")
+                lines = legs_lines(p) + [money_line(p)]
+                if abs(p.prob - p.indep_prob) >= 0.01:
+                    lines.append(f"↔️ {_pct(p.indep_prob)} if the legs were independent")
+                if p.kind:
+                    lines.append(f"⚠️ {bname} prices the {p.kind} itself, lower than shown")
+                if url:
+                    lines.append(f"[🧾 Open this slip on {bname}]({url})")
+                body = "\n".join(lines)
+                if len(body) > 1024:
+                    body = "\n".join(lines[:-1])[:1024]
+                e.add_field(name=f"{icon} {len(p.legs)}-leg {kind} · {fmt_odds(p.american)} · {_pct(p.prob)} hit",
+                            value=body, inline=False)
+            e.set_footer(text="🔒 safest legs, one per game · 💰 legs priced above fair · 🔗 same-game "
+                              "ticket · ✅ leg is +EV at this price")
             out.append(([e], {"links": buttons, "parlays": mine}))
     notes = discord.Embed(title="🧠 Volume Mode, Honestly", color=PURPLE, description=(
         "🔒 parlays are built to **hit often**, not because the price is wrong. Parlaying "
@@ -839,18 +839,16 @@ def pp_messages(sections: list, date: str, title: str = "") -> list:
     header.set_footer(text=odds_age_note(sections))
     out = [([header], None)]
     if legs:
-        rows = [f"{'#':>2} {'Pick':<33} {'Hit':>5} {'x':>5} {'Gap':>5}"]
+        rows = []
         for i, ev in enumerate(legs[:25], 1):
             side = "More" if ev.best.side == "A" else "Less"
-            mark = {"🟢 ": "G ", "😈 ": "D "}.get(tier_icon(ev), "")
-            pick = f"{mark}{ev.market.subject} {side} {ev.market.line:g} {ev.market.market}"
             gap = line_gap(ev)
-            gtxt = f"{gap:+.1f}" if gap is not None else "—"
-            rows.append(f"{i:>2} {pick[:33]:<33} {_pct(ev.best.blended):>5} {leg_mult(ev):>4.2g}x {gtxt:>5}")
-        board = discord.Embed(title="✅ PrizePicks Legs", color=0x8E44AD,
-                              description="```\n" + "\n".join(rows) + "\n```")
-        board.set_footer(text="G = goblin, D = demon · Hit = our chance · x = payout multiplier · "
-                              "Gap = books' main line minus PrizePicks' line (+ = PP lower: easier More)")
+            gtxt = f" · books' line {gap:+.1f}" if gap is not None else ""
+            rows.append(f"**{i}.** {tier_icon(ev)}{ev.market.subject} {side} {ev.market.line:g} {ev.market.market}\n"
+                        f"\u2003**{_pct(ev.best.blended)}** hit · {leg_mult(ev):.2g}x{gtxt}")
+        board = discord.Embed(title="✅ PrizePicks Legs", color=0x8E44AD, description=_clip("\n".join(rows), 4096))
+        board.set_footer(text="🟢 goblin · 😈 demon · x = payout multiplier · books' line = FanDuel/DraftKings "
+                              "main line minus PrizePicks' (+ = PrizePicks lower: easier More)")
         out.append(([board], None))
         entries = best_entries(legs)
         entries.sort(key=lambda e: (e.size, e.kind))
@@ -859,13 +857,13 @@ def pp_messages(sections: list, date: str, title: str = "") -> list:
             for en in entries[:10]:
                 legs_txt = "\n".join(f"• {tier_icon(ev)}{ev.market.subject} "
                                      f"{'More' if ev.best.side == 'A' else 'Less'} "
-                                     f"{ev.market.line:g} {ev.market.market} ({_pct(ev.best.blended)})"
+                                     f"{ev.market.line:g} {ev.market.market} · {_pct(ev.best.blended)}"
                                      for ev in en.legs)
-                pays = " / ".join(f"{m:.3g}x" for m in en.payouts)
+                pays = (f"pays {en.payouts[0]:.3g}x" if en.kind == "Power" else
+                        "pays " + " / ".join(f"{m:.3g}x" for m in en.payouts) + " (all hit / 1 miss…)")
                 e_embed.add_field(
-                    name=f"{en.size}-Pick {en.kind} · {pays}",
-                    value=_clip(f"{legs_txt}\nHit all **{_pct(en.p_all)}** · EV **{en.ev:+.0f}%** per $100",
-                                1024), inline=False)
+                    name=f"🟣 {en.size}-pick {en.kind} · {_pct(en.p_all)} hit all · EV {en.ev:+.0f}%",
+                    value=_clip(f"{legs_txt}\n💵 {pays}", 1024), inline=False)
             e_embed.set_footer(text="Payouts from LINEMAKER_PP_POWER / LINEMAKER_PP_FLEX: check them "
                                     "against your app. Legs are treated as independent.")
             out.append(([e_embed], {"pp": entries[:10]}))

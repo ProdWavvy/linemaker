@@ -539,8 +539,8 @@ def parlay_card(legs: list, books: Optional[tuple] = None, boost: float = 0.0) -
     from .betlinks import parlay_link
     from .odds import fmt_odds as _fo
     from .parlay import custom_parlays, leg_price, sgp_check
+    from .parlay_format import header, money_line, short_label
     from .parlay_math import hit_chance, leg_value
-    from .staking import parlay_pay_line
     books = tuple(books or PARLAY_BOOKS)
     short = {"FanDuel": "FD", "DraftKings": "DK"}
     lines = []
@@ -549,7 +549,7 @@ def parlay_card(legs: list, books: Optional[tuple] = None, boost: float = 0.0) -
         prices = " · ".join(f"{short.get(b, b)} {_fo(o) if o else '—'}" for b, o in quotes)
         best = max((leg_value(ev, o) for _b, o in quotes if o), default=None)
         val = "" if best is None else (f" · ✅ {best - 1:+.0%} EV" if best > 1 else f" · {best - 1:+.0%} EV")
-        lines.append(f"• **{ev.best.label}** · {prices} · {hit_chance(ev):.0%}{val}")
+        lines.append(f"• **{short_label(ev.best.label)}**\n  {prices} · {hit_chance(ev):.0%} hit{val}")
     embed = discord.Embed(title=f"🎰 Your {len(legs)}-Leg Parlay", color=0xF1C40F,
                           description="\n".join(lines)[:3500])
     built = custom_parlays(legs, books, boost)
@@ -557,10 +557,9 @@ def parlay_card(legs: list, books: Optional[tuple] = None, boost: float = 0.0) -
     for p, missing in built:
         from .discord_format import _style
         name, _tag, emoji, _c = _style(p.book)
-        corr = f" ({p.indep_prob:.0%} if independent)" if abs(p.prob - p.indep_prob) >= 0.01 else ""
-        value = (f"**{_fo(p.american)}**" + (f" with the +{boost:.0%} boost" if boost else "")
-                 + f" · hit chance **{p.prob:.0%}**{corr} · EV {p.ev:+.1f}%\n"
-                 + parlay_pay_line(p.prob, p.american, p.decimal))
+        value = money_line(p)
+        if abs(p.prob - p.indep_prob) >= 0.01:
+            value += f"\n↔️ {p.indep_prob:.0%} if the legs were independent"
         if missing:
             value += f"\n⚠️ Not offered here: {', '.join(missing)[:200]}"
         sgp = sgp_check([ev for ev, _o in p.legs], p.book)
@@ -577,7 +576,7 @@ def parlay_card(legs: list, books: Optional[tuple] = None, boost: float = 0.0) -
                                             emoji="🟦" if p.book == "FanDuel" else "🟩"))
         elif url:   # too long for a button (Discord caps those at 512): a link in the text
             value += f"\n🧾 [Open this {len(p.legs)}-leg slip on {p.book}]({url})"
-        embed.add_field(name=f"{emoji} {name}", value=value[:1024], inline=False)
+        embed.add_field(name=header(p), value=value[:1024], inline=False)
         key = _remember({"parlays": [p]})
         b = discord.ui.Button(label=f"Log {p.book} parlay", emoji="📝", style=discord.ButtonStyle.success,
                               custom_id=f"lm:betp:{key}:0")
@@ -604,44 +603,61 @@ def target_parlays(picks: list, books) -> dict:
 
 
 def targets_card(picks: list, books, found: Optional[dict] = None) -> tuple:
-    """(embed, view): for each payout target, the highest-hit-chance parlay at each book."""
+    """(embeds, view): an intro, then one box per payout target with each book's safest parlay.
+    A parlay that's already the answer for a smaller payout isn't repeated: that box says
+    which payouts it covers."""
     from .betlinks import parlay_link
-    from .odds import fmt_odds as _fo
     from .parlay import TARGETS
-    from .staking import parlay_pay_line
+    from .parlay_format import block
     books = tuple(books or PARLAY_BOOKS)
     found = found if found is not None else target_parlays(picks, books)
-    embed = discord.Embed(title="🎯 Safest Parlay for Each Payout", color=0x1ABC9C, description=(
-        "For each payout, the legs with the **highest real hit chance** that reach it: one leg per "
-        "game, every leg priced fair or better. At a set payout, hit chance comes from legs priced "
-        "**above fair** and from **fewer legs**, not from stacking heavy favorites (each one adds the "
-        "book's cut)."))
+    intro = discord.Embed(title="🎯 Safest Parlay for Each Payout", color=0x1ABC9C, description=(
+        "Highest real hit chance for each payout · one leg per game (or per player for one game) · "
+        "every leg priced fair or better. Fewer, better-priced legs beat stacking favorites."))
     view = discord.ui.View(timeout=None)
+    shown, boxes = {}, []    # signature -> box index; boxes: [target, [(book, parlay)], [covers]]
     for target in TARGETS:
-        lines = []
+        here = []
         for book in books:
             p = found.get((target, book))
             if p is None:
                 continue
-            legs_txt = " + ".join(f"{ev.best.label} ({_fo(o)})" for ev, o in p.legs)
-            ladder = " · ".join(f"{n}x in a row {p.prob ** n:.0%}" for n in (2, 3))
-            lines.append(f"**{book} {_fo(p.american)}** · hit chance **{p.prob:.0%}** · EV {p.ev:+.1f}%\n"
-                         f"{legs_txt}\n{parlay_pay_line(p.prob, p.american, p.decimal)}\n"
-                         f"🔁 Rolling winnings over: {ladder}")
+            sig = (book, tuple(sorted(f"{ev.market.key}:{ev.best.side}" for ev, _o in p.legs)))
+            if sig in shown:
+                boxes[shown[sig]][2].append(target)
+                continue
+            shown[sig] = len(boxes)
+            here.append((book, p))
+        if here:
+            boxes.append([target, here, []])
+        elif not any(target in b[2] for b in boxes):
+            boxes.append([target, [], []])
+    colors = (0x1ABC9C, 0x3498DB, 0x9B59B6, 0xE67E22)
+    embeds = [intro]
+    for n, (target, parlays, covers) in enumerate(boxes):
+        label = " · ".join(f"+{(t - 1) * 100:.0f}" for t in [target] + covers)
+        e = discord.Embed(title=f"Payout {label}", color=colors[n % len(colors)],
+                          description=f"Break-even hit chance {1 / target:.0%}" + (
+                              f" (this parlay pays enough for {label})" if covers else ""))
+        if not parlays:
+            e.description += "\nNo combination of fair-priced legs reaches this payout."
+        for book, p in parlays:
+            roll = f"🔁 Roll it over: 2x {p.prob ** 2:.0%} · 3x {p.prob ** 3:.0%}"
+            name, value = block(p, [roll])
+            e.add_field(name=name, value=value, inline=False)
             k = _remember({"parlays": [p]})
             if len(view.children) < 24:
                 url = parlay_link(p)
+                tag = f"{p.american:+d} {book}"
                 if url and len(url) <= 512:
-                    view.add_item(discord.ui.Button(label=f"+{(target - 1) * 100:.0f} {book}", url=url,
+                    view.add_item(discord.ui.Button(label=f"Bet {tag}", url=url,
                                                     emoji="🟦" if book == "FanDuel" else "🟩"))
-                view.add_item(discord.ui.Button(label=f"Log +{(target - 1) * 100:.0f} {book}", emoji="📝",
+                view.add_item(discord.ui.Button(label=f"Log {tag}", emoji="📝",
                                                 style=discord.ButtonStyle.success, custom_id=f"lm:betp:{k}:0"))
-        embed.add_field(name=f"Payout +{(target - 1) * 100:.0f} (break-even hit chance {1 / target:.0%})",
-                        value=("\n\n".join(lines) or "No combination of fair-priced legs reaches this payout.")[:1024],
-                        inline=False)
-    embed.set_footer(text="Hit chances are calibrated to past results and count legs from one game "
-                          "moving together. Rolling over multiplies the risk: each step must hit.")
-    return embed, view
+        embeds.append(e)
+    embeds[-1].set_footer(text="Hit chances are calibrated to past results and count legs from one "
+                               "game moving together. Rolling over: every step has to hit.")
+    return embeds[:10], view
 
 
 def _show_targets(key: str):
@@ -654,8 +670,8 @@ def _show_targets(key: str):
         try:
             await interaction.response.defer(ephemeral=True, thinking=True)   # the search can take a few seconds
             found = await asyncio.to_thread(target_parlays, detail["picks"], detail.get("books"))
-            embed, view = targets_card(detail["picks"], detail.get("books"), found)
-            await interaction.followup.send(embed=embed, view=view, ephemeral=True)
+            embeds, view = targets_card(detail["picks"], detail.get("books"), found)
+            await interaction.followup.send(embeds=embeds, view=view, ephemeral=True)
             await asyncio.to_thread(save_details)
         except Exception as e:
             await _report_error(interaction, e)

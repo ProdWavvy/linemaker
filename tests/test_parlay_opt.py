@@ -113,10 +113,32 @@ class TargetCardTest(unittest.TestCase):
         with mock.patch.object(parlay, "leg_price", side_effect=lambda ev, b: ev.best.best_odds):
             async def build():
                 return bot.targets_card([{"rank": i, "ev": ev} for i, ev in enumerate(legs, 1)], ("FanDuel",))
-            embed, view = asyncio.run(build())
-        self.assertEqual(len(embed.fields), 4)
-        self.assertIn("in a row", embed.fields[1].value)
-        self.assertTrue(any((getattr(c, "label", "") or "").startswith("Log +200") for c in view.children))
+            embeds, view = asyncio.run(build())
+        self.assertEqual(embeds[0].title, "🎯 Safest Parlay for Each Payout")
+        boxes = embeds[1:]
+        self.assertTrue(all(b.title.startswith("Payout +") for b in boxes))
+        field = boxes[0].fields[0]
+        self.assertRegex(field.name, r"^🟦 FanDuel · \+\d+ · \d+% hit")       # numbers in the header
+        self.assertIn("• P", field.value)                                         # one leg per line
+        self.assertIn("💵", field.value)
+        self.assertIn("Roll it over", field.value)
+        self.assertTrue(any((getattr(c, "label", "") or "").startswith("Log +") for c in view.children))
+
+    def test_repeat_is_merged(self):
+        import asyncio
+        from linemaker import bot
+        a = leg("g1", "A", "points", p=0.6, odds=+130)
+        b = leg("g2", "B", "points", p=0.6, odds=+130)
+        p = parlay.price("FanDuel", [(a, 130), (b, 130)])    # pays 5.29x: covers +100 through +300
+        found = {(t, "FanDuel"): (p if t <= 5.29 else None) for t in parlay.TARGETS}
+
+        async def build():
+            return bot.targets_card([], ("FanDuel",), found)
+        embeds, _v = asyncio.run(build())
+        self.assertEqual(embeds[1].title, "Payout +100 · +200 · +300")
+        self.assertEqual(len(embeds[1].fields), 1)
+        self.assertEqual(embeds[2].title, "Payout +500")
+        self.assertIn("No combination", embeds[2].description)
 
 
 class SameGameTargetTest(unittest.TestCase):
