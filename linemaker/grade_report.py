@@ -125,6 +125,29 @@ def picks_embed(main: dict) -> Optional[discord.Embed]:
                          color=GREEN if units >= 0 else RED)
 
 
+def market_picks_embed(main: dict) -> Optional[discord.Embed]:
+    """Market-edge picks (sharp consensus, no model), graded apart from the model's."""
+    picks = [r for r in main.values() if r.get("market_pick") and r.get("result")]
+    if not picks:
+        return None
+    rows, lines = [], []
+    for r in sorted(picks, key=lambda r: (r.get("sport", ""), r.get("game", ""))):
+        mp = r["market_pick"]
+        o = _outcome(r, mp["side"])
+        rows.append((o, mp.get("odds")))
+        s = _side(r, mp["side"]) or {}
+        lines.append(f"{ {'hit': '✅', 'miss': '❌', 'push': '➖'}[o]} {s.get('label', r.get('subject'))} "
+                     f"{fmt_odds(mp['odds']) if mp.get('odds') else ''} · {_miss_by(r, mp['side'])}")
+    rec, units, roi = _record_line(rows)
+    head = (f"**{rec}** · {units:+.2f} units" + (f" · ROI **{roi:+.1%}**" if roi is not None else "")
+            + " (books slower than the sharp consensus; no model)")
+    body = "\n".join(lines)
+    if len(body) > 3500:
+        body = body[:3500].rsplit("\n", 1)[0] + "\n…and more in the attached CSV"
+    return discord.Embed(title="⚡ Market-Edge Picks", description=head + "\n\n" + body,
+                         color=GREEN if units >= 0 else RED)
+
+
 def model_embed(main: dict) -> Optional[discord.Embed]:
     """How the model read every two-way market, picks or not."""
     graded = [r for r in main.values() if r.get("result") and r["result"].get("winner") in ("A", "B")
@@ -357,7 +380,8 @@ def grade_report(date: str, summary: list, before: set, remaining) -> tuple:
     records = day_records(date)
     newly = len(graded_keys(records) - before)
     embeds = [overview_embed(date, records, newly)]
-    for e in (picks_embed(records["main"]), model_embed(records["main"]), side_book_embed(records),
+    for e in (picks_embed(records["main"]), market_picks_embed(records["main"]),
+              model_embed(records["main"]), side_book_embed(records),
               bets_embed(date, settled_now)):
         if e is not None:
             embeds.append(e)

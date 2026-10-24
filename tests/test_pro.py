@@ -343,3 +343,35 @@ class VolumeEngineTest(unittest.TestCase):
         self.assertIn("🟦 FanDuel Parlays", titles)
         self.assertIn("🟩 DraftKings Parlays", titles)
         self.assertIn("🧠 Volume Mode, Honestly", titles)
+
+
+class MarketModeTest(unittest.TestCase):
+    def _rows(self, fd_over):
+        books = (f"FanDuel:{fd_over}/-110|DraftKings:-115/-105|Pinnacle:-120/+100|BetMGM:-118/-102|"
+                 "Caesars:-115/-105")
+        return [{"date": "2026-10-21", "sport": "NBA", "game_id": "g", "game": "A @ H", "bet_type": "prop",
+                 "subject": "Soft Line", "market": "points", "line": "20.5", "mean": "15",
+                 "books": books}]
+
+    def test_stale_book_price_is_picked_without_the_model(self):
+        from linemaker.pro import market_config, rows_to_markets
+        res = run_pro(rows_to_markets(self._rows("+120")), "2026-10-21", market_config(track=False, n_sims=2000))
+        self.assertEqual([e.best.label for e in res.picks], ["Soft Line Over 20.5 points"])   # model says under
+        self.assertEqual(res.picks[0].model_weight, 0.0)
+        self.assertAlmostEqual(res.picks[0].best.blended, res.picks[0].best.market_prob)
+
+    def test_needs_enough_books_and_a_real_gap(self):
+        from linemaker.pro import market_config, rows_to_markets
+        res = run_pro(rows_to_markets(self._rows("-118")), "2026-10-21", market_config(track=False, n_sims=2000))
+        self.assertEqual(res.picks, [])
+        thin = self._rows("+120")
+        thin[0]["books"] = "FanDuel:+120/-110|DraftKings:-115/-105"
+        res = run_pro(rows_to_markets(thin), "2026-10-21", market_config(track=False, n_sims=2000))
+        self.assertTrue(any("books with both sides" in r for _l, r in res.passes))
+
+    def test_quick_words(self):
+        from linemaker.chat import quick_mode, quick_plays_request
+        self.assertEqual(quick_mode("best +ev props nba"), "market")
+        self.assertEqual(quick_mode("sharp plays tonight"), "market")
+        self.assertEqual(quick_mode("best nba props"), "smart")
+        self.assertEqual(quick_plays_request("+ev nhl"), ["NHL"])

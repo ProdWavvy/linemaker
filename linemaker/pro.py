@@ -134,6 +134,9 @@ class ProConfig:
     market_weights: dict = field(default_factory=lambda: _market_weights())
     sport_weights: dict = field(default_factory=lambda: _sport_weights())
     sport_settings: bool = True        # apply LINEMAKER_<SPORT>_* gates (off for volume / PrizePicks)
+    force_model_weight: Optional[float] = None   # market-edge mode: 0 = the sharp consensus alone
+    min_books: int = 0                 # complete two-sided books needed in the consensus
+    pick_tag: str = "model"            # what a pick is logged as in tracking ("model" / "market")
     # Log every priced market (not just picks) to tracking/<date>.json for calibration.
     track: bool = field(default_factory=lambda: os.environ.get(
         "LINEMAKER_TRACKING", "on").lower() not in ("off", "0", "false", "no"))
@@ -164,6 +167,29 @@ class ProConfig:
     # Volume mode: rank by hit chance instead of gap and allow a slightly negative edge.
     require_model_edge: bool = True
     rank_by: str = "gap"          # "gap" (smart) or "prob" (volume)
+
+
+def market_config(**overrides) -> "ProConfig":
+    """Market-edge mode: no model at all. The fair price is the 10-book no-vig consensus
+    (Pinnacle and other sharp books weighted up); a pick is a FanDuel/DraftKings price that
+    still beats it by LINEMAKER_MARKET_MIN_GAP (default 2 points) with at least
+    LINEMAKER_MARKET_MIN_BOOKS (default 4) complete books behind the consensus. Gaps over 10
+    points are left out (usually a stale line about to move)."""
+    cfg = ProConfig(
+        force_model_weight=0.0, require_model_edge=False, over_min_gap=None, sport_settings=False,
+        min_gap=_env_num("LINEMAKER_MARKET_MIN_GAP", float) or 0.02, max_gap=0.10, min_ev=None,
+        min_odds=_env_num("LINEMAKER_MARKET_ODDS_MIN", int) or 300,
+        max_odds=_env_num("LINEMAKER_MARKET_ODDS_MAX", int) or -400, min_prob=None,
+        min_books=_env_num("LINEMAKER_MARKET_MIN_BOOKS", int) or 4, pick_tag="market")
+    for k, v in overrides.items():
+        setattr(cfg, k, v)
+    return cfg
+
+
+def consensus_books(m: "ProMarket") -> int:
+    """Books with both sides priced (what the no-vig consensus is built from)."""
+    n = len(m.side_keys)
+    return sum(1 for _b, p in m.books if len(p) >= n and all(x is not None for x in p[:n]))
 
 
 def volume_config(**overrides) -> "ProConfig":
@@ -487,7 +513,8 @@ def evaluate(m: ProMarket, cfg: ProConfig, sim: Optional[SimResult] = None) -> O
         return None
     market, mkt_hold, mkt_over, assumed = mp
     model, push = model_probs(m, sim)
-    w = (cfg.model_weight_fresh if m.news_fresh
+    w = (cfg.force_model_weight if cfg.force_model_weight is not None
+         else cfg.model_weight_fresh if m.news_fresh
          else model_weight_for(m.sport, m.market, cfg))
 
     sides = []
@@ -584,6 +611,12 @@ def run_pro(markets: list, slate_date: str, cfg: ProConfig, freezer=None,
                     tracker.record(other)
                     tracker.records[m.key]["bettable"] = False
             continue
+        if cfg.min_books and (ev.vig_assumed or consensus_books(m) < cfg.min_books):
+            res.passes.append((ev.best.label, f"only {consensus_books(m)} books with both sides "
+                                              f"(market edges need {cfg.min_books})"))
+            if tracker is not None:
+                tracker.record(ev)
+            continue
         ev.frozen_at = frozen_at
         res.evaluated.append(ev)
         if freezer is not None:
@@ -646,7 +679,7 @@ def run_pro(markets: list, slate_date: str, cfg: ProConfig, freezer=None,
         freezer.mark_picks(res.picks)
         freezer.save()
     if tracker is not None:
-        tracker.mark_picks(res.picks)
+        tracker.mark_picks(res.picks, cfg.pick_tag)
         tracker.save()
     games = {}
     for ev in res.picks:

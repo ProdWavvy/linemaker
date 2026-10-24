@@ -197,6 +197,9 @@ def _pick_embed(rank: int, ev, prof, partners: list, biggest: bool, ctx=None,
     risks = _risk_sentences(ev, partners)
     if risks:
         paras.append(" ".join(risks))
+    sharp = sharp_note(ev)
+    if sharp:
+        paras.append(sharp)
     paras.append(_closer(ev, prof))
     paras.append(f"{emoji} **Bet this at {name}**")
     from .staking import stake_line
@@ -205,14 +208,32 @@ def _pick_embed(rank: int, ev, prof, partners: list, biggest: bool, ctx=None,
                          description=_clip("\n\n".join(paras), 4096), color=colour)
 
 
+def sharp_agrees(ev) -> bool:
+    """The sharp-book consensus alone (no model) beats this price by a point or more."""
+    s = ev.best
+    return not ev.vig_assumed and s.market_prob - s.best_implied >= 0.01
+
+
+def sharp_note(ev) -> str:
+    s = ev.best
+    if ev.model_weight == 0:   # a market-edge pick: say what the model thinks too
+        verdict = "agrees" if s.model_prob > s.best_implied else "doesn't see it"
+        return (f"🧠 **Model check:** the projection model gives {_pct(s.model_prob)} "
+                f"vs the price's {_pct(s.best_implied)}, so it {verdict}.")
+    if sharp_agrees(ev):
+        return (f"⚡ **Sharp books agree:** the no-vig consensus alone (no model) puts this at "
+                f"{_pct(s.market_prob)}, above the price's {_pct(s.best_implied)}.")
+    return ""
+
+
 def _board(picks: list, profiles: dict) -> str:
-    width = max([len(f"{ev.best.label} (XX)") for ev in picks] + [3])
+    width = max([len(f"⚡{ev.best.label} (XX)") for ev in picks] + [3])
     width = min(width, 44)
     rows = [f"{'#':>2} {'Bet':<{width}} {'Odds':>5} {'Impl':>6} {'Ours':>6} {'Gap':>6}"]
     for i, ev in enumerate(picks, 1):
         s = ev.best
         tag = _style(s.best_book)[1]
-        bet = f"{s.label} ({tag})"
+        bet = ("⚡" if ev.model_weight and sharp_agrees(ev) else "") + f"{s.label} ({tag})"
         rows.append(f"{i:>2} {bet[:width]:<{width}} {fmt_odds(s.best_odds):>5} {_pct(s.best_implied):>6} "
                     f"{_pct(s.blended):>6} {_pts(s.gap):>6}")
     return "```\n" + "\n".join(rows) + "\n```"
@@ -272,8 +293,10 @@ def scan_messages(sections: list, date: str, cfg, title: str = "") -> list:
     sections = _norm_sections(sections)
     extras_by_sport = {sport: ex for sport, _r, ex in sections}
     sections = [(sport, res, ex["profiles"]) for sport, res, ex in sections]
+    market = getattr(cfg, "pick_tag", "") == "market"
     for _sport, res, prof in sections:
-        apply_hit_gate(res, prof)
+        if not market:   # market edges stand on the books' prices alone
+            apply_hit_gate(res, prof)
     ranked = sorted(((ev, sport, prof) for sport, res, prof in sections for ev in res.picks),
                     key=lambda x: x[0].best.gap, reverse=True)[:cfg.max_picks]
     ranks = {id(ev): i for i, (ev, _s, _p) in enumerate(ranked, 1)}
@@ -292,7 +315,7 @@ def scan_messages(sections: list, date: str, cfg, title: str = "") -> list:
     only = books_of([res for _s, res, _p in sections])
     title = title or (f"{only[0]} " if len(only) == 1 else "") + ("Cross-Sport " if len(sections) > 1 else
                       f"{SPORT_NAMES.get(sections[0][0], sections[0][0])} ") + (
-        "Live Edge Scan" if live else "Value Scan")
+        "Live Edge Scan" if live else "Market Edges" if market else "Value Scan")
     books = books_of([res for _s, res, _p in sections])
     intro = [f"I swept every market with a projection and a live {'/'.join(books)} price on "
              f"today's date: {scanned}. Only games starting today were priced; anything "
@@ -309,6 +332,14 @@ def scan_messages(sections: list, date: str, cfg, title: str = "") -> list:
     gates = ["the model beats the no-vig market", "the best price still pays better than fair",
              "a positive gap after blending with the market",
              f"a season hit rate that doesn't contradict the price ({MIN_SEASON_GAMES}+ games)"]
+    if market:
+        intro[0] = (f"⚡ **Market edges, no model:** for every line on today's {scanned} slate, the fair "
+                    "price is the no-vig consensus of up to 10 books, with Pinnacle and other sharp "
+                    "books counted more. A pick is a FanDuel/DraftKings price that still beats that "
+                    "fair price: the book hasn't caught up with the sharp market yet. Move fast; "
+                    "these close quickly.")
+        gates = [f"at least {cfg.min_books} books pricing both sides",
+                 "the best price beats the sharp consensus"]
     if cfg.min_odds is not None or cfg.max_odds is not None:
         gates.insert(0, f"odds inside {fmt_odds(cfg.min_odds or -100)} to {fmt_odds(cfg.max_odds or -10000)}")
     if cfg.min_prob is not None:
@@ -343,6 +374,8 @@ def scan_messages(sections: list, date: str, cfg, title: str = "") -> list:
         for ev, _s, prof in ranked[:10]:
             board.add_field(name=f"{ranks[id(ev)]}. {_emoji(ev.market.sport)} {ev.best.label[:60]}",
                             value=_short_reason(ev, prof.get(ev.market.key)), inline=False)
+        if any(sharp_agrees(ev) and ev.model_weight for ev, _s, _p in ranked):
+            board.set_footer(text="⚡ = the sharp-book consensus alone also beats this price (no model needed)")
         embeds.append(board)
     messages.append((embeds, {"moneylines": mls, "books": books} if len(mls) >= 2 else None))
 

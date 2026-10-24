@@ -183,9 +183,11 @@ TOOLS = [
                                         "total; live = in-game moneyline/spread/total for games "
                                         "in progress (score + clock model); pp = PrizePicks "
                                         "lines with Power/Flex entries"},
-                "mode": {"type": "string", "enum": ["smart", "volume"],
+                "mode": {"type": "string", "enum": ["smart", "volume", "market"],
                          "description": "smart = best edges (default); volume = likeliest legs "
-                                        "for parlays, ranked by hit chance, with parlays built"},
+                                        "for parlays, ranked by hit chance, with parlays built; "
+                                        "market = +EV vs the sharp-book consensus, no model "
+                                        "(asks about +EV, sharp books, line shopping)"},
             },
             "required": ["sport"],
         },
@@ -337,8 +339,10 @@ class LinemakerChat:
                 from .alerts import arm_pretip
                 if arm_pretip(sport, date):
                     ctx.setdefault("armed", []).append(sport)
-            cfg = volume_config() if mode == "volume" else ProConfig()
-            freezer, tracker = Freezer(snaps, date), None
+            from .pro import market_config
+            cfg = (volume_config() if mode == "volume" else market_config() if mode == "market"
+                   else ProConfig())
+            freezer, tracker = (None if mode == "market" else Freezer(snaps, date)), None
             if kind == "pp":
                 from .pp import pp_config
                 from .tracking import Tracker
@@ -378,7 +382,9 @@ class LinemakerChat:
 
             class _LR:   # summarize() reads .result
                 result = res
-            what = ("high-hit-rate legs" if mode == "volume" else "plays") + (
+            what = ("high-hit-rate legs" if mode == "volume" else
+                    "market edges (FanDuel/DraftKings vs the sharp-book consensus, no model)"
+                    if mode == "market" else "plays") + (
                 " (moneylines, spreads, totals)" if kind == "games" else
                 " (live in-game lines)" if kind == "live" else "")
             out = summarize(_LR, f"{sport} {date} ({mode} mode, {what}): {source} projections "
@@ -860,8 +866,15 @@ SOFT_VOLUME = re.compile(r"\b(safe|safest|locks?|chalk|high[- ]hit|likeliest)\b"
 BET_WORDS = re.compile(r"\b(props?|plays?|picks?|legs?)\b", re.I)
 
 
+MARKET_WORDS = re.compile(r"(\+ev\b|\bpositive ev\b|\bmarket edges?\b|\bsharp(s| books?| plays?| edges?)?\b|"
+                          r"\bline ?shop|\bbeat(ing)? the (books|sharps|market)\b)", re.I)
+
+
 def quick_mode(text: str) -> str:
-    """volume for parlay/volume requests, or 'safe/locks/...' with a bet word; else smart."""
+    """market for +EV / sharp-book asks; volume for parlay/volume requests, or
+    'safe/locks/...' with a bet word; else smart."""
+    if MARKET_WORDS.search(text):
+        return "market"
     if STRONG_VOLUME.search(text) or (SOFT_VOLUME.search(text) and BET_WORDS.search(text)):
         return "volume"
     return "smart"
@@ -888,7 +901,7 @@ def quick_plays_request(text: str) -> Optional[list]:
                   and (BET_WORDS.search(text) or GAME_LINE_WORDS.search(text))
                   and not QUESTION_WORDS.search(text))   # "ufc props", "nhl picks"
     if not (PLAYS_INTENT.search(text) or GAMES_INTENT.search(text) or LIVE_INTENT.search(text)
-            or PP_WORDS.search(text) or quick_mode(text) == "volume" or league_ask):
+            or PP_WORDS.search(text) or quick_mode(text) in ("volume", "market") or league_ask):
         return None
     if re.search(r"\b(i have|i think|i got|projection|my number|at \d)", text, re.I):
         return None   # the user supplied their own number: let the model read it
