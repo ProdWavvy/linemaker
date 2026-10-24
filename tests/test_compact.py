@@ -367,7 +367,18 @@ class LiveSlipTest(unittest.TestCase):
         e, v = tap(btn(v, ":t0").custom_id)                          # tap again removes it
         self.assertEqual(e.title, "🎰 Your 2-Leg Parlay · live slip")
         self.assertFalse(btn(v, ":t0").label.startswith("✅"))
+        boards = [c for c in v.children if ":sboard:" in (c.custom_id or "")]
+        self.assertEqual([b.label for b in boards], ["Odds", "Hit Rates", "Line Moves", "Key Stats"])
+
+        class R2:
+            async def send_message(self, **kw):
+                self.sent = kw
+        it = NS(data={"custom_id": boards[0].custom_id}, response=R2())
+        self.assertTrue(asyncio.run(bot.route_component(it)))
+        self.assertEqual(it.response.sent["embed"].title, "🏷️ Odds, Your 2-Leg Slip")
+        self.assertEqual(it.response.sent["embed"].description.count("\n"), 2 + 2)
         e, v = tap(btn(v, ":clr").custom_id)
+        self.assertFalse(any(":sboard:" in (c.custom_id or "") for c in v.children))
         self.assertIn("Tap legs below", e.description)
         self.assertTrue(all(len(c.custom_id or "") <= 100 and len(c.label or "") <= 80 for c in v.children))
 
@@ -380,8 +391,9 @@ class LiveSlipTest(unittest.TestCase):
             return bot.slip_message(key, (1 << 25) - 1, page)
         _e, v0 = asyncio.run(build(0))
         _e, v1 = asyncio.run(build(1))
-        self.assertEqual(sum(":t" in c.custom_id for c in v0.children if c.custom_id), 15)
-        self.assertEqual(sum(":t" in c.custom_id for c in v1.children if c.custom_id), 10)
+        _e, v2 = asyncio.run(build(2))
+        self.assertEqual(sum(":t" in c.custom_id for c in v0.children if c.custom_id), 10)
+        self.assertEqual(sum(":t" in c.custom_id for c in v2.children if c.custom_id), 5)
         self.assertLessEqual(len(v0.children), 25)
 
 

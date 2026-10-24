@@ -718,7 +718,8 @@ def volume_messages(sections: list, date: str, cfg, title: str = "") -> list:
                               description="```\n" + "\n".join(rows) + "\n```")
         board.set_footer(text="Hit = our estimated chance · Szn = season hit rate at this line")
         # The legs behind the board, so "Build my own parlay" can use any of them.
-        out.append(([board], {"legs": [{"rank": i, "ev": ev} for i, ev in enumerate(legs, 1)],
+        out.append(([board], {"legs": [{"rank": i, "ev": ev, "profile": profiles.get(ev.market.key)}
+                                       for i, ev in enumerate(legs, 1)],
                               "books": books}))
         from .betlinks import parlay_link
         parlays = build_parlays(legs, books=books) + build_sgps(legs, books=books)
@@ -824,7 +825,7 @@ def _short_label(ev, n: int = 26) -> str:
 def _board_embed(title: str, header: str, rows: list, footer: str) -> discord.Embed:
     body = "```\n" + "\n".join([header] + rows) + "\n```"
     e = discord.Embed(title=title, color=GOLD, description=_clip(body, 4096))
-    e.set_footer(text=footer + " · pick one in the dropdown for its full page")
+    e.set_footer(text=footer)
     return e
 
 

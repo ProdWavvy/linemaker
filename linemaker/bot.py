@@ -149,6 +149,8 @@ async def route_component(interaction: discord.Interaction) -> bool:
         handler = CompactView._show_notes(key)
     elif kind == "board":
         handler = _show_board(key, parts[3])
+    elif kind == "sboard":
+        handler = _show_board(key, parts[4], int(parts[3], 16))
     elif kind in pages:
         handler = PickView._handler(key, pages[kind])
     else:
@@ -586,7 +588,8 @@ def parlay_card(legs: list, books: Optional[tuple] = None) -> tuple:
     return embed, view
 
 
-def _show_board(key: str, kind: str):
+def _show_board(key: str, kind: str, mask: Optional[int] = None):
+    """A whole-card view (every pick), or with mask, just the legs chosen on a live slip."""
     async def callback(interaction: discord.Interaction):
         from .scan_format import BOARDS
         detail = PICK_DETAILS.get(key)
@@ -594,14 +597,20 @@ def _show_board(key: str, kind: str):
             await interaction.response.send_message(
                 "This card is too old for that view. Ask again for fresh picks.", ephemeral=True)
             return
+        picks = detail["picks"]
+        if mask is not None:
+            picks = [d for i, d in enumerate(picks) if mask >> i & 1]
         try:
-            await interaction.response.send_message(embed=BOARDS[kind][2](detail["picks"]), ephemeral=True)
+            embed = BOARDS[kind][2](picks)
+            if mask is not None:
+                embed.title = embed.title.replace("Every Pick", f"Your {len(picks)}-Leg Slip")
+            await interaction.response.send_message(embed=embed, ephemeral=True)
         except Exception as e:
             await _report_error(interaction, e)
     return callback
 
 
-SLIP_PAGE = 15   # leg buttons per page (3 rows); the last two rows hold the controls
+SLIP_PAGE = 10   # leg buttons per page (2 rows); then the views, the controls, Bet / Log
 
 
 def slip_message(key: str, mask: int = 0, page: int = 0) -> tuple:
@@ -641,6 +650,11 @@ def slip_message(key: str, mask: int = 0, page: int = 0) -> tuple:
                    + f" · {price} · {ev.best.blended:.0%}")[:80],
             style=discord.ButtonStyle.success if on else discord.ButtonStyle.secondary,
             row=n // 5, custom_id=f"{base}:t{i}"))
+    if chosen:   # whole-slip views: odds, hit rates, line moves, key stats for the chosen legs
+        from .scan_format import BOARDS
+        for kind, (label, emoji, _fn) in BOARDS.items():
+            view.add_item(discord.ui.Button(label=label, emoji=emoji, row=2,
+                                            custom_id=f"lm:sboard:{key}:{mask:x}:{kind}"))
     if pages > 1:
         view.add_item(discord.ui.Button(label="Prev", emoji="◀️", row=3, disabled=page == 0,
                                         custom_id=f"{base}:p{page - 1}"))
