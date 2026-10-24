@@ -1102,6 +1102,42 @@ async def grade_cmd(interaction: discord.Interaction, results: Optional[discord.
         await _report_error(interaction, e)
 
 
+@bot.tree.command(name="markets", description="Owner: which bet types FanDuel/DraftKings/PrizePicks have posted (about 1 credit per event)")
+@app_commands.describe(sport="League (default UFC)", events="How many upcoming events to check (default 2)")
+async def markets_cmd(interaction: discord.Interaction, sport: Optional[str] = "UFC", events: Optional[int] = 2):
+    if not await _owner_only(interaction):
+        return
+    await interaction.response.defer(thinking=True, ephemeral=True)
+    try:
+        api = OddsAPI()
+        books = "fanduel,draftkings,prizepicks,underdog"
+
+        def run():
+            now = dt.datetime.now(dt.timezone.utc)
+            upcoming = [e for e in api.events(sport.upper())
+                        if dt.datetime.fromisoformat(e["commence_time"].replace("Z", "+00:00")) > now]
+            out = []
+            for e in upcoming[:max(1, min(events or 2, 5))]:
+                data = api.event_markets(sport.upper(), e["id"], books)
+                per_book = {bk.get("title") or bk["key"]: sorted(m["key"] for m in bk.get("markets", []))
+                            for bk in data.get("bookmakers", [])}
+                out.append((f"{e['away_team']} vs {e['home_team']}", per_book))
+            return out, api.quota.remaining
+        found, left = await asyncio.to_thread(run)
+        if not found:
+            await interaction.followup.send(f"No upcoming {sport.upper()} events in the feed.", ephemeral=True)
+            return
+        lines = []
+        for name, per_book in found:
+            lines.append(f"**{name}**")
+            lines += [f"• {b}: `{', '.join(keys) or 'nothing yet'}`" for b, keys in per_book.items()] or \
+                     ["• no FanDuel / DraftKings / PrizePicks / Underdog markets posted yet"]
+        lines.append(f"\nCredits left: {left}")
+        await interaction.followup.send("\n".join(lines)[:1990], ephemeral=True)
+    except Exception as e:
+        await _report_error(interaction, e)
+
+
 @bot.tree.command(name="ufc", description="UFC fighter projections: win chance, significant strikes, takedowns, fight time")
 async def ufc_cmd(interaction: discord.Interaction):
     await interaction.response.defer(thinking=True)

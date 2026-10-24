@@ -243,6 +243,11 @@ class OddsAPI:
         return self._get(f"/sports/{sport_key(sport)}/odds", **self._price_params(markets),
                          commenceTimeFrom=commence_from, commenceTimeTo=commence_to)
 
+    def event_markets(self, sport: str, event_id: str, bookmakers: str) -> dict:
+        """Which market keys each book has posted for one event (about 1 credit)."""
+        return self._get(f"/sports/{sport_key(sport)}/events/{event_id}/markets",
+                         bookmakers=bookmakers, dateFormat="iso")
+
     def event_odds(self, sport: str, event_id: str, markets: str) -> dict:
         return self._get(f"/sports/{sport_key(sport)}/events/{event_id}/odds",
                          **self._price_params(markets))
