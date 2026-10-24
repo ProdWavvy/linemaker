@@ -314,6 +314,8 @@ def scan_messages(sections: list, date: str, cfg, title: str = "") -> list:
         gates.insert(1, f"estimated probability of {cfg.min_prob:.0%} or better")
     if cfg.min_gap:
         gates.append(f"a gap of at least {cfg.min_gap * 100:.0f} points")
+    if getattr(cfg, "over_min_gap", None):
+        gates.append(f"for prop overs, a gap above {cfg.over_min_gap * 100:.0f} points")
     if cfg.max_gap is not None:
         gates.append(f"a gap no bigger than {cfg.max_gap * 100:.0f} points (bigger usually means stale data)")
     if cfg.min_ev is not None:

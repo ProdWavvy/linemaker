@@ -32,6 +32,16 @@ def _market_weights() -> dict:
     return dict(load_weights().get("markets", {}))
 
 
+def _over_min_gap() -> Optional[float]:
+    raw = os.environ.get("LINEMAKER_OVER_MIN_GAP", "0.04").strip().lower()
+    if raw in ("", "off", "no", "false"):
+        return None
+    try:
+        return float(raw)
+    except ValueError:
+        return 0.04
+
+
 def _default_bet_books() -> Optional[tuple]:
     """Books you can actually bet at. LINEMAKER_BET_BOOKS="all" allows every book."""
     raw = os.environ.get("LINEMAKER_BET_BOOKS", "FanDuel,DraftKings")
@@ -69,6 +79,10 @@ class ProConfig:
     min_gap: float = field(default_factory=lambda: _env_num("LINEMAKER_MIN_GAP", float) or 0.0)
     max_gap: Optional[float] = field(default_factory=lambda: _env_num("LINEMAKER_MAX_GAP", float))
     min_ev: Optional[float] = field(default_factory=lambda: _env_num("LINEMAKER_MIN_EV", float))
+    # Prop overs need a bigger gap: graded results showed the model's over leans run hot
+    # (overs it liked by a little hit at the market's rate, not the model's). 0 / off = same
+    # bar as unders.
+    over_min_gap: Optional[float] = field(default_factory=lambda: _over_min_gap())
     # Optional gates, also settable in .env (e.g. -175 / -300 / 0.70).
     min_prob: Optional[float] = field(default_factory=lambda: _env_num("LINEMAKER_MIN_PROB", float))
     min_odds: Optional[int] = field(default_factory=lambda: _env_num("LINEMAKER_ODDS_MIN", int))
@@ -97,7 +111,7 @@ def volume_config(**overrides) -> "ProConfig":
             "LINEMAKER_VOLUME_MIN_GAP", "").strip() else -0.02,
         max_gap=_env_num("LINEMAKER_MAX_GAP", float), min_ev=None,
         max_picks=_env_num("LINEMAKER_VOLUME_LEGS", int) or 25,
-        require_model_edge=False, rank_by="prob")
+        require_model_edge=False, rank_by="prob", over_min_gap=None)
     for k, v in overrides.items():
         setattr(cfg, k, v)
     return cfg
@@ -521,6 +535,11 @@ def run_pro(markets: list, slate_date: str, cfg: ProConfig, freezer=None,
         if best.gap <= cfg.min_gap:
             res.passes.append((best.label, f"no gap: blended {best.blended:.1%} vs best price "
                                            f"{fmt_odds(best.best_odds)} ({best.best_implied:.1%})"))
+            continue
+        if (cfg.over_min_gap and m.bet_type == "prop" and best.side == "A"
+                and best.gap <= cfg.over_min_gap):
+            res.passes.append((best.label, f"over with a {best.gap:+.1%} gap: overs need more than "
+                                           f"{cfg.over_min_gap:.0%}"))
             continue
         if cfg.max_gap is not None and best.gap > cfg.max_gap:
             res.passes.append((best.label, f"gap {best.gap:+.1%} too large to trust: check injuries "

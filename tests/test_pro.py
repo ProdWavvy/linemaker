@@ -53,7 +53,7 @@ class SimTest(unittest.TestCase):
 class ProPipelineTest(unittest.TestCase):
     def test_slate_and_freeze_and_grade(self):
         with tempfile.TemporaryDirectory() as d:
-            cfg = ProConfig(n_sims=5000)
+            cfg = ProConfig(n_sims=5000, over_min_gap=None)
             res = run_pro(load_pro_markets(SLATE), "2026-10-21", cfg, Freezer(d, "2026-10-21"))
             self.assertTrue(res.picks)
             self.assertTrue(all(e.best.gap > 0 for e in res.picks))
@@ -276,11 +276,26 @@ class NewGatesTest(unittest.TestCase):
                  "bet_type": "prop", "subject": "Thin Edge", "market": "points", "line": "20.5",
                  "mean": "21.5", "books": "FanDuel:-110/-110|DraftKings:-110/-110"}]
         res = run_pro(rows_to_markets(rows), "2026-10-21",
-                      ProConfig(n_sims=4000, max_gap=0.15, min_ev=0.03, track=False))
+                      ProConfig(n_sims=4000, max_gap=0.15, min_ev=0.03, track=False, over_min_gap=None))
         reasons = {lbl.split(" Over")[0]: r for lbl, r in res.passes}
         self.assertIn("too large to trust", reasons["Way Off"])
         self.assertIn("EV", reasons["Thin Edge"])
         self.assertEqual(res.picks, [])
+
+    def test_overs_need_a_bigger_gap(self):
+        from unittest import mock
+        from linemaker.pro import rows_to_markets
+        row = {"date": "2026-10-21", "sport": "NBA", "game_id": "g", "game": "A @ H", "bet_type": "prop",
+               "market": "points", "line": "20.5", "books": "FanDuel:-110/-110|DraftKings:-110/-110"}
+        rows = [dict(row, subject="Small Over", mean="21.6"), dict(row, subject="Big Over", mean="26"),
+                dict(row, subject="Small Under", mean="19.4")]
+        res = run_pro(rows_to_markets(rows), "2026-10-21", ProConfig(n_sims=4000, track=False))
+        picked = {ev.market.subject for ev in res.picks}
+        self.assertEqual(picked, {"Big Over", "Small Under"})
+        self.assertTrue(any("overs need more than 4%" in r for _l, r in res.passes))
+        with mock.patch.dict("os.environ", {"LINEMAKER_OVER_MIN_GAP": "off"}):
+            res = run_pro(rows_to_markets(rows), "2026-10-21", ProConfig(n_sims=4000, track=False))
+        self.assertIn("Small Over", {ev.market.subject for ev in res.picks})
 
 
 class VolumeEngineTest(unittest.TestCase):
