@@ -1119,6 +1119,11 @@ async def record_cmd(interaction: discord.Interaction, days: Optional[int] = 30)
             for kind, k in sorted(s["by_kind"].items()):
                 kroi = k["profit"] / k["staked"] if k["staked"] else 0
                 lines.append(f"• {kind.title()}s: {k['won']}/{k['n']} won · {fmt_money(k['profit'])} ({kroi:+.1%})")
+            if len(s.get("by_sport", {})) > 1:
+                lines.append("**By league:**")
+                for sport, k in sorted(s["by_sport"].items(), key=lambda kv: -kv[1]["profit"]):
+                    kroi = k["profit"] / k["staked"] if k["staked"] else 0
+                    lines.append(f"• {sport}: {k['won']}/{k['n']} won · {fmt_money(k['profit'])} ({kroi:+.1%})")
             lines.append("")
             lines.append("**Recent:**")
             for b in sorted(s["settled"], key=lambda b: b.get("settled", ""), reverse=True)[:8]:

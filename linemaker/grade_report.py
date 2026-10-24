@@ -94,7 +94,7 @@ def picks_embed(main: dict) -> Optional[discord.Embed]:
     picks = [r for r in main.values() if r.get("picked") and r.get("result")]
     if not picks:
         return None
-    rows, lines = [], []
+    rows, lines, by_sport = [], [], {}
     picks.sort(key=lambda r: (r.get("sport", ""), r.get("game", "")))
     for r in picks:
         side = r.get("pick_side") or r.get("best_side")
@@ -102,12 +102,22 @@ def picks_embed(main: dict) -> Optional[discord.Embed]:
         odds = r.get("pick_odds", s.get("best_odds"))
         o = _outcome(r, side)
         rows.append((o, odds))
+        sport = r.get("sport", "?")
+        if sport not in by_sport:
+            lines.append(f"**{sport}**")
+        by_sport.setdefault(sport, []).append((o, odds))
         mark = {"hit": "✅", "miss": "❌", "push": "➖"}[o]
         lines.append(f"{mark} {s.get('label', r.get('subject'))} {fmt_odds(odds) if odds else ''}"
                      f" · {_pct(s.get('blended'))} · {_miss_by(r, side)}")
     rec, units, roi = _record_line(rows)
     head = (f"**{rec}** · {units:+.2f} units" + (f" · ROI **{roi:+.1%}**" if roi is not None else "")
             + " (1 unit each, at the price when picked)")
+    if len(by_sport) > 1:
+        parts = []
+        for sport, rs in sorted(by_sport.items()):
+            r_, u_, _roi = _record_line(rs)
+            parts.append(f"{sport} {r_} ({u_:+.1f}u)")
+        head += "\n" + " · ".join(parts)
     body = "\n".join(lines)
     if len(body) > 3600:
         body = body[:3600].rsplit("\n", 1)[0] + f"\n…and more in the attached CSV"
@@ -138,6 +148,15 @@ def model_embed(main: dict) -> Optional[discord.Embed]:
     lines.append(f"**Accuracy (Brier, lower is better):** model {b_model:.4f} · market "
                  f"{b_mkt:.4f} · blend {b_blend:.4f} → the model "
                  + ("**beat** the market today" if better else "**trailed** the market today"))
+    sports = sorted({r.get("sport", "?") for r in graded})
+    if len(sports) > 1:
+        per = []
+        for sp in sports:
+            rs = [r for r in graded if r.get("sport") == sp]
+            bm = sum((r["model_prob_a"] - (r["result"]["winner"] == "A")) ** 2 for r in rs) / len(rs)
+            bk = sum((r["market_prob_a"] - (r["result"]["winner"] == "A")) ** 2 for r in rs) / len(rs)
+            per.append(f"{sp} {'✅ model' if bm < bk else '📉 market'} ({len(rs)})")
+        lines.append("**More accurate, by league:** " + " · ".join(per))
     lines.append("")
     lines.append("**Calibration** (when it said X%, how often it hit):")
     for lo, hi in BUCKETS:

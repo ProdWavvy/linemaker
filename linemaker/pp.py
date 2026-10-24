@@ -179,7 +179,7 @@ def pp_config():
     floor = os.environ.get("LINEMAKER_PP_MIN_PROB", "").strip()
     cfg = ProConfig(bet_books=(BOOK,), rank_by="prob", require_model_edge=False, min_gap=-1.0,
                     max_gap=None, min_ev=None, min_odds=None, max_odds=None, min_prob=None,
-                    max_picks=10000, one_per_stat=False, over_min_gap=None)
+                    max_picks=10000, one_per_stat=False, over_min_gap=None, sport_settings=False)
     cfg.track = False            # PrizePicks reads are logged to tracking/pp by the caller
     cfg.pp_floor = float(floor) if floor else break_even()
     return cfg

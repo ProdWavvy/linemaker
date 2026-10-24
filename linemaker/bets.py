@@ -129,8 +129,15 @@ def summary(days: Optional[int] = 30, today: Optional[str] = None) -> dict:
     done = [b for b in rows if b["status"] != "open"]
     staked = sum(b["stake"] for b in done)
     profit = sum(b.get("profit", 0.0) for b in done)
-    by_kind = {}
+    by_kind, by_sport = {}, {}
     for b in done:
+        sports = {l.get("sport", "?") for l in b.get("legs", [])}
+        s = by_sport.setdefault(sports.pop() if len(sports) == 1 else "Mixed",
+                                {"n": 0, "won": 0, "profit": 0.0, "staked": 0.0})
+        s["n"] += 1
+        s["won"] += b["status"] == "won"
+        s["profit"] += b.get("profit", 0.0)
+        s["staked"] += b["stake"]
         k = by_kind.setdefault(b["kind"], {"n": 0, "won": 0, "profit": 0.0, "staked": 0.0})
         k["n"] += 1
         k["won"] += b["status"] == "won"
@@ -139,4 +146,5 @@ def summary(days: Optional[int] = 30, today: Optional[str] = None) -> dict:
     return {"open": [b for b in rows if b["status"] == "open"], "settled": done,
             "won": sum(b["status"] == "won" for b in done), "lost": sum(b["status"] == "lost" for b in done),
             "push": sum(b["status"] == "push" for b in done), "staked": staked, "profit": profit,
-            "roi": profit / staked if staked else None, "by_kind": by_kind}
+            "roi": profit / staked if staked else None, "by_kind": by_kind,
+            "by_sport": by_sport}

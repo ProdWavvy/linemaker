@@ -32,14 +32,67 @@ def _market_weights() -> dict:
     return dict(load_weights().get("markets", {}))
 
 
-def _start_weight(sport: str, default: float) -> float:
-    """Model weight before the auto-tuner has a say: UFC's model is a rough first version."""
-    if sport.upper() == "UFC":
+def _sport_weights() -> dict:
+    from .autotune import load_weights
+    return dict(load_weights().get("sports", {}))
+
+
+# Per-sport versions of the gates: LINEMAKER_<SPORT>_<NAME> (e.g. LINEMAKER_NBA_MIN_GAP=0.04,
+# LINEMAKER_UFC_ODDS_MIN=+200) win over the plain LINEMAKER_<NAME> for that sport only.
+SPORT_SETTINGS = {"MIN_GAP": ("min_gap", float), "MAX_GAP": ("max_gap", float),
+                  "MIN_EV": ("min_ev", float), "ODDS_MIN": ("min_odds", int),
+                  "ODDS_MAX": ("max_odds", int), "MIN_PROB": ("min_prob", float),
+                  "OVER_MIN_GAP": ("over_min_gap", float), "MAX_PICKS": ("max_picks", int)}
+
+
+def sport_overrides(sport: str) -> dict:
+    """{field: value} from LINEMAKER_<SPORT>_* settings ("off" = no limit)."""
+    out = {}
+    for suffix, (field_name, kind) in SPORT_SETTINGS.items():
+        raw = os.environ.get(f"LINEMAKER_{sport.upper()}_{suffix}", "").strip()
+        if not raw:
+            continue
+        if raw.lower() in ("off", "none", "no"):
+            out[field_name] = None if field_name != "min_gap" else 0.0
+            continue
         try:
-            return float(os.environ.get("LINEMAKER_UFC_MODEL_WEIGHT", "0.35"))
+            out[field_name] = kind(float(raw.replace("+", ""))) if kind is int else kind(raw)
         except ValueError:
-            return 0.35
-    return default
+            continue
+    return out
+
+
+def sport_cfg(cfg, sport: str, cache: dict):
+    """cfg with this sport's own settings applied (volume / PrizePicks keep theirs)."""
+    if not cfg.sport_settings:
+        return cfg
+    if sport not in cache:
+        o = sport_overrides(sport)
+        cache[sport] = replace(cfg, **o) if o else cfg
+    return cache[sport]
+
+
+START_WEIGHTS = {"UFC": 0.35}   # rough first-version models start leaning on the market
+
+
+def _start_weight(sport: str, default: float) -> float:
+    """A sport's weight before the auto-tuner has enough of it: LINEMAKER_<SPORT>_MODEL_WEIGHT
+    if set, else the built-in start (UFC 0.35), else the overall weight."""
+    raw = os.environ.get(f"LINEMAKER_{sport.upper()}_MODEL_WEIGHT", "").strip()
+    try:
+        return float(raw) if raw else START_WEIGHTS.get(sport.upper(), default)
+    except ValueError:
+        return START_WEIGHTS.get(sport.upper(), default)
+
+
+def model_weight_for(sport: str, market: str, cfg) -> float:
+    """Most specific tuned weight wins: market ("NBA points"), then sport ("NBA"), then the
+    sport's start weight / the overall weight. Each tuned level was already blended with the
+    level above it by sample size (see autotune), so a thin one never strays far."""
+    w = cfg.market_weights.get(f"{sport} {market}")
+    if w is None:
+        w = cfg.sport_weights.get(sport)
+    return w if w is not None else _start_weight(sport, cfg.model_weight)
 
 
 def _over_min_gap() -> Optional[float]:
@@ -79,6 +132,8 @@ class ProConfig:
                                                                       "LINEMAKER_FRESH_WEIGHT", "0.8"))
     # Per-market overrides ("NBA points": 0.62), only for markets with a big enough sample.
     market_weights: dict = field(default_factory=lambda: _market_weights())
+    sport_weights: dict = field(default_factory=lambda: _sport_weights())
+    sport_settings: bool = True        # apply LINEMAKER_<SPORT>_* gates (off for volume / PrizePicks)
     # Log every priced market (not just picks) to tracking/<date>.json for calibration.
     track: bool = field(default_factory=lambda: os.environ.get(
         "LINEMAKER_TRACKING", "on").lower() not in ("off", "0", "false", "no"))
@@ -121,7 +176,7 @@ def volume_config(**overrides) -> "ProConfig":
             "LINEMAKER_VOLUME_MIN_GAP", "").strip() else -0.02,
         max_gap=_env_num("LINEMAKER_MAX_GAP", float), min_ev=None,
         max_picks=_env_num("LINEMAKER_VOLUME_LEGS", int) or 25,
-        require_model_edge=False, rank_by="prob", over_min_gap=None)
+        require_model_edge=False, rank_by="prob", over_min_gap=None, sport_settings=False)
     for k, v in overrides.items():
         setattr(cfg, k, v)
     return cfg
@@ -431,7 +486,7 @@ def evaluate(m: ProMarket, cfg: ProConfig, sim: Optional[SimResult] = None) -> O
     market, mkt_hold, mkt_over, assumed = mp
     model, push = model_probs(m, sim)
     w = (cfg.model_weight_fresh if m.news_fresh
-         else cfg.market_weights.get(f"{m.sport} {m.market}", _start_weight(m.sport, cfg.model_weight)))
+         else model_weight_for(m.sport, m.market, cfg))
 
     sides = []
     for side, (odds, book) in side_prices(m, cfg.bet_books).items():
@@ -497,7 +552,7 @@ def run_pro(markets: list, slate_date: str, cfg: ProConfig, freezer=None,
     if tracker is None and cfg.track:
         from .tracking import Tracker
         tracker = Tracker(os.environ.get("LINEMAKER_TRACKING_DIR", "tracking"), slate_date)
-    quals = []
+    quals, per_sport = [], {}
     # Ladder lines next to each other, so they reuse one simulation (see simulate_ladder).
     for m in sorted(markets, key=lambda m: (m.game_id, m.subject, m.market)):
         label = m.side_label("A")
@@ -533,37 +588,38 @@ def run_pro(markets: list, slate_date: str, cfg: ProConfig, freezer=None,
             freezer.record(ev)
         if tracker is not None:
             tracker.record(ev)
-        if cfg.rank_by == "prob":
-            in_window = [s for s in ev.sides if _window_ok(s.best_odds, cfg)]
+        c = sport_cfg(cfg, m.sport, per_sport)   # this sport's own gates, if any
+        if c.rank_by == "prob":
+            in_window = [s for s in ev.sides if _window_ok(s.best_odds, c)]
             if in_window:
                 ev.chosen = max(in_window, key=lambda s: s.blended).side
         best = ev.best
-        if cfg.require_model_edge and best.model_edge <= 0:
+        if c.require_model_edge and best.model_edge <= 0:
             res.passes.append((best.label, f"market caught up: model {best.model_prob:.1%} vs "
                                            f"no-vig {best.market_prob:.1%}"))
             continue
-        if best.gap <= cfg.min_gap:
+        if best.gap <= c.min_gap:
             res.passes.append((best.label, f"no gap: blended {best.blended:.1%} vs best price "
                                            f"{fmt_odds(best.best_odds)} ({best.best_implied:.1%})"))
             continue
-        if (cfg.over_min_gap and m.bet_type == "prop" and best.side == "A"
-                and best.gap <= cfg.over_min_gap):
+        if (c.over_min_gap and m.bet_type == "prop" and best.side == "A"
+                and best.gap <= c.over_min_gap):
             res.passes.append((best.label, f"over with a {best.gap:+.1%} gap: overs need more than "
-                                           f"{cfg.over_min_gap:.0%}"))
+                                           f"{c.over_min_gap:.0%}"))
             continue
-        if cfg.max_gap is not None and best.gap > cfg.max_gap:
+        if c.max_gap is not None and best.gap > c.max_gap:
             res.passes.append((best.label, f"gap {best.gap:+.1%} too large to trust: check injuries "
                                            f"and the line before betting"))
             continue
-        if cfg.min_ev is not None and best.ev / 100 < cfg.min_ev:
+        if c.min_ev is not None and best.ev / 100 < c.min_ev:
             res.passes.append((best.label, f"EV {best.ev / 100:+.1%} per dollar below "
-                                           f"{cfg.min_ev:.0%} floor"))
+                                           f"{c.min_ev:.0%} floor"))
             continue
-        if not _window_ok(best.best_odds, cfg):
+        if not _window_ok(best.best_odds, c):
             res.passes.append((best.label, f"odds {fmt_odds(best.best_odds)} outside window"))
             continue
-        if cfg.min_prob is not None and best.blended < cfg.min_prob:
-            res.passes.append((best.label, f"blended {best.blended:.1%} below {cfg.min_prob:.0%} floor"))
+        if c.min_prob is not None and best.blended < c.min_prob:
+            res.passes.append((best.label, f"blended {best.blended:.1%} below {c.min_prob:.0%} floor"))
             continue
         quals.append(ev)
 
@@ -579,9 +635,11 @@ def run_pro(markets: list, slate_date: str, cfg: ProConfig, freezer=None,
             seen[k] = ev.best.label
             kept.append(ev)
         quals = kept
-    for ev in quals[cfg.max_picks:]:
+    sports = {ev.market.sport for ev in quals}
+    limit = sport_cfg(cfg, sports.pop(), per_sport).max_picks if len(sports) == 1 else cfg.max_picks
+    for ev in quals[limit:]:
         res.passes.append((ev.best.label, f"qualified (gap {ev.best.gap:+.1%}) but below cutoff"))
-    res.picks = quals[:cfg.max_picks]
+    res.picks = quals[:limit]
     if freezer is not None:
         freezer.mark_picks(res.picks)
         freezer.save()

@@ -90,3 +90,50 @@ class TuneTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class HierarchyTest(unittest.TestCase):
+    def test_sport_gets_its_own_weight_and_markets_shrink_to_it(self):
+        recs = (records(3000, sport="NBA", market="points", model_skill=0.1, seed=3)
+                + records(3000, sport="NFL", market="receiving yards", model_skill=0.95, seed=4))
+        with mock.patch.dict(os.environ, {"LINEMAKER_AUTOTUNE_STEP": "1.0"}):
+            new, changes = autotune.tune(recs, {})
+        self.assertLess(new["sports"]["NBA"], new["model_weight"])     # market knows more in NBA
+        self.assertGreater(new["sports"]["NFL"], new["model_weight"])  # the model knows more in NFL
+        self.assertTrue(any(c.startswith("NBA:") for c in changes))
+        # a market with one stat per sport sits on its sport's weight: no separate entry
+        self.assertNotIn("NBA points", new["markets"])
+
+    def test_thin_sport_stays_near_its_start(self):
+        recs = records(3000, model_skill=0.5, seed=5) + records(80, sport="UFC", market="moneyline",
+                                                               model_skill=1.0, seed=6)
+        with mock.patch.dict(os.environ, {"LINEMAKER_AUTOTUNE_STEP": "1.0"}):
+            new, _ = autotune.tune(recs, {})
+        ufc = new["sports"].get("UFC", 0.35)
+        self.assertLess(ufc, 0.35 + 80 / 230 * 0.65 + 1e-9)   # credibility 80/(80+150) at most
+
+
+class WeightLookupTest(unittest.TestCase):
+    def test_most_specific_wins(self):
+        from linemaker.pro import model_weight_for
+        cfg = ProConfig(track=False)
+        cfg.model_weight, cfg.sport_weights, cfg.market_weights = 0.5, {"NBA": 0.4}, {"NBA points": 0.3}
+        self.assertEqual(model_weight_for("NBA", "points", cfg), 0.3)
+        self.assertEqual(model_weight_for("NBA", "assists", cfg), 0.4)
+        self.assertEqual(model_weight_for("NHL", "shots on goal", cfg), 0.5)
+        self.assertEqual(model_weight_for("UFC", "moneyline", cfg), 0.35)
+        with mock.patch.dict(os.environ, {"LINEMAKER_NHL_MODEL_WEIGHT": "0.6"}):
+            self.assertEqual(model_weight_for("NHL", "shots on goal", cfg), 0.6)
+
+
+class SportSettingsTest(unittest.TestCase):
+    def test_per_sport_gate(self):
+        from linemaker.pro import rows_to_markets, run_pro
+        row = {"date": "2026-10-21", "game_id": "g", "game": "A @ H", "bet_type": "prop",
+               "market": "points", "line": "20.5", "mean": "19.6",
+               "books": "FanDuel:-110/-110|DraftKings:-110/-110"}
+        rows = [dict(row, sport="NBA", subject="Nba Guy"), dict(row, sport="WNBA", subject="Wnba Guy", game_id="g2")]
+        with mock.patch.dict(os.environ, {"LINEMAKER_NBA_MIN_GAP": "0.10", "LINEMAKER_MIN_GAP": ""}):
+            res = run_pro(rows_to_markets(rows), "2026-10-21", ProConfig(n_sims=4000, track=False))
+        self.assertEqual({e.market.sport for e in res.picks}, {"WNBA"})
+        self.assertTrue(any(l.startswith("Nba Guy") and "no gap" in r for l, r in res.passes))

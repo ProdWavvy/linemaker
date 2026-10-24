@@ -11,8 +11,13 @@ LINEMAKER_AUTOTUNE_DAYS (default 60) days of graded markets and saves it to
     than twice the noise (standard error measured game by game, since one blowout moves many
     props together) and by at least 0.002, and by at most LINEMAKER_AUTOTUNE_STEP (default
     0.10) per run.
-  - Per-market weights are pulled toward the overall weight in proportion to their sample
-    (n / (n + 150)), so a small market can't swing far on a hot or cold week.
+  - Three levels: overall -> sport ("NBA") -> market ("NBA points"). Each is its own best fit
+    pulled toward the level above in proportion to its sample (credibility n / (n + 150)):
+        sport weight  = overall + n/(n+150) x (sport's best fit - overall)
+        market weight = sport   + n/(n+150) x (market's best fit - sport)
+    so a thin sport or market can't swing far on a hot or cold week, and a deep one earns its
+    own number. A sport and its markets need 75+ outcomes before they get their own weight.
+    Sports with their own start (UFC 0.35, or LINEMAKER_<SPORT>_MODEL_WEIGHT) start there.
   - Weights stay between 0.05 and 0.95.
 
 LINEMAKER_AUTOTUNE=off freezes everything at the .env values. In-game (live) pricing keeps
@@ -30,6 +35,7 @@ MIN_GROUP = 75
 SHRINK = 150
 MIN_GAIN = 0.002
 LOW, HIGH = 0.05, 0.95
+START_PRIORS = ("UFC",)   # sports whose start weight differs from overall: always kept
 
 
 def autotune_on() -> bool:
@@ -124,7 +130,8 @@ def tune(records: list, current: dict) -> tuple:
     max_step = _env("LINEMAKER_AUTOTUNE_STEP", 0.10)
     new = {"model_weight": current.get("model_weight", _env("LINEMAKER_MODEL_WEIGHT", 0.5)),
            "fresh_weight": current.get("fresh_weight", _env("LINEMAKER_FRESH_WEIGHT", 0.8)),
-           "markets": dict(current.get("markets", {})), "history": list(current.get("history", []))}
+           "markets": dict(current.get("markets", {})), "sports": dict(current.get("sports", {})),
+           "history": list(current.get("history", []))}
     n_total = _outcomes(graded)
     if n_total < min_total:
         return new, [f"Waiting for {min_total} graded outcomes before tuning (have {n_total}; "
@@ -145,21 +152,42 @@ def tune(records: list, current: dict) -> tuple:
         new["fresh_weight"] = _step(old_f, fb, fresh, max_step)
         if new["fresh_weight"] != old_f:
             changes.append(f"Fresh-news weight {old_f:.2f} → {new['fresh_weight']:.2f}")
-    groups = {}
-    for r in graded:
-        groups.setdefault(f"{r['sport']} {r['market']}", []).append(r)
+    # Three levels, each pulled toward the one above by its sample size (credibility
+    # weighting): weight = parent + n / (n + 150) x (its own best fit - parent). A sport or
+    # market with little data stays near its parent; one with lots of data earns its own.
+    from .pro import _start_weight
     g = new["model_weight"]
-    for name, recs in sorted(groups.items()):
+    by_sport, by_market = {}, {}
+    for r in graded:
+        by_sport.setdefault(r["sport"], []).append(r)
+        by_market.setdefault(f"{r['sport']} {r['market']}", []).append(r)
+    for sport, recs in sorted(by_sport.items()):
+        prior = _start_weight(sport, g)
+        n = _outcomes(recs)
+        old_s = new["sports"].get(sport, prior)
+        if n < MIN_GROUP:
+            continue
+        (sb, _l, _b), _ = best_weight(_rows(recs))
+        target = prior + n / (n + SHRINK) * (sb - prior)
+        moved = _step(old_s, target, recs, max_step)
+        if abs(moved - g) < 0.025 and sport not in START_PRIORS:
+            new["sports"].pop(sport, None)       # same as overall: no special case needed
+        else:
+            new["sports"][sport] = moved
+        if abs(moved - old_s) >= 0.001:
+            changes.append(f"{sport}: {old_s:.2f} → {moved:.2f} (best fit {sb:.2f}, {n} outcomes)")
+    for name, recs in sorted(by_market.items()):
         n = _outcomes(recs)
         if n < MIN_GROUP:
             continue
-        gr = _rows(recs)
-        (gb, _l, _b), _ = best_weight(gr)
-        target = g + n / (n + SHRINK) * (gb - g)
-        old_m = new["markets"].get(name, g)
+        sport = name.split(" ", 1)[0]
+        parent = new["sports"].get(sport, _start_weight(sport, g))
+        (gb, _l, _b), _ = best_weight(_rows(recs))
+        target = parent + n / (n + SHRINK) * (gb - parent)
+        old_m = new["markets"].get(name, parent)
         moved = _step(old_m, target, recs, max_step)
-        if abs(moved - g) < 0.025:
-            new["markets"].pop(name, None)       # same as overall: no special case needed
+        if abs(moved - parent) < 0.025:
+            new["markets"].pop(name, None)       # same as its sport: no special case needed
         else:
             new["markets"][name] = moved
         if abs(moved - old_m) >= 0.001:
@@ -215,6 +243,7 @@ def current_summary() -> str:
     if not w:
         return "Using .env weights (nothing auto-tuned yet)."
     parts = [f"overall {w.get('model_weight', 0.5):.2f}", f"fresh news {w.get('fresh_weight', 0.8):.2f}"]
+    parts += [f"{k} {v:.2f}" for k, v in sorted(w.get("sports", {}).items())]
     parts += [f"{k} {v:.2f}" for k, v in sorted(w.get("markets", {}).items())]
     if w.get("live_weight") is not None:
         parts.append(f"live {w['live_weight']:.2f}")
