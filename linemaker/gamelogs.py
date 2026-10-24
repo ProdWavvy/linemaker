@@ -23,18 +23,32 @@ BASKETBALL = {"points": ("points",), "rebounds": ("totalRebounds",), "assists": 
               "threes": ("threePointFieldGoalsMade",),
               "pra": ("points", "totalRebounds", "assists"),
               "pts + reb": ("points", "totalRebounds"), "pts + ast": ("points", "assists"),
-              "reb + ast": ("totalRebounds", "assists"), "blocks": ("blocks",), "steals": ("steals",)}
+              "reb + ast": ("totalRebounds", "assists"), "blocks": ("blocks",), "steals": ("steals",),
+              "blks + stls": ("blocks", "steals"), "turnovers": ("turnovers",),
+              "field goals": ("fieldGoalsMade",), "free throws made": ("freeThrowsMade",)}
 FOOTBALL = {"passing yards": ("passingYards",), "passing tds": ("passingTouchdowns",),
             "pass completions": ("completions",), "pass attempts": ("passingAttempts",),
             "rushing yards": ("rushingYards",), "rush attempts": ("rushingAttempts",),
             "longest rush": ("longRushing",), "receiving yards": ("receivingYards",),
             "receptions": ("receptions",), "longest reception": ("longReception",),
-            "anytime td": ("rushingTouchdowns", "receivingTouchdowns")}
+            "anytime td": ("rushingTouchdowns", "receivingTouchdowns"),
+            "interceptions thrown": ("interceptions",), "pass + rush yards": ("passingYards", "rushingYards"),
+            "rush + rec yards": ("rushingYards", "receivingYards"), "receiving tds": ("receivingTouchdowns",),
+            "rushing tds": ("rushingTouchdowns",), "kicking points": ("totalKickingPoints",),
+            "field goals made": ("fieldGoalsMade",), "extra points": ("extraPointsMade",),
+            "tackles + assists": ("totalTackles",), "solo tackles": ("soloTackles",), "sacks": ("sacks",),
+            "defensive interceptions": ("interceptions",)}
 HOCKEY = {"shots on goal": ("shotsTotal",), "hockey points": ("points",),
-          "anytime goals": ("goals",)}
+          "anytime goals": ("goals",), "goals": ("goals",), "hockey assists": ("assists",),
+          "saves": ("saves",)}
 BASEBALL = {"hits": ("hits",), "home runs": ("homeRuns",), "strikeouts": ("strikeouts",),
             "total bases": ("hits", "doubles", "triples", "triples", "homeRuns", "homeRuns",
-                            "homeRuns")}   # 1B + 2*2B + 3*3B + 4*HR = H + 2B + 2*3B + 3*HR
+                            "homeRuns"),   # 1B + 2*2B + 3*3B + 4*HR = H + 2B + 2*3B + 3*HR
+            "rbis": ("RBIs",), "runs": ("runs",), "h+r+rbi": ("hits", "runs", "RBIs"),
+            "singles": ("hits", "-doubles", "-triples", "-homeRuns"), "doubles": ("doubles",),
+            "walks": ("walks",), "batter strikeouts": ("strikeouts",), "stolen bases": ("stolenBases",),
+            "hits allowed": ("hits",), "walks allowed": ("walks",), "earned runs": ("earnedRuns",),
+            "pitcher outs": ("@outs",)}
 SPORT_MARKETS = {"NBA": BASKETBALL, "WNBA": BASKETBALL, "NFL": FOOTBALL, "NCAAF": FOOTBALL,
                  "NHL": HOCKEY, "MLB": BASEBALL}
 # Stats where a missing table means "didn't happen" (a WR with no carries ran for 0 yards).
@@ -203,11 +217,29 @@ def roster_index(sport: str, date: str) -> dict:
     return index
 
 
+def _outs(innings) -> Optional[float]:
+    """Innings pitched as written (5.2 = five and two-thirds) -> outs recorded (17)."""
+    if innings is None:
+        return None
+    whole = int(innings)
+    return whole * 3 + round((innings - whole) * 10)
+
+
 def _value(sport: str, market: str, stats: dict) -> Optional[float]:
+    """A market's number from one game's stats: the keys summed, "-key" subtracted, and
+    "@outs" = outs recorded from innings pitched."""
     keys = SPORT_MARKETS.get(sport, {}).get(market.lower())
     if not keys:
         return None
-    vals = [stats.get(k) for k in keys]
+    vals = []
+    for k in keys:
+        if k == "@outs":
+            vals.append(_outs(stats.get("innings")))
+        elif k.startswith("-"):
+            v = stats.get(k[1:])
+            vals.append(None if v is None else -v)
+        else:
+            vals.append(stats.get(k))
     if sport in ZERO_IF_MISSING and stats:
         vals = [0.0 if v is None else v for v in vals]
     return None if any(v is None for v in vals) else sum(vals)

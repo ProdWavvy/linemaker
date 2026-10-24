@@ -157,7 +157,7 @@ def sgp_check(legs: list, book: str) -> dict:
         seen = {}
         for ev in evs:
             m = ev.market
-            stat = (m.bet_type, m.subject if m.bet_type == "prop" else "", m.market)
+            stat = (m.bet_type, m.subject if m.bet_type in ("prop", "team_total") else "", m.market)
             if m.bet_type in ("moneyline", "spread", "1x2"):
                 stat = ("side", "", m.bet_type)
             if stat in seen:

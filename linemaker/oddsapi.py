@@ -62,6 +62,44 @@ PROP_MARKETS = {
         "batter_home_runs": "home runs", "batter_total_bases": "total bases",
     },
 }
+# Everything else the books post that the bot can both project (ESPN game logs) and grade
+# (ESPN box scores). Requested on top of PROP_MARKETS unless LINEMAKER_EXTRA_MARKETS=off or
+# today's credit budget is spent (see credits_ok). Keys a book or sport doesn't support are
+# found once and dropped (see fetch_event_props).
+EXTRA_MARKETS = {
+    "basketball": {
+        "player_turnovers": "turnovers", "player_blocks_steals": "blks + stls",
+        "player_field_goals": "field goals", "player_frees_made": "free throws made",
+        "player_blocks_alternate": "blocks", "player_steals_alternate": "steals",
+        "player_turnovers_alternate": "turnovers", "player_points_rebounds_alternate": "pts + reb",
+        "player_points_assists_alternate": "pts + ast", "player_rebounds_assists_alternate": "reb + ast",
+    },
+    "americanfootball": {
+        "player_pass_interceptions": "interceptions thrown", "player_pass_rush_yds": "pass + rush yards",
+        "player_rush_reception_yds": "rush + rec yards", "player_reception_tds": "receiving tds",
+        "player_rush_tds": "rushing tds", "player_kicking_points": "kicking points",
+        "player_field_goals": "field goals made", "player_pats": "extra points",
+        "player_tackles_assists": "tackles + assists", "player_solo_tackles": "solo tackles",
+        "player_sacks": "sacks", "player_defensive_interceptions": "defensive interceptions",
+        "player_pass_tds_alternate": "passing tds", "player_rush_reception_yds_alternate": "rush + rec yards",
+        "player_pass_rush_yds_alternate": "pass + rush yards",
+    },
+    "icehockey": {
+        "player_assists": "hockey assists", "player_goals": "goals", "player_total_saves": "saves",
+        "player_assists_alternate": "hockey assists", "player_goals_alternate": "goals",
+        "player_total_saves_alternate": "saves",
+    },
+    "baseball": {
+        "batter_rbis": "rbis", "batter_runs_scored": "runs", "batter_hits_runs_rbis": "h+r+rbi",
+        "batter_singles": "singles", "batter_doubles": "doubles", "batter_walks": "walks",
+        "batter_strikeouts": "batter strikeouts", "batter_stolen_bases": "stolen bases",
+        "pitcher_hits_allowed": "hits allowed", "pitcher_walks": "walks allowed",
+        "pitcher_earned_runs": "earned runs", "pitcher_outs": "pitcher outs",
+        "batter_rbis_alternate": "rbis", "batter_walks_alternate": "walks",
+        "batter_strikeouts_alternate": "batter strikeouts", "pitcher_hits_allowed_alternate": "hits allowed",
+        "pitcher_walks_alternate": "walks allowed",
+    },
+}
 YES_NO_MARKETS = {"player_anytime_td", "player_goal_scorer_anytime"}
 # Alternate-line ladders (same stat, many lines). Off by default: each is billed as its own
 # market per game, so they roughly double prop credits. LINEMAKER_ALT_LINES=on to include.
@@ -207,6 +245,8 @@ class OddsAPI:
                              ("last_cost", "x-requests-last")):
             if h.get(header) is not None:
                 setattr(self.quota, attr, int(float(h[header])))
+        if h.get("x-requests-last") is not None:
+            record_spend(int(float(h["x-requests-last"])))
         if self.quota.remaining is not None and self.quota.remaining <= 0:
             self._next_key("is out of credits")
         return json.loads(body)
@@ -264,14 +304,108 @@ def sport_key(sport: str) -> str:
     raise OddsAPIError(f"unknown sport {sport!r}; use one of {', '.join(SPORT_KEYS)}")
 
 
+def extra_markets_on() -> bool:
+    return os.environ.get("LINEMAKER_EXTRA_MARKETS", "on").strip().lower() not in ("off", "0", "no", "false")
+
+
 def default_prop_markets(sport: str) -> list:
     family = sport_key(sport).split("_")[0]
     keys = list(PROP_MARKETS.get(family, {}))
     if alt_lines_on():
         keys += list(ALT_MARKETS.get(family, {}))
+    if extra_markets_on() and credits_ok():
+        keys += [k for k in EXTRA_MARKETS.get(family, {})
+                 if alt_lines_on() or not k.endswith("_alternate")]
     if favorites_only():
         keys = [k for k in keys if k not in LONGSHOT_MARKETS]
-    return keys
+    bad = _bad_markets(sport)
+    return [k for k in dict.fromkeys(keys) if k not in bad]
+
+
+# ---- markets a sport doesn't support --------------------------------------------------
+def _bad_path(sport: str) -> str:
+    return os.path.join(os.environ.get("LINEMAKER_CACHE_DIR", "cache"), f"bad_markets_{sport.upper()}.json")
+
+
+def _bad_markets(sport: str) -> set:
+    try:
+        with open(_bad_path(sport)) as f:
+            return set(json.load(f))
+    except (OSError, ValueError):
+        return set()
+
+
+def fetch_event_props(api: "OddsAPI", sport: str, event_id: str, keys: str) -> dict:
+    """event_odds, but if the API rejects a market key (422), find the bad keys one at a time
+    (rejected requests cost nothing), remember them for this sport and retry without them."""
+    try:
+        return api.event_odds(sport, event_id, keys)
+    except OddsAPIError as e:
+        if "422" not in str(e) or "," not in keys:
+            raise
+    bad = set()
+    for k in keys.split(","):
+        try:
+            api.event_odds(sport, event_id, k)
+        except OddsAPIError as e:
+            if "422" in str(e):
+                bad.add(k)
+    if bad:
+        log.warning("%s: the API doesn't support %s; skipping them from now on", sport, ", ".join(sorted(bad)))
+        try:
+            os.makedirs(os.path.dirname(_bad_path(sport)) or ".", exist_ok=True)
+            with open(_bad_path(sport), "w") as f:
+                json.dump(sorted(_bad_markets(sport) | bad), f)
+        except OSError:
+            pass
+    good = ",".join(k for k in keys.split(",") if k not in bad)
+    return api.event_odds(sport, event_id, good) if good else {"bookmakers": []}
+
+
+# ---- daily credit budget --------------------------------------------------------------
+# Every response says what the call cost (x-requests-last). Today's total is kept in
+# cache/credits_<date>.json; once it passes LINEMAKER_DAILY_CREDITS (default 700, about 20k
+# a month), the extra markets and the closing reads pause until tomorrow. Asks and pre-tip
+# scans of the main markets always run.
+def _spend_path(day: str) -> str:
+    return os.path.join(os.environ.get("LINEMAKER_CACHE_DIR", "cache"), f"credits_{day}.json")
+
+
+def credits_today(day: Optional[str] = None) -> int:
+    day = day or dt.date.today().isoformat()
+    try:
+        with open(_spend_path(day)) as f:
+            return int(json.load(f))
+    except (OSError, ValueError):
+        return 0
+
+
+def record_spend(cost: int):
+    if not cost:
+        return
+    day = dt.date.today().isoformat()
+    try:
+        os.makedirs(os.path.dirname(_spend_path(day)) or ".", exist_ok=True)
+        total = credits_today(day) + int(cost)
+        with open(_spend_path(day) + ".tmp", "w") as f:
+            json.dump(total, f)
+        os.replace(_spend_path(day) + ".tmp", _spend_path(day))
+    except OSError:
+        pass
+
+
+def daily_budget() -> Optional[int]:
+    raw = os.environ.get("LINEMAKER_DAILY_CREDITS", "700").strip()
+    try:
+        return int(raw) if raw else None
+    except ValueError:
+        return 700
+
+
+def credits_ok() -> bool:
+    """Room left in today's budget for the optional spending (extra markets, closing reads)."""
+    budget = daily_budget()
+    return budget is None or credits_today() < budget
 
 
 def slate_window(date: str, tz: ZoneInfo) -> tuple:
@@ -346,17 +480,29 @@ def parse_game_odds(events: list, sport: str, tz: ZoneInfo) -> list:
                         if o["name"] in order:
                             g.add(base, (ev["id"], "h2h", 0.0), book, order.index(o["name"]),
                                   len(order), o["price"], mk, o, bk.get("last_update"))
-                elif mk["key"] == "spreads":
-                    home_pt = next((o["point"] for o in outs if o["name"] == home), None)
-                    if home_pt is None:
-                        continue
-                    base = dict(common, bet_type="spread", subject=home, opponent=away,
-                                market="spread", line=float(home_pt))
+                elif mk["key"] in ("spreads", "alternate_spreads"):
+                    # each outcome restated as the home team's line, so both sides of every
+                    # alternate line land on one market
                     for o in outs:
+                        if o.get("point") is None or o["name"] not in (home, away):
+                            continue
                         side = 0 if o["name"] == home else 1
-                        g.add(base, (ev["id"], "spread", float(home_pt)), book, side, 2, o["price"],
+                        home_pt = float(o["point"]) if side == 0 else -float(o["point"])
+                        base = dict(common, bet_type="spread", subject=home, opponent=away,
+                                    market="spread", line=home_pt)
+                        g.add(base, (ev["id"], "spread", home_pt), book, side, 2, o["price"],
                               mk, o, bk.get("last_update"))
-                elif mk["key"] == "totals":
+                elif mk["key"] == "team_totals":
+                    for o in outs:
+                        team = o.get("description")
+                        if team not in (home, away) or o.get("point") is None:
+                            continue
+                        pt = float(o["point"])
+                        base = dict(common, bet_type="team_total", subject=team,
+                                    opponent=away if team == home else home, market="team total", line=pt)
+                        g.add(base, (ev["id"], "tt", team, pt), book, 0 if o["name"] == "Over" else 1, 2,
+                              o["price"], mk, o, bk.get("last_update"))
+                elif mk["key"] in ("totals", "alternate_totals"):
                     for o in outs:
                         pt = float(o["point"])
                         base = dict(common, bet_type="total", subject=home, opponent=away,
@@ -371,7 +517,7 @@ def parse_game_odds(events: list, sport: str, tz: ZoneInfo) -> list:
 
 def parse_event_props(event: dict, sport: str, tz: ZoneInfo) -> list:
     family = sport_key(sport).split("_")[0]
-    names = {**PROP_MARKETS.get(family, {}), **ALT_MARKETS.get(family, {})}
+    names = {**PROP_MARKETS.get(family, {}), **ALT_MARKETS.get(family, {}), **EXTRA_MARKETS.get(family, {})}
     common = dict(date=_local_date(event["commence_time"], tz), sport=sport.upper(),
                   game_id=event["id"], game=_game(event), commence=event["commence_time"],
                   bet_type="prop", opponent="")
@@ -423,7 +569,7 @@ def fetch_slate(api: OddsAPI, sport: str, date: str, tz: ZoneInfo, props: bool =
             chosen = [e for e in chosen
                       if dt.datetime.fromisoformat(e["commence_time"].replace("Z", "+00:00")) > now]
         with ThreadPoolExecutor(max_workers=4) as pool:   # a few at a time; 429s are retried
-            payloads = list(pool.map(lambda ev: api.event_odds(sport, ev["id"], keys), chosen))
+            payloads = list(pool.map(lambda ev: fetch_event_props(api, sport, ev["id"], keys), chosen))
         for payload in payloads:
             out += parse_event_props(payload, sport, tz)
     return out
@@ -522,7 +668,8 @@ def merge(feed: list, projections: list) -> tuple:
 
 # ---- results from /scores ------------------------------------------------------------
 
-GAME_LINE_TYPES = ("moneyline", "spread", "total", "1x2")
+GAME_LINE_TYPES = ("moneyline", "spread", "total", "1x2", "team_total")
+GAME_EXTRAS = "alternate_spreads,alternate_totals,team_totals"   # per-event: bought with the game lines
 
 
 def results_from_scores(scores: list, records: dict) -> list:
@@ -540,6 +687,10 @@ def results_from_scores(scores: list, records: dict) -> list:
             continue
         if bet_type == "total":
             actual = sum(pts.values())
+        elif bet_type == "team_total":
+            actual = pts.get(norm(rec["subject"]))
+            if actual is None:
+                continue
         else:
             mine = pts.get(norm(rec["subject"]))
             if mine is None:

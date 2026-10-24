@@ -28,7 +28,10 @@ STARTER_INNINGS = 5.5
 GAME_SHRINK = 0.7
 PA_BY_SPOT = (4.65, 4.55, 4.45, 4.35, 4.25, 4.15, 4.05, 3.95, 3.85)
 AB_PER_PA = 0.88
-HITTER_MARKETS = {"hits": "hits", "total bases": "tb", "home runs": "hr"}
+HITTER_MARKETS = {"hits": "hits", "total bases": "tb", "home runs": "hr", "singles": "hits",
+                  "doubles": "tb", "rbis": "tb", "runs": "tb", "h+r+rbi": "hits"}
+LINEUP_MARKETS = set(HITTER_MARKETS) | {"walks", "batter strikeouts", "stolen bases"}
+PITCHER_MARKETS = {"strikeouts", "hits allowed", "walks allowed", "earned runs", "pitcher outs"}
 
 
 def probables(date: str) -> dict:

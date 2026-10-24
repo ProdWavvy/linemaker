@@ -251,5 +251,11 @@ def game_projections(sport: str, date: str, games: list, use_kalshi: bool = True
         rows.append({"sport": sport, "subject": home, "market": "game total",
                      "mean": f"{g['total']:.3f}", "stdev": f"{TOTAL_SD.get(sport, 15.0):g}",
                      "notes": note})
-    log.info("game model %s: %d games asked, %d projected", sport, len(games), len(rows) // 3)
+        # each team's own total: half the game total, plus or minus half the margin; one
+        # team's score varies about 70% as much as the combined score
+        team_sd = f"{TOTAL_SD.get(sport, 15.0) * 0.7:.2f}"
+        for team, pts in ((home, (g["total"] + g["margin"]) / 2), (away, (g["total"] - g["margin"]) / 2)):
+            rows.append({"sport": sport, "subject": team, "market": "team total", "mean": f"{pts:.3f}",
+                         "stdev": team_sd, "notes": note})
+    log.info("game model %s: %d games asked, %d projected", sport, len(games), len(rows) // 5)
     return rows

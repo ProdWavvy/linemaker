@@ -89,7 +89,9 @@ def market_value(sport: str, market: str, s: dict) -> Optional[float]:
         table = {"points": ("points",), "rebounds": ("rebounds",), "assists": ("assists",),
                  "threes": ("threePointFieldGoalsMade",), "pra": ("points", "rebounds", "assists"),
                  "pts + reb": ("points", "rebounds"), "pts + ast": ("points", "assists"),
-                 "reb + ast": ("rebounds", "assists"), "blocks": ("blocks",), "steals": ("steals",)}
+                 "reb + ast": ("rebounds", "assists"), "blocks": ("blocks",), "steals": ("steals",),
+                 "blks + stls": ("blocks", "steals"), "turnovers": ("turnovers",),
+                 "field goals": ("fieldGoalsMade",), "free throws made": ("freeThrowsMade",)}
         keys = table.get(m)
         if not keys:
             return None
@@ -100,7 +102,24 @@ def market_value(sport: str, market: str, s: dict) -> Optional[float]:
         if m == "anytime td":
             return _sum(s, "rushing.rushingTouchdowns", "receiving.receivingTouchdowns",
                         "kickReturns.kickReturnTouchdowns", "puntReturns.puntReturnTouchdowns")
+        combos = {"pass + rush yards": ("passing.passingYards", "rushing.rushingYards"),
+                  "rush + rec yards": ("rushing.rushingYards", "receiving.receivingYards")}
+        if m in combos:
+            if not any(k.split(".")[0] in ("passing", "rushing", "receiving") for k in s):
+                return None
+            return sum(s.get(k) or 0.0 for k in combos[m])
+        defense = {"tackles + assists": "defensive.totalTackles", "solo tackles": "defensive.soloTackles",
+                   "sacks": "defensive.sacks", "defensive interceptions": "interceptions.interceptions"}
+        if m in defense:   # any defensive table means he played: a missing stat was 0
+            played = any(k.split(".")[0] in ("defensive", "interceptions", "fumbles") for k in s)
+            return s.get(defense[m]) if s.get(defense[m]) is not None else (0.0 if played else None)
+        kicking = {"kicking points": "kicking.totalKickingPoints", "field goals made": "kicking.fieldGoalsMade",
+                   "extra points": "kicking.extraPointsMade"}
+        if m in kicking:
+            return s.get(kicking[m])
         table = {"passing yards": "passing.passingYards", "passing tds": "passing.passingTouchdowns",
+                 "interceptions thrown": "passing.interceptions",
+                 "receiving tds": "receiving.receivingTouchdowns", "rushing tds": "rushing.rushingTouchdowns",
                  "pass completions": "passing.completions", "pass attempts": "passing.passingAttempts",
                  "rushing yards": "rushing.rushingYards", "rush attempts": "rushing.rushingAttempts",
                  "longest rush": "rushing.longRushing", "receiving yards": "receiving.receivingYards",
@@ -115,14 +134,25 @@ def market_value(sport: str, market: str, s: dict) -> Optional[float]:
     if sp == "MLB":
         if m == "strikeouts":
             return s.get("pitching.strikeouts")
-        return {"hits": s.get("batting.hits"), "home runs": s.get("batting.homeRuns")}.get(m)
+        if m == "pitcher outs":
+            from .gamelogs import _outs
+            return _outs(s.get("pitching.fullInnings.partInnings"))
+        if m == "h+r+rbi":
+            parts = [s.get(f"batting.{k}") for k in ("hits", "runs", "RBIs")]
+            return None if any(v is None for v in parts) else sum(parts)
+        return {"hits": s.get("batting.hits"), "home runs": s.get("batting.homeRuns"),
+                "rbis": s.get("batting.RBIs"), "runs": s.get("batting.runs"), "walks": s.get("batting.walks"),
+                "batter strikeouts": s.get("batting.strikeouts"), "hits allowed": s.get("pitching.hits"),
+                "walks allowed": s.get("pitching.walks"), "earned runs": s.get("pitching.earnedRuns")}.get(m)
     if sp == "NHL":
+        if m == "saves":
+            return next((v for k, v in s.items() if k.endswith(".saves")), None)
         group = next((k.split(".")[0] for k in s if k.endswith(".goals")), None)
         if group is None:
             return None
         g, a, sog = (s.get(f"{group}.{k}") for k in ("goals", "assists", "shotsTotal"))
         return {"shots on goal": sog, "hockey points": None if g is None or a is None else g + a,
-                "anytime goals": g}.get(m)
+                "anytime goals": g, "goals": g, "hockey assists": a}.get(m)
     return None
 
 
@@ -161,8 +191,8 @@ def prop_results(records: dict, date: str, fetch=final_stats) -> list:
                 continue
             player = stats.get(norm(rec["subject"]))
             value = market_value(sport, rec["market"], player) if player else None
-            if value is None and player and sport == "MLB" and rec["market"].lower() == "total bases":
-                value = _total_bases(rec["subject"], date)   # the box score has no doubles/triples
+            if value is None and player and sport == "MLB" and rec["market"].lower() in LOG_GRADED:
+                value = _from_log(rec["subject"], date, rec["market"])   # not in the box score
             if value is None:
                 continue
             rows.append({"game_id": rec["game_id"], "subject": rec["subject"],
@@ -171,10 +201,13 @@ def prop_results(records: dict, date: str, fetch=final_stats) -> list:
     return rows
 
 
-def _total_bases(player: str, date: str) -> Optional[float]:
-    """Total bases for one MLB game from the hitter's game log (H + 2B + 2x3B + 3xHR)."""
+LOG_GRADED = {"total bases", "singles", "doubles", "stolen bases"}   # MLB: graded from game logs
+
+
+def _from_log(player: str, date: str, market: str) -> Optional[float]:
+    """One MLB game's value from the player's game log (the box score has no 2B/3B/SB)."""
     import datetime as _dt
-    from .gamelogs import game_log, roster_index
+    from .gamelogs import _value, game_log, roster_index
     try:
         hit = roster_index("MLB", date).get(norm(player))
         if not hit:
@@ -183,9 +216,7 @@ def _total_bases(player: str, date: str) -> Optional[float]:
         logs = [g for g in game_log("MLB", hit[0], nxt) if g["stats"].get("hits") is not None]
         # a night game is dated the next day in UTC; prefer an exact match
         for g in [g for g in logs if g["date"][:10] == date] + [g for g in logs if g["date"][:10] == nxt]:
-            s = g["stats"]
-            return (s.get("hits", 0) + s.get("doubles", 0) + 2 * s.get("triples", 0)
-                    + 3 * s.get("homeRuns", 0))
+            return _value("MLB", market, g["stats"])
     except Exception as e:
-        log.warning("mlb total bases %s: %s", player, e)
+        log.warning("mlb %s %s: %s", market, player, e)
     return None

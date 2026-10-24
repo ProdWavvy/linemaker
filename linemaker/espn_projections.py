@@ -93,7 +93,8 @@ def _minutes(g: dict) -> Optional[float]:
 
 
 COMBOS = {"pra": ("points", "rebounds", "assists"), "pts + reb": ("points", "rebounds"),
-          "pts + ast": ("points", "assists"), "reb + ast": ("rebounds", "assists")}
+          "pts + ast": ("points", "assists"), "reb + ast": ("rebounds", "assists"),
+          "blks + stls": ("blocks", "steals")}
 
 
 def basketball_mean(games: list, market: str, factors: dict, minutes_delta: float = 0.0) -> Optional[tuple]:
@@ -237,7 +238,7 @@ def _apply_usage(sport: str, date: str, rows: list, index: dict, hurt: dict):
                 r["notes"] += f"; +{add:.1f} with {', '.join(b['_why'])} out"
 
 
-GOALIE_MARKETS = ("hockey points", "anytime goals")
+GOALIE_MARKETS = ("hockey points", "anytime goals", "goals", "hockey assists")
 
 
 def _apply_goalies(date: str, rows: list):
@@ -290,7 +291,8 @@ def _apply_shots(date: str, rows: list, teams: set):
 def _apply_mlb(date: str, rows: list):
     """Opposing starter's quality on hitters' props, lineup spot / scratches, and a pitcher's
     strikeouts skipped when he isn't tonight's starter (see mlb_matchups)."""
-    from .mlb_matchups import HITTER_MARKETS, hitter_factor, lineups, spot_factor, starters
+    from .mlb_matchups import (HITTER_MARKETS, LINEUP_MARKETS, PITCHER_MARKETS, hitter_factor, lineups,
+                               spot_factor, starters)
     try:
         sps = starters(date)
     except Exception as e:
@@ -302,12 +304,12 @@ def _apply_mlb(date: str, rows: list):
     for r in rows:
         m, me = r["market"].lower(), norm(r["subject"])
         mine, theirs = sps.get(norm(r["_team"])), sps.get(norm(r.get("_opp", "")))
-        if m == "strikeouts":
+        if m in PITCHER_MARKETS:
             if mine and norm(mine["name"]) != me:
                 r["injury_status"] = "inactive"
                 r["notes"] += f"; not tonight's starter ({mine['name']} is)"
             continue
-        if m not in HITTER_MARKETS:
+        if m not in LINEUP_MARKETS:
             continue
         order = orders.get(norm(r["_team"]))
         if order is not None:
@@ -319,7 +321,7 @@ def _apply_mlb(date: str, rows: list):
             if f and abs(f - 1) >= 0.01:
                 r["mean"] = f"{float(r['mean']) * f:.3f}"
                 r["notes"] += f"; batting {order[me]} (×{f:.2f} at-bats)"
-        if theirs and theirs.get("rates"):
+        if theirs and theirs.get("rates") and m in HITTER_MARKETS:
             f = hitter_factor(theirs["rates"], HITTER_MARKETS[m])
             r["mean"] = f"{float(r['mean']) * f:.3f}"
             r["notes"] += f"; vs {theirs['name']} ×{f:.2f}"

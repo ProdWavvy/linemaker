@@ -32,7 +32,13 @@ _TEAMS = {}
 OVERLAP = [{"points", "pra", "pts + reb", "pts + ast"}, {"rebounds", "pra", "pts + reb", "reb + ast"},
            {"assists", "pra", "pts + ast", "reb + ast"}, {"receptions", "receiving yards"},
            {"rushing yards", "rush attempts"}, {"passing yards", "pass completions", "pass attempts"},
-           {"hits", "total bases"}, {"shots on goal", "hockey points"}]
+           {"hits", "total bases"}, {"shots on goal", "hockey points"},
+           {"blocks", "steals", "blks + stls"}, {"pass + rush yards", "passing yards", "rushing yards"},
+           {"rush + rec yards", "rushing yards", "receiving yards"},
+           {"hits", "singles", "h+r+rbi", "total bases"}, {"runs", "rbis", "h+r+rbi"},
+           {"goals", "anytime goals", "hockey points"}, {"hockey assists", "hockey points"},
+           {"kicking points", "field goals made", "extra points"}, {"receiving tds", "anytime td"},
+           {"rushing tds", "anytime td"}]
 PASSING = {"passing yards", "pass completions", "passing tds", "pass attempts"}
 RECEIVING = {"receiving yards", "receptions"}
 
@@ -55,7 +61,7 @@ def team_of(sport: str, date: str, player: str) -> Optional[str]:
 def direction(ev) -> int:
     """+1 for an over / a team to win or cover, -1 for an under (props and totals)."""
     m = ev.market
-    if m.bet_type in ("prop", "total"):
+    if m.bet_type in ("prop", "total", "team_total"):
         return 1 if ev.best.side == "A" else -1
     return 1
 
@@ -88,6 +94,20 @@ def pair_rho(a, b) -> float:
         if same and ((ka in PASSING and kb in RECEIVING) or (kb in PASSING and ka in RECEIVING)):
             return sign * 0.4
         return sign * (0.05 if same else 0.08)
+    if "team_total" in (ma.bet_type, mb.bet_type):
+        tt, other = (a, b) if ma.bet_type == "team_total" else (b, a)
+        om = other.market
+        if om.bet_type == "total":
+            return sign * 0.6
+        if om.bet_type == "team_total":
+            return sign * 0.3
+        if om.bet_type == "prop":
+            t = team_of(om.sport, om.date, om.subject)
+            return sign * (0.3 if t and norm(t) == norm(tt.market.subject) else 0.05)
+        backed = _backed_team(other)
+        if backed:
+            return direction(tt) * (0.35 if norm(backed) == norm(tt.market.subject) else -0.35)
+        return 0.0
     if "total" in (ma.bet_type, mb.bet_type):
         other = b if ma.bet_type == "total" else a
         if other.market.bet_type == "prop":

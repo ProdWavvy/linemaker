@@ -1573,7 +1573,8 @@ async def pretip_loop():
             except Exception as e:
                 log.warning("game-line tracking %s: %s", sport, e)
         from .alerts import close_minutes
-        if not close_minutes():
+        from .oddsapi import credits_ok
+        if not close_minutes() or not credits_ok():   # optional spend: skipped once today's budget is used
             continue
         closed = set(load_state(f"close_{date}.json", []))
         for group in pretip_due(events, now, close_minutes(), closed):   # closing read, not posted

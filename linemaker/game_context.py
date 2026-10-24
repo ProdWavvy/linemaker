@@ -24,14 +24,17 @@ EXPONENT = {"NBA": 0.4, "WNBA": 0.4, "NFL": 0.5, "NCAAF": 0.5}
 CAP = 0.15
 # which prop markets move with the team's scoring
 TEAM_MARKETS = {
-    "NBA": {"points", "assists", "threes", "pra", "pts + reb", "pts + ast", "reb + ast"},
+    "NBA": {"points", "assists", "threes", "pra", "pts + reb", "pts + ast", "reb + ast",
+            "field goals", "free throws made"},
     "NFL": {"passing yards", "pass completions", "passing tds", "receiving yards", "receptions",
-            "rushing yards", "anytime td"},
+            "rushing yards", "anytime td", "pass + rush yards", "rush + rec yards", "receiving tds",
+            "rushing tds", "kicking points", "field goals made", "extra points"},
 }
 TEAM_MARKETS["WNBA"], TEAM_MARKETS["NCAAF"] = TEAM_MARKETS["NBA"], TEAM_MARKETS["NFL"]
 BAD_WEATHER = re.compile(r"rain|shower|storm|snow|sleet|flurr|wind|drizzle|ice", re.I)
 WEATHER = {"passing yards": 0.93, "pass completions": 0.95, "receiving yards": 0.93,
-           "receptions": 0.96, "passing tds": 0.93, "rushing yards": 1.03}
+           "receptions": 0.96, "passing tds": 0.93, "rushing yards": 1.03, "pass + rush yards": 0.95,
+           "kicking points": 0.92, "field goals made": 0.92, "receiving tds": 0.93}
 
 
 def _board(sport: str, date: str) -> dict:

@@ -303,6 +303,8 @@ class ProMarket:
             return f"{self.subject if side == 'A' else self.opponent} ML"
         word = "Over" if side == "A" else "Under"
         who = self.game if self.bet_type == "total" else self.subject
+        if self.bet_type == "team_total":
+            return f"{who} team total {word} {self.line:g}"
         return f"{who} {word} {self.line:g} {self.market}"
 
     @property

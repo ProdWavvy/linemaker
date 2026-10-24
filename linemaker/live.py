@@ -143,6 +143,34 @@ def run_best(odds: OddsAPI, sports: list, date: str, tz: ZoneInfo, cfg: ProConfi
     return lr
 
 
+def game_extras(odds: OddsAPI, sports: list, feed: list, tz: ZoneInfo) -> list:
+    """Alternate spreads / totals and team totals, which the bulk game-odds call doesn't carry:
+    one event call per game (~3 credits each). Skipped with LINEMAKER_EXTRA_MARKETS=off, for
+    UFC, and once today's credit budget is used."""
+    from .oddsapi import GAME_EXTRAS, GAME_MARKETS, credits_ok, extra_markets_on, fetch_event_props, parse_game_odds
+    if not extra_markets_on() or not credits_ok():
+        return []
+    have = {(fm.game_id, fm.bet_type, fm.subject, fm.line) for fm in feed}
+    out = []
+    for sport in sports:
+        if sport.upper() in GAME_MARKETS:
+            continue
+        ids = sorted({fm.game_id for fm in feed if fm.sport.upper() == sport.upper()})
+        for gid in ids:
+            try:
+                payload = fetch_event_props(odds, sport, gid, GAME_EXTRAS)
+            except Exception as e:
+                import logging
+                logging.getLogger("linemaker.live").warning("game extras %s %s: %s", sport, gid, e)
+                continue
+            if not payload.get("home_team"):
+                continue
+            for fm in parse_game_odds([payload], sport, tz):
+                if (fm.game_id, fm.bet_type, fm.subject, fm.line) not in have:
+                    out.append(fm)
+    return out
+
+
 def run_games(odds: OddsAPI, sports: list, date: str, tz: ZoneInfo, cfg: ProConfig,
               freezer=None) -> LiveRun:
     """Moneylines, spreads and totals priced off the free game model (ESPN ratings + Kalshi).
@@ -154,6 +182,7 @@ def run_games(odds: OddsAPI, sports: list, date: str, tz: ZoneInfo, cfg: ProConf
         now = dt.datetime.now(dt.timezone.utc)
         feed = [fm for fm in feed if not fm.commence or
                 dt.datetime.fromisoformat(fm.commence.replace("Z", "+00:00")) > now]
+    feed += game_extras(odds, sports, feed, tz)
     projections = []
     for sport in sports:
         games = sorted({(fm.opponent, fm.subject) for fm in feed
