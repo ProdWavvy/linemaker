@@ -12,6 +12,7 @@ from dataclasses import dataclass
 #   normal   - margins and game totals
 MARKET_DIST = [
     ("spread", "normal"), ("moneyline", "normal"), ("game total", "normal"),
+    ("blocks", "poisson"), ("steals", "poisson"),
     ("anytime td", "poisson"), ("touchdown", "poisson"), ("goals", "poisson"),
     ("shots on goal", "poisson"), ("home run", "poisson"), ("hits", "poisson"),
     ("yards", "gamma"), ("longest", "gamma"),

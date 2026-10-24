@@ -58,6 +58,12 @@ def pretip_sports(date: str, configured: list) -> list:
     return sorted(set(base) | {s for s in load_state(f"pretip_armed_{date}.json", []) if s in PATHS})
 
 
+def close_minutes() -> Optional[int]:
+    """Closing read: every pre-tip game is re-read this close to the start (logged only), so
+    tracking and closing-line value use near-final prices. Blank = off."""
+    return _env_int("LINEMAKER_CLOSE_MINUTES", 12)
+
+
 def news_minutes() -> Optional[int]:
     return _env_int("LINEMAKER_NEWS_MINUTES", 12)
 

@@ -42,6 +42,8 @@ PROP_MARKETS = {
     "basketball": {
         "player_points": "points", "player_rebounds": "rebounds", "player_assists": "assists",
         "player_threes": "threes", "player_points_rebounds_assists": "PRA",
+        "player_points_rebounds": "pts + reb", "player_points_assists": "pts + ast",
+        "player_rebounds_assists": "reb + ast", "player_blocks": "blocks", "player_steals": "steals",
     },
     "americanfootball": {
         "player_pass_yds": "passing yards", "player_rush_yds": "rushing yards",

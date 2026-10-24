@@ -87,7 +87,9 @@ def market_value(sport: str, market: str, s: dict) -> Optional[float]:
     m, sp = market.lower(), sport.upper()
     if sp in ("NBA", "WNBA"):
         table = {"points": ("points",), "rebounds": ("rebounds",), "assists": ("assists",),
-                 "threes": ("threePointFieldGoalsMade",), "pra": ("points", "rebounds", "assists")}
+                 "threes": ("threePointFieldGoalsMade",), "pra": ("points", "rebounds", "assists"),
+                 "pts + reb": ("points", "rebounds"), "pts + ast": ("points", "assists"),
+                 "reb + ast": ("rebounds", "assists"), "blocks": ("blocks",), "steals": ("steals",)}
         keys = table.get(m)
         if not keys:
             return None
@@ -159,9 +161,31 @@ def prop_results(records: dict, date: str, fetch=final_stats) -> list:
                 continue
             player = stats.get(norm(rec["subject"]))
             value = market_value(sport, rec["market"], player) if player else None
+            if value is None and player and sport == "MLB" and rec["market"].lower() == "total bases":
+                value = _total_bases(rec["subject"], date)   # the box score has no doubles/triples
             if value is None:
                 continue
             rows.append({"game_id": rec["game_id"], "subject": rec["subject"],
                          "market": rec["market"], "line": str(rec["inputs"]["line"]),
                          "actual": f"{value:g}"})
     return rows
+
+
+def _total_bases(player: str, date: str) -> Optional[float]:
+    """Total bases for one MLB game from the hitter's game log (H + 2B + 2x3B + 3xHR)."""
+    import datetime as _dt
+    from .gamelogs import game_log, roster_index
+    try:
+        hit = roster_index("MLB", date).get(norm(player))
+        if not hit:
+            return None
+        nxt = (_dt.date.fromisoformat(date) + _dt.timedelta(days=1)).isoformat()
+        logs = [g for g in game_log("MLB", hit[0], nxt) if g["stats"].get("hits") is not None]
+        # a night game is dated the next day in UTC; prefer an exact match
+        for g in [g for g in logs if g["date"][:10] == date] + [g for g in logs if g["date"][:10] == nxt]:
+            s = g["stats"]
+            return (s.get("hits", 0) + s.get("doubles", 0) + 2 * s.get("triples", 0)
+                    + 3 * s.get("homeRuns", 0))
+    except Exception as e:
+        log.warning("mlb total bases %s: %s", player, e)
+    return None

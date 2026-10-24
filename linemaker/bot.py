@@ -1501,6 +1501,21 @@ async def pretip_loop():
                 await asyncio.to_thread(track_game_lines, sport, date)
             except Exception as e:
                 log.warning("game-line tracking %s: %s", sport, e)
+        from .alerts import close_minutes
+        if not close_minutes():
+            continue
+        closed = set(load_state(f"close_{date}.json", []))
+        for group in pretip_due(events, now, close_minutes(), closed):   # closing read, not posted
+            ids = {e["id"] for e in group}
+            closed |= ids
+            save_state(f"close_{date}.json", sorted(closed))
+            try:
+                await asyncio.to_thread(scan_events, sport, date, ids,
+                                        f"{SPORT_NAMES.get(sport, sport)} closing read", True, True)
+                from .chat import track_game_lines
+                await asyncio.to_thread(track_game_lines, sport, date)
+            except Exception:
+                log.exception("closing read failed (%s)", sport)
 
 
 @tasks.loop(minutes=12)

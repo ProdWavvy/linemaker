@@ -699,17 +699,25 @@ def track_game_lines(sport: str, date: str) -> int:
     return len(lr.result.evaluated)
 
 
-def scan_events(sport: str, date: str, event_ids: set, title: str, only_if_picks: bool = True):
+def scan_events(sport: str, date: str, event_ids: set, title: str, only_if_picks: bool = True,
+                log_only: bool = False):
     """Price props for just these games and build the card. None when nothing cleared the
-    gates and only_if_picks is set. Returns (messages, result)."""
+    gates and only_if_picks is set. Returns (messages, result). log_only: record every
+    market's latest read for tracking (closing prices), mark nothing as a pick, no card."""
     from .busy import busy
     from .live import run_best
     from .scan_format import scan_messages
     snaps = os.environ.get("LINEMAKER_SNAPSHOTS", "snapshots")
     cfg = ProConfig()
+    if log_only:
+        cfg.max_picks = 0   # nothing was posted, so nothing counts as a pick
     with busy():
-        lr = run_best(OddsAPI(), [sport], date, _tz(), cfg, Freezer(snaps, date), only=set(event_ids))
+        lr = run_best(OddsAPI(), [sport], date, _tz(), cfg, None if log_only else Freezer(snaps, date),
+                      only=set(event_ids))
     res = lr.result
+    if log_only:
+        log.info("%s: %d markets re-read for closing prices", title, len(res.evaluated))
+        return None, res
     res.kind, res.odds_age = "props", 0.0
     extras = enrich(res, sport, date)
     log.info("%s scan of %d game(s): %d priced, %d picks", title, len(event_ids),

@@ -23,7 +23,7 @@ BASKETBALL = {"points": ("points",), "rebounds": ("totalRebounds",), "assists": 
               "threes": ("threePointFieldGoalsMade",),
               "pra": ("points", "totalRebounds", "assists"),
               "pts + reb": ("points", "totalRebounds"), "pts + ast": ("points", "assists"),
-              "reb + ast": ("totalRebounds", "assists")}
+              "reb + ast": ("totalRebounds", "assists"), "blocks": ("blocks",), "steals": ("steals",)}
 FOOTBALL = {"passing yards": ("passingYards",), "passing tds": ("passingTouchdowns",),
             "pass completions": ("completions",), "pass attempts": ("passingAttempts",),
             "rushing yards": ("rushingYards",), "rush attempts": ("rushingAttempts",),

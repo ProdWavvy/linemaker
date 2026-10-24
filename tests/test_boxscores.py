@@ -18,7 +18,8 @@ class BoxScoreTest(unittest.TestCase):
         self.assertEqual(market_value("NBA", "points", s), 38)
         self.assertEqual(market_value("NBA", "threes", s), 7)       # from the '7-12' cell
         self.assertEqual(market_value("NBA", "PRA", s), 46)
-        self.assertIsNone(market_value("NBA", "steals", s))         # not a tracked market
+        self.assertEqual(market_value("NBA", "steals", s), 5.0)     # tracked since combo/defense markets
+        self.assertIsNone(market_value("NBA", "turnovers", s))      # not a tracked market
 
     def test_nfl_zero_when_not_in_table(self):
         s = {"receiving.receivingYards": 107.0, "receiving.receptions": 4.0,

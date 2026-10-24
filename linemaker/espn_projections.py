@@ -92,17 +92,22 @@ def _minutes(g: dict) -> Optional[float]:
     return m if m else None
 
 
+COMBOS = {"pra": ("points", "rebounds", "assists"), "pts + reb": ("points", "rebounds"),
+          "pts + ast": ("points", "assists"), "reb + ast": ("rebounds", "assists")}
+
+
 def basketball_mean(games: list, market: str, factors: dict, minutes_delta: float = 0.0) -> Optional[tuple]:
     """(mean, sd, steps) for one basketball market. factors: pace, defense (team rating vs
     average) and dvp ({market: factor} for the player's position); minutes_delta adds or
     removes projected minutes (blowout risk, back-to-back)."""
-    if market.lower() == "pra":
-        parts = [basketball_mean(games, m, factors, minutes_delta) for m in ("points", "rebounds", "assists")]
+    if market.lower() in COMBOS:   # each part projected on its own (pace, defense, DvP), then summed
+        names = COMBOS[market.lower()]
+        parts = [basketball_mean(games, m, factors, minutes_delta) for m in names]
         if any(p is None for p in parts):
             return None
-        vals = [_value("NBA", "pra", g["stats"]) for g in games]
+        vals = [_value("NBA", market.lower(), g["stats"]) for g in games]
         mean = sum(p[0] for p in parts)
-        return mean, _sd(vals, mean), [("PRA = points + rebounds + assists", f"{mean:.2f}")]
+        return mean, _sd(vals, mean), [(f"{market} = {' + '.join(names)}", f"{mean:.2f}")]
     played = [g for g in games if _minutes(g)]
     if len(played) < 5:
         return None
@@ -226,8 +231,7 @@ def _apply_usage(sport: str, date: str, rows: list, index: dict, hurt: dict):
                 r["notes"] += f"; ×{f:.2f} with {qb} (QB) out"
             b = boosts.get(r["subject"]) or {}
             m = r["market"].lower()
-            add = (sum(b.get(k, 0.0) for k in ("points", "rebounds", "assists")) if m == "pra"
-                   else b.get(m, 0.0))
+            add = (sum(b.get(k, 0.0) for k in COMBOS[m]) if m in COMBOS else b.get(m, 0.0))
             if add > 0.05:
                 r["mean"] = f"{float(r['mean']) + add:.3f}"
                 r["notes"] += f"; +{add:.1f} with {', '.join(b['_why'])} out"
@@ -251,6 +255,36 @@ def _apply_goalies(date: str, rows: list):
         f = skater_factor(g["extra"])
         r["mean"] = f"{float(r['mean']) * f:.3f}"
         r["notes"] += f"; ×{f:.2f}: {g['note']}"
+
+
+def _apply_defense(date: str, rows: list, teams: set):
+    """NFL props move with the opposing defense's pass / rush yards allowed (see nfl_defense)."""
+    from .nfl_defense import defense_factors
+    try:
+        factors = defense_factors(date, teams)
+    except Exception as e:
+        log.warning("nfl defense factors unavailable: %s", e)
+        return
+    for r in rows:
+        f = (factors.get(norm(r.get("_opp", ""))) or {}).get(r["market"].lower())
+        if f and abs(f - 1) >= 0.01:
+            r["mean"] = f"{float(r['mean']) * f:.3f}"
+            r["notes"] += f"; ×{f:.2f} vs {r['_opp']} defense"
+
+
+def _apply_shots(date: str, rows: list, teams: set):
+    """Shots-on-goal props move with how many shots the opponent allows (see nhl_shots)."""
+    from .nhl_shots import shot_factors
+    try:
+        factors = shot_factors(date, teams)
+    except Exception as e:
+        log.warning("nhl shot suppression unavailable: %s", e)
+        return
+    for r in rows:
+        f = factors.get(norm(r.get("_opp", "")))
+        if r["market"].lower() == "shots on goal" and f and abs(f - 1) >= 0.01:
+            r["mean"] = f"{float(r['mean']) * f:.3f}"
+            r["notes"] += f"; ×{f:.2f} {r['_opp']} shots allowed"
 
 
 def _apply_mlb(date: str, rows: list):
@@ -380,8 +414,11 @@ def espn_projections(sport: str, date: str, wanted: dict) -> list:
             out += rows
     if sport in BASKETBALL or sport == "NFL":
         _apply_usage(sport, date, out, index, hurt)
+    if sport == "NFL":
+        _apply_defense(date, out, teams)
     if sport == "NHL":
         _apply_goalies(date, out)
+        _apply_shots(date, out, teams)
     if sport == "MLB":
         _apply_mlb(date, out)
     from .autotune import bias_for
