@@ -445,6 +445,14 @@ class LinemakerChat:
             history.append({"role": "user", "content": f"{author}: {text}"})
             history.append({"role": "assistant", "content": reply})
             return Turn(reply, ctx["files"], [])
+        other = None if attached_csv else unsupported_league(text)
+        if quick and other:
+            reply = (f"**{other} isn't covered yet**, so I didn't run anything (no credits used). "
+                     "Covered: NBA, WNBA, NFL, college football, NHL and MLB props and game lines, "
+                     "plus soccer game lines.")
+            history.append({"role": "user", "content": f"{author}: {text}"})
+            history.append({"role": "assistant", "content": reply})
+            return Turn(reply, ctx["files"], [])
         if quick:
             mode, kind = quick_mode(text), quick_kind(text)
             book = None if kind == "pp" else quick_book(text)
@@ -815,6 +823,18 @@ SPORT_WORDS = {"WNBA": r"\b(wnba|women'?s basketball)\b",
                "NCAAF": r"\b(ncaaf|cfb|college football)\b",
                "NBA": r"\b(nba|basketball)\b", "NFL": r"\b(nfl|football)\b",
                "MLB": r"\b(mlb|baseball)\b", "NHL": r"\b(nhl|hockey)\b"}
+
+
+# Leagues the bot can't price yet: say so instead of quietly answering with the default league.
+UNSUPPORTED = {"UFC/MMA": r"\b(ufc|mma|fight(s|ing)?|bellator|pfl)\b", "boxing": r"\bboxing\b",
+               "tennis": r"\b(tennis|atp|wta)\b", "golf": r"\b(golf|pga|liv)\b",
+               "F1": r"\b(f1|formula ?1)\b", "NASCAR": r"\bnascar\b"}
+
+
+def unsupported_league(text: str) -> Optional[str]:
+    if any(re.search(p, text, re.I) for p in SPORT_WORDS.values()):
+        return None
+    return next((name for name, p in UNSUPPORTED.items() if re.search(p, text, re.I)), None)
 
 
 STRONG_VOLUME = re.compile(r"\b(parlays?|volume)\b", re.I)

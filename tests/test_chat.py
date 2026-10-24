@@ -325,3 +325,12 @@ class CacheAndErrorsTest(unittest.TestCase):
         msg = friendly_error("NBA", Exception('HTTP 401: {"error_code":"OUT_OF_USAGE_CREDITS"}'))
         self.assertIn("out of credits", msg)
         self.assertIn("LINEMAKER_ALT_LINES=off", msg)
+
+
+class UnsupportedLeagueTest(unittest.TestCase):
+    def test_ufc_is_not_answered_with_nba(self):
+        from linemaker.chat import unsupported_league
+        self.assertEqual(unsupported_league("best ufc props tonight"), "UFC/MMA")
+        self.assertEqual(unsupported_league("best mma picks"), "UFC/MMA")
+        self.assertIsNone(unsupported_league("best nba props"))
+        self.assertIsNone(unsupported_league("best props tonight"))
