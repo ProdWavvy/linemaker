@@ -1554,6 +1554,55 @@ async def news_loop():
                                  "so the books have likely already adjusted.")))
     if "NHL" in _alert_sports() and sent < cap:
         await _goalie_news(channel, date, now, sent, cap)
+        sent = load_state(f"news_sent_{date}.json", sent)
+    if "MLB" in _alert_sports() and sent < cap:
+        await _pitcher_news(channel, date, now, sent, cap)
+
+
+async def _pitcher_news(channel, date: str, now, sent: int, cap: int):
+    """MLB: a team's probable starter changed (scratch): re-price that game."""
+    from .alerts import event_for_team, goalie_changes, load_state, save_state
+    from .chat import drop_slate, scan_events
+    from .mlb_matchups import pitcher_starts, probables
+    try:
+        current = await asyncio.to_thread(pitcher_starts, date)
+        previous = load_state(f"pitchers_{date}.json", None)
+        save_state(f"pitchers_{date}.json", current)
+        changed = goalie_changes(previous, current)
+        if not changed:
+            return
+        info = await asyncio.to_thread(probables, date)
+        events = await asyncio.to_thread(_todays_events, "MLB", date)
+    except Exception:
+        log.exception("pitcher news check failed")
+        return
+    for team, pitcher in changed:
+        p = info.get(team)
+        ev = event_for_team(events, p["team"]) if p else None
+        if not ev or sent >= cap:
+            continue
+        if (dt.datetime.fromisoformat(ev["commence_time"].replace("Z", "+00:00")) - now).total_seconds() < 600:
+            continue
+        sent += 1
+        save_state(f"news_sent_{date}.json", sent)
+        game = f"{ev['away_team']} @ {ev['home_team']}"
+        was = (previous or {}).get(team, ["?"])[0]
+        drop_slate("MLB", date)
+        drop_slate("MLB", date, "games")
+        try:
+            messages, res = await asyncio.to_thread(
+                scan_events, "MLB", date, {ev["id"]}, f"⚾ {pitcher} starting · Re-Price", False)
+        except Exception:
+            log.exception("pitcher re-price failed: %s", game)
+            continue
+        if res.picks:
+            await _send_card(channel.send, messages)
+        else:
+            await channel.send(embed=discord.Embed(
+                title=f"⚾ {pitcher} now starting for the {p['team']} · {game}", color=0x2E86C1,
+                description=(f"Was {was}. Re-priced {game} against the new starter: "
+                             f"{len(res.evaluated)} props priced; nothing cleared the gates, so the "
+                             "books have likely already adjusted.")))
 
 
 async def _goalie_news(channel, date: str, now, sent: int, cap: int):

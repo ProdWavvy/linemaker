@@ -8,7 +8,8 @@ News      Every LINEMAKER_NEWS_MINUTES (default 12) ESPN's injury report is chec
           When a rotation player on a team that hasn't started yet changes to Out (basketball:
           18+ minutes; NFL: a QB, or 2.5+ catches / 6+ carries a game), his game is re-priced
           with the teammate bump and posted. NHL: when a team's starting goalie changes, the
-          game is re-priced with the goalie adjustment. Capped at LINEMAKER_NEWS_MAX_ALERTS
+          game is re-priced with the goalie adjustment. MLB: when a team's probable starter
+          changes (a scratch), the game is re-priced against the new starter. Capped at LINEMAKER_NEWS_MAX_ALERTS
           per day (default 8).
 """
 import datetime as dt

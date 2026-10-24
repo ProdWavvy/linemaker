@@ -204,6 +204,13 @@ def game_projections(sport: str, date: str, games: list, use_kalshi: bool = True
             goalies = goalie_effects(date)
         except Exception as e:
             log.warning("nhl goalies unavailable: %s", e)
+    pitchers = {}
+    if sport == "MLB":
+        from .mlb_matchups import starters
+        try:
+            pitchers = starters(date)
+        except Exception as e:
+            log.warning("mlb starters unavailable: %s", e)
     rows = []
     for away, home in games:
         k = game_kalshi(kalshi, away, home) if kalshi else None
@@ -218,6 +225,15 @@ def game_projections(sport: str, date: str, games: list, use_kalshi: bool = True
             g["margin"] += ea - eh
             g["total"] += ea + eh
             note += "; " + "; ".join(x["note"] for x in (gh, ga) if x)
+        ph, pa = pitchers.get(norm(home)), pitchers.get(norm(away))
+        if (ph and ph.get("rates")) or (pa and pa.get("rates")):   # tonight's starters vs league average
+            from .mlb_matchups import extra_runs
+            eh = extra_runs(ph["rates"]) if ph and ph.get("rates") else 0.0
+            ea = extra_runs(pa["rates"]) if pa and pa.get("rates") else 0.0
+            g["margin"] += ea - eh
+            g["total"] += ea + eh
+            note += "; starters " + ", ".join(f"{p['name']} {extra_runs(p['rates']):+.2f} runs"
+                                              for p in (pa, ph) if p and p.get("rates"))
         sd = SD.get(sport, 12.0)
         for market in ("moneyline", "spread"):
             rows.append({"sport": sport, "subject": home, "market": market,

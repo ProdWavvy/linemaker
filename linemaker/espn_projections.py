@@ -253,6 +253,44 @@ def _apply_goalies(date: str, rows: list):
         r["notes"] += f"; ×{f:.2f}: {g['note']}"
 
 
+def _apply_mlb(date: str, rows: list):
+    """Opposing starter's quality on hitters' props, lineup spot / scratches, and a pitcher's
+    strikeouts skipped when he isn't tonight's starter (see mlb_matchups)."""
+    from .mlb_matchups import HITTER_MARKETS, hitter_factor, lineups, spot_factor, starters
+    try:
+        sps = starters(date)
+    except Exception as e:
+        log.warning("mlb starters unavailable: %s", e)
+        return
+    orders = {}
+    for ev in {v["event"] for v in sps.values()}:
+        orders.update(lineups(ev))
+    for r in rows:
+        m, me = r["market"].lower(), norm(r["subject"])
+        mine, theirs = sps.get(norm(r["_team"])), sps.get(norm(r.get("_opp", "")))
+        if m == "strikeouts":
+            if mine and norm(mine["name"]) != me:
+                r["injury_status"] = "inactive"
+                r["notes"] += f"; not tonight's starter ({mine['name']} is)"
+            continue
+        if m not in HITTER_MARKETS:
+            continue
+        order = orders.get(norm(r["_team"]))
+        if order is not None:
+            if me not in order:
+                r["injury_status"] = "inactive"
+                r["notes"] += "; not in tonight's lineup"
+                continue
+            f = spot_factor(order[me], r["_games"])
+            if f and abs(f - 1) >= 0.01:
+                r["mean"] = f"{float(r['mean']) * f:.3f}"
+                r["notes"] += f"; batting {order[me]} (×{f:.2f} at-bats)"
+        if theirs and theirs.get("rates"):
+            f = hitter_factor(theirs["rates"], HITTER_MARKETS[m])
+            r["mean"] = f"{float(r['mean']) * f:.3f}"
+            r["notes"] += f"; vs {theirs['name']} ×{f:.2f}"
+
+
 def warm_up(sport: str, date: str):
     """Fetch the slow, cacheable pieces ahead of the first scan: rosters and (basketball)
     defense vs position, which reads ~200 box scores the first time each day."""
@@ -344,6 +382,8 @@ def espn_projections(sport: str, date: str, wanted: dict) -> list:
         _apply_usage(sport, date, out, index, hurt)
     if sport == "NHL":
         _apply_goalies(date, out)
+    if sport == "MLB":
+        _apply_mlb(date, out)
     for r in out:
         r.pop("_team", None)
         r.pop("_opp", None)
