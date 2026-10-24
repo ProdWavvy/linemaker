@@ -326,7 +326,9 @@ class LinemakerChat:
         if name == "find_plays":
             mode = args.get("mode") or "smart"
             kind = args.get("kind") or "props"
-            sport = args["sport"]
+            sport = args["sport"].upper()
+            if sport == "UFC":
+                kind = "games"   # fights: winners only, there are no UFC props in the feed
             from .pro import rows_to_markets, run_pro, volume_config
             snaps = os.environ.get("LINEMAKER_SNAPSHOTS", "snapshots")
             rows, slate, remaining, warning, source = slate_for(sport, date, kind,
@@ -382,6 +384,9 @@ class LinemakerChat:
             out = summarize(_LR, f"{sport} {date} ({mode} mode, {what}): {source} projections "
                                  f"matched {len(rows)} posted {'/'.join(res.books)} lines; Odds API "
                                  f"credits left {remaining}.")
+            if sport == "UFC" and not rows:
+                from .ufc_model import next_card_note
+                return next_card_note(date)
             ctx.setdefault("results", []).append((sport, res, extras))
             ctx.setdefault("summaries", []).append(out)
             return out
@@ -839,6 +844,9 @@ def unsupported_league(text: str) -> Optional[str]:
     return next((name for name, p in UNSUPPORTED.items() if re.search(p, text, re.I)), None)
 
 
+QUESTION_WORDS = re.compile(r"\b(why|how|what|explain|did|does|do|should|is|are|was|were|when)\b", re.I)
+
+
 STRONG_VOLUME = re.compile(r"\b(parlays?|volume)\b", re.I)
 SOFT_VOLUME = re.compile(r"\b(safe|safest|locks?|chalk|high[- ]hit|likeliest)\b", re.I)
 BET_WORDS = re.compile(r"\b(props?|plays?|picks?|legs?)\b", re.I)
@@ -868,8 +876,11 @@ def quick_book(text: str) -> Optional[str]:
 
 def quick_plays_request(text: str) -> Optional[list]:
     """Sports for a plain 'best props tonight?' question, answered without the AI model."""
+    league_ask = (any(re.search(p, text, re.I) for p in SPORT_WORDS.values())
+                  and (BET_WORDS.search(text) or GAME_LINE_WORDS.search(text))
+                  and not QUESTION_WORDS.search(text))   # "ufc props", "nhl picks"
     if not (PLAYS_INTENT.search(text) or GAMES_INTENT.search(text) or LIVE_INTENT.search(text)
-            or PP_WORDS.search(text) or quick_mode(text) == "volume"):
+            or PP_WORDS.search(text) or quick_mode(text) == "volume" or league_ask):
         return None
     if re.search(r"\b(i have|i think|i got|projection|my number|at \d)", text, re.I):
         return None   # the user supplied their own number: let the model read it

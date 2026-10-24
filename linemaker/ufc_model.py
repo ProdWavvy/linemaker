@@ -258,3 +258,25 @@ def ufc_results(records: dict, date: str) -> list:
         rows.append({"game_id": r["game_id"], "subject": r["subject"], "market": r["market"],
                      "line": str(r["inputs"]["line"]), "actual": str(actual)})
     return rows
+
+
+def next_card_note(date: str) -> str:
+    """Why a UFC ask came back empty, and when the next card is."""
+    now = dt.datetime.now(dt.timezone.utc)
+    try:
+        data = _get(f"{SITE}/scoreboard", max_age=1800)
+    except Exception:
+        data = {}
+    started, upcoming = [], []
+    for ev in data.get("events", []):
+        for comp in ev.get("competitions", []):
+            when = dt.datetime.fromisoformat(comp.get("date", ev["date"]).replace("Z", "+00:00"))
+            (started if when <= now else upcoming).append((when, ev.get("name", "UFC")))
+    if upcoming:
+        when, name = min(upcoming)
+        return (f"No UFC fight odds to price right now. Next: **{name}**, first fight still to come "
+                f"starts {when:%a %b %d %H:%M} UTC. Odds usually post several days before.")
+    if started:
+        return ("Every fight on today's UFC card has already started or finished, and started "
+                "fights aren't priced (the model is pre-fight only). Ask again before the next card.")
+    return "No UFC card found on ESPN's schedule for the next few days."

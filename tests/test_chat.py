@@ -336,3 +336,11 @@ class UnsupportedLeagueTest(unittest.TestCase):
         self.assertEqual(unsupported_league("best boxing picks"), "boxing")
         self.assertIsNone(unsupported_league("best nba props"))
         self.assertIsNone(unsupported_league("best props tonight"))
+
+
+class LeagueAskTest(unittest.TestCase):
+    def test_short_league_asks_use_the_quick_path(self):
+        from linemaker.chat import quick_plays_request
+        self.assertEqual(quick_plays_request("ufc props"), ["UFC"])
+        self.assertEqual(quick_plays_request("nhl picks"), ["NHL"])
+        self.assertIsNone(quick_plays_request("why did the nba props lose"))
