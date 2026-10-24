@@ -161,7 +161,8 @@ def run_games(odds: OddsAPI, sports: list, date: str, tz: ZoneInfo, cfg: ProConf
         projections += game_projections(sport.upper(), date, games)
     lr = price_feed(odds, feed, sports, projections, date, cfg, freezer)
     lr.result.passes = [(l, r) for l, r in lr.result.passes if r != "no odds found in the feed"]
-    lr.result.projection_source = "game model (ESPN team ratings + Kalshi)"
+    lr.result.projection_source = ("UFC model (ESPN fighter stats)" if [s.upper() for s in sports] == ["UFC"]
+                                   else "game model (ESPN team ratings + Kalshi)")
     lr.result.kind = "games"
     return lr
 
@@ -320,7 +321,7 @@ def auto_results(api: OddsAPI, snapshot_path: str) -> list:
     with open(snapshot_path) as f:
         records = json.load(f)
     sports = sorted({r["sport"] for r in records.values()
-                     if r.get("sport") and r["inputs"].get("bet_type") != "prop"})
+                     if r.get("sport") and r["inputs"].get("bet_type") != "prop"} - {"UFC"})   # UFC: ESPN
     rows = []
     cache = getattr(api, "_scores_cache", None)
     if cache is None:

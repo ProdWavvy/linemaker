@@ -57,6 +57,13 @@ def grade_day(date: str, rows: list, auto: bool):
             n_pp = apply_results(pp_track, pp_rows)
             if n_pp:
                 summary_live.append(f"- 🟣 PrizePicks lines graded: **{n_pp}**")
+    if auto and os.path.exists(track):   # UFC fights: winners from ESPN (free)
+        import json as _json
+        from .ufc_model import ufc_results
+        with open(track) as f:
+            recs = _json.load(f)
+        have = {(r["game_id"], r["subject"], r["market"]) for r in rows}
+        rows += [r for r in ufc_results(recs, date) if (r["game_id"], r["subject"], r["market"]) not in have]
     summary = []
     if rows and os.path.exists(snap):
         md = grade(snap, rows)

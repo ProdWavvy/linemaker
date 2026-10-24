@@ -35,7 +35,7 @@ from .oddsapi import norm
 from .sim import DEFAULT_NORMAL_SD
 
 log = logging.getLogger("linemaker.game_model")
-SUPPORTED = ("NBA", "WNBA", "NFL", "NCAAF", "NHL", "MLB")
+SUPPORTED = ("NBA", "WNBA", "NFL", "NCAAF", "NHL", "MLB", "UFC")
 # Games of this season that count as much as all of last season.
 SEASON_K = {"NBA": 15, "WNBA": 10, "NFL": 4, "NCAAF": 4, "NHL": 20, "MLB": 40}
 HOME_EDGE = {"NBA": 2.3, "WNBA": 2.0, "NFL": 1.5, "NCAAF": 2.8, "NHL": 0.15, "MLB": 0.15}
@@ -184,6 +184,9 @@ def game_projections(sport: str, date: str, games: list, use_kalshi: bool = True
     """games: [(away, home)] -> projection rows (moneyline, spread, game total) for the engine."""
     if sport not in SUPPORTED or not games:
         return []
+    if sport == "UFC":
+        from .ufc_model import ufc_projections
+        return ufc_projections(date, games)
     ratings = team_ratings(sport, date)
     tired = played_yesterday(sport, date)
     kalshi = []

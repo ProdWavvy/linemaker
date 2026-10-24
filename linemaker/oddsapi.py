@@ -32,8 +32,9 @@ SPORT_KEYS = {
     "NBA": "basketball_nba", "WNBA": "basketball_wnba", "NCAAB": "basketball_ncaab",
     "NHL": "icehockey_nhl", "NFL": "americanfootball_nfl", "NCAAF": "americanfootball_ncaaf",
     "MLB": "baseball_mlb", "UCL": "soccer_uefa_champs_league", "LALIGA": "soccer_spain_la_liga",
-    "EPL": "soccer_epl", "MLS": "soccer_usa_mls",
+    "EPL": "soccer_epl", "MLS": "soccer_usa_mls", "UFC": "mma_mixed_martial_arts",
 }
+GAME_MARKETS = {"UFC": "h2h"}   # fights: winner only (no spreads or totals in the feed)
 SOCCER = {"UCL", "LALIGA", "EPL", "MLS"}
 
 # Odds API market key -> engine market name, per sport family.
@@ -394,6 +395,9 @@ def fetch_slate(api: OddsAPI, sport: str, date: str, tz: ZoneInfo, props: bool =
     """All priced markets for one sport on one local date. With game_lines=False the
     event list comes from the free /events endpoint instead of a paid /odds call."""
     start, end = slate_window(date, tz)
+    game_markets = GAME_MARKETS.get(sport.upper(), game_markets)
+    if sport.upper() in GAME_MARKETS:
+        props = False   # no player props for these in the feed
     source = (api.game_odds(sport, game_markets, start, end) if game_lines
               else api.events(sport, start, end))
     events = [e for e in source if _local_date(e["commence_time"], tz) == date]

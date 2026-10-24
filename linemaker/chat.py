@@ -449,7 +449,7 @@ class LinemakerChat:
         if quick and other:
             reply = (f"**{other} isn't covered yet**, so I didn't run anything (no credits used). "
                      "Covered: NBA, WNBA, NFL, college football, NHL and MLB props and game lines, "
-                     "plus soccer game lines.")
+                     "UFC fight winners, plus soccer game lines.")
             history.append({"role": "user", "content": f"{author}: {text}"})
             history.append({"role": "assistant", "content": reply})
             return Turn(reply, ctx["files"], [])
@@ -463,7 +463,8 @@ class LinemakerChat:
             for sport in quick:
                 try:
                     await asyncio.to_thread(self.run_tool, "find_plays",
-                                            {"sport": sport, "mode": mode, "kind": kind,
+                                            {"sport": sport, "mode": mode,
+                                             "kind": "games" if sport == "UFC" else kind,   # fights: winners only
                                              "refresh": refresh, "book": book}, ctx)
                 except Exception as e:
                     errors.append(friendly_error(sport, e))
@@ -819,14 +820,15 @@ GAMES_INTENT = re.compile(
     + r"|" + GAME_LINE_WORDS.pattern + r".*\b(today|tonight)\b", re.I)
 # Checked in order; a more specific league claims its words first (WNBA before NBA, college
 # football before NFL), so "wnba" or "college football" never also pulls the pro league.
-SPORT_WORDS = {"WNBA": r"\b(wnba|women'?s basketball)\b",
+SPORT_WORDS = {"UFC": r"\b(ufc|mma|fights?|fight night)\b",
+               "WNBA": r"\b(wnba|women'?s basketball)\b",
                "NCAAF": r"\b(ncaaf|cfb|college football)\b",
                "NBA": r"\b(nba|basketball)\b", "NFL": r"\b(nfl|football)\b",
                "MLB": r"\b(mlb|baseball)\b", "NHL": r"\b(nhl|hockey)\b"}
 
 
 # Leagues the bot can't price yet: say so instead of quietly answering with the default league.
-UNSUPPORTED = {"UFC/MMA": r"\b(ufc|mma|fight(s|ing)?|bellator|pfl)\b", "boxing": r"\bboxing\b",
+UNSUPPORTED = {"Bellator/PFL": r"\b(bellator|pfl)\b", "boxing": r"\bboxing\b",
                "tennis": r"\b(tennis|atp|wta)\b", "golf": r"\b(golf|pga|liv)\b",
                "F1": r"\b(f1|formula ?1)\b", "NASCAR": r"\bnascar\b"}
 

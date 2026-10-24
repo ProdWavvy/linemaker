@@ -5,7 +5,7 @@ from .pipeline import Result, alt_lines
 
 SPORT_EMOJI = {
     "NBA": "🏀", "WNBA": "🏀", "NCAAB": "🏀", "NHL": "🏒", "NFL": "🏈", "NCAAF": "🏈",
-    "MLB": "⚾", "UCL": "⚽", "LALIGA": "⚽", "EPL": "⚽", "MLS": "⚽",
+    "MLB": "⚾", "UCL": "⚽", "LALIGA": "⚽", "EPL": "⚽", "MLS": "⚽", "UFC": "🥊",
 }
 
 

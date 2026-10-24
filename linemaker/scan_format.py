@@ -16,7 +16,8 @@ from .pro import book_prices
 
 PURPLE, RED = 0x9B59B6, 0xE67E22
 SPORT_NAMES = {"NBA": "NBA", "WNBA": "WNBA", "NFL": "NFL", "NCAAF": "College Football",
-               "MLB": "MLB", "NHL": "NHL", "UCL": "Champions League", "LALIGA": "La Liga"}
+               "MLB": "MLB", "NHL": "NHL", "UCL": "Champions League", "LALIGA": "La Liga",
+               "UFC": "UFC"}
 
 
 def _pct(p: float) -> str:

@@ -32,6 +32,16 @@ def _market_weights() -> dict:
     return dict(load_weights().get("markets", {}))
 
 
+def _start_weight(sport: str, default: float) -> float:
+    """Model weight before the auto-tuner has a say: UFC's model is a rough first version."""
+    if sport.upper() == "UFC":
+        try:
+            return float(os.environ.get("LINEMAKER_UFC_MODEL_WEIGHT", "0.35"))
+        except ValueError:
+            return 0.35
+    return default
+
+
 def _over_min_gap() -> Optional[float]:
     raw = os.environ.get("LINEMAKER_OVER_MIN_GAP", "0.04").strip().lower()
     if raw in ("", "off", "no", "false"):
@@ -421,7 +431,7 @@ def evaluate(m: ProMarket, cfg: ProConfig, sim: Optional[SimResult] = None) -> O
     market, mkt_hold, mkt_over, assumed = mp
     model, push = model_probs(m, sim)
     w = (cfg.model_weight_fresh if m.news_fresh
-         else cfg.market_weights.get(f"{m.sport} {m.market}", cfg.model_weight))
+         else cfg.market_weights.get(f"{m.sport} {m.market}", _start_weight(m.sport, cfg.model_weight)))
 
     sides = []
     for side, (odds, book) in side_prices(m, cfg.bet_books).items():

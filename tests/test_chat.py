@@ -329,8 +329,10 @@ class CacheAndErrorsTest(unittest.TestCase):
 
 class UnsupportedLeagueTest(unittest.TestCase):
     def test_ufc_is_not_answered_with_nba(self):
-        from linemaker.chat import unsupported_league
-        self.assertEqual(unsupported_league("best ufc props tonight"), "UFC/MMA")
-        self.assertEqual(unsupported_league("best mma picks"), "UFC/MMA")
+        from linemaker.chat import quick_plays_request, unsupported_league
+        self.assertEqual(quick_plays_request("best ufc picks tonight"), ["UFC"])
+        self.assertEqual(quick_plays_request("best mma props"), ["UFC"])
+        self.assertIsNone(unsupported_league("best ufc props tonight"))
+        self.assertEqual(unsupported_league("best boxing picks"), "boxing")
         self.assertIsNone(unsupported_league("best nba props"))
         self.assertIsNone(unsupported_league("best props tonight"))
