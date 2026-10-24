@@ -232,3 +232,41 @@ def build_sgps(legs: list, books=PARLAY_BOOKS, sgp_size: int = 3, sgpx_size: int
             if len(chosen) == sgpx_size and len({ev.market.game_id for ev in chosen}) > 1:
                 out.append(make(chosen, multi))
     return out
+
+
+TARGETS = (2.0, 3.0, 4.0, 6.0)   # decimal payouts: +100, +200, +300, +500
+
+
+def best_for_target(legs: list, book: str, target: float, max_legs: int = 6, pool: int = 12) -> "Parlay | None":
+    """The parlay with the highest hit chance that pays at least `target` (decimal) at this
+    book: one leg per game (so legs don't move together), each at least fair-ish (hit chance
+    x odds >= 0.97), searched exhaustively over the best-value legs. At a fixed payout the hit
+    chance is (1 / payout) x the product of the legs' values, so this mostly picks the legs
+    priced furthest above fair, and as few of them as the payout allows."""
+    import itertools
+    import math
+    from .parlay_math import hit_chance, leg_value
+    best_per_game = {}
+    for ev in legs:
+        o = leg_price(ev, book)
+        if o is None or leg_value(ev, o) < 0.97:
+            continue
+        g = ev.market.game_id
+        if g not in best_per_game or leg_value(ev, o) > leg_value(*best_per_game[g]):
+            best_per_game[g] = (ev, o)
+    cands = sorted(best_per_game.values(), key=lambda x: leg_value(*x), reverse=True)[:pool]
+    dec = [american_to_decimal(o) for _e, o in cands]
+    hit = [hit_chance(e) for e, _o in cands]
+    best, best_key = None, None
+    for k in range(1, min(max_legs, len(cands)) + 1):
+        for combo in itertools.combinations(range(len(cands)), k):
+            d = math.prod(dec[i] for i in combo)
+            if d < target:
+                continue
+            p = math.prod(hit[i] for i in combo)
+            key = (p, p * d)
+            if best_key is None or key > best_key:
+                best, best_key = combo, key
+    if best is None:
+        return None
+    return price(book, [cands[i] for i in best], style="target")

@@ -150,6 +150,8 @@ async def route_component(interaction: discord.Interaction) -> bool:
         handler = CompactView._show_notes(key)
     elif kind == "board":
         handler = _show_board(key, parts[3])
+    elif kind == "targets":
+        handler = _show_targets(key)
     elif kind == "sboard":
         handler = _show_board(key, parts[4], int(parts[3], 16))
     elif kind in pages:
@@ -472,6 +474,9 @@ class CompactView(discord.ui.View):
         pool = [d for _e, d in picks[:25]] or list(legs or [])[:25]
         if len(pool) >= 2:
             pkey = _remember({"picks": pool, "books": books})
+            self.add_item(discord.ui.Button(label="Safest by payout", emoji="🎯", row=4,
+                                            style=discord.ButtonStyle.primary,
+                                            custom_id=f"lm:targets:{pkey}"))
             b = discord.ui.Button(label="Turn into parlay" if picks else "Build my own parlay",
                                   emoji="🎰", row=4, style=discord.ButtonStyle.primary,
                                   custom_id=f"lm:mkparlay:{pkey}")
@@ -589,6 +594,63 @@ def parlay_card(legs: list, books: Optional[tuple] = None, boost: float = 0.0) -
                         "multiplied odds shown; check its price on the slip before you bet.")
     embed.set_footer(text=" ".join(n.replace("**", "") for n in notes)[:2048])
     return embed, view
+
+
+def targets_card(picks: list, books) -> tuple:
+    """(embed, view): for each payout target, the highest-hit-chance parlay at each book."""
+    from .betlinks import parlay_link
+    from .odds import fmt_odds as _fo
+    from .parlay import TARGETS, best_for_target
+    from .staking import parlay_pay_line
+    books = tuple(books or PARLAY_BOOKS)
+    legs = [d["ev"] for d in picks]
+    embed = discord.Embed(title="🎯 Safest Parlay for Each Payout", color=0x1ABC9C, description=(
+        "For each payout, the legs with the **highest real hit chance** that reach it: one leg per "
+        "game, every leg priced fair or better. At a set payout, hit chance comes from legs priced "
+        "**above fair** and from **fewer legs**, not from stacking heavy favorites (each one adds the "
+        "book's cut)."))
+    view = discord.ui.View(timeout=None)
+    for target in TARGETS:
+        lines = []
+        for book in books:
+            p = best_for_target(legs, book, target)
+            if p is None:
+                continue
+            legs_txt = " + ".join(f"{ev.best.label} ({_fo(o)})" for ev, o in p.legs)
+            ladder = " · ".join(f"{n}x in a row {p.prob ** n:.0%}" for n in (2, 3))
+            lines.append(f"**{book} {_fo(p.american)}** · hit chance **{p.prob:.0%}** · EV {p.ev:+.1f}%\n"
+                         f"{legs_txt}\n{parlay_pay_line(p.prob, p.american, p.decimal)}\n"
+                         f"🔁 Rolling winnings over: {ladder}")
+            k = _remember({"parlays": [p]})
+            if len(view.children) < 24:
+                url = parlay_link(p)
+                if url and len(url) <= 512:
+                    view.add_item(discord.ui.Button(label=f"+{(target - 1) * 100:.0f} {book}", url=url,
+                                                    emoji="🟦" if book == "FanDuel" else "🟩"))
+                view.add_item(discord.ui.Button(label=f"Log +{(target - 1) * 100:.0f} {book}", emoji="📝",
+                                                style=discord.ButtonStyle.success, custom_id=f"lm:betp:{k}:0"))
+        embed.add_field(name=f"Payout +{(target - 1) * 100:.0f} (break-even hit chance {1 / target:.0%})",
+                        value=("\n\n".join(lines) or "No combination of fair-priced legs reaches this payout.")[:1024],
+                        inline=False)
+    embed.set_footer(text="Hit chances are calibrated to past results and count legs from one game "
+                          "moving together. Rolling over multiplies the risk: each step must hit.")
+    return embed, view
+
+
+def _show_targets(key: str):
+    async def callback(interaction: discord.Interaction):
+        detail = PICK_DETAILS.get(key)
+        if detail is None:
+            await interaction.response.send_message("This card is too old. Ask again for fresh picks.",
+                                                    ephemeral=True)
+            return
+        try:
+            embed, view = targets_card(detail["picks"], detail.get("books"))
+            await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
+            await asyncio.to_thread(save_details)
+        except Exception as e:
+            await _report_error(interaction, e)
+    return callback
 
 
 def _show_board(key: str, kind: str, mask: Optional[int] = None):

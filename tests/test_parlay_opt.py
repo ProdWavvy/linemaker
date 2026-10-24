@@ -12,7 +12,7 @@ from linemaker import parlay, parlay_math, parlay_track
 def leg(game, subject, market, side="A", p=0.6, bet_type="prop", key=None, odds=-150, opponent=""):
     m = NS(game_id=game, game=f"{game} game", sport="NBA", date="2026-10-24", bet_type=bet_type,
            subject=subject, opponent=opponent, market=market, line=10.5, key=key or f"{game}|{subject}|{market}",
-           books=[("FanDuel", [odds, 120] if side == "A" else [120, odds])], side_keys=("A", "B"))
+           books=[("FanDuel", [odds, 120] if side == "A" else [120, odds])], side_keys=("A", "B"), links={})
     return NS(market=m, best=NS(side=side, label=f"{subject} {market} {side}", blended=p,
                                 best_odds=odds, best_book="FanDuel"))
 
@@ -85,3 +85,35 @@ class ParlayTrackTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TargetTest(unittest.TestCase):
+    def test_highest_hit_chance_for_the_payout(self):
+        legs = [leg(f"f{i}", f"Fav{i}", "points", p=0.86, odds=-600) for i in range(6)]    # fair-ish, pays 1.17x
+        legs += [leg("v1", "Value1", "points", p=0.62, odds=-120), leg("v2", "Value2", "points", p=0.60, odds=-115)]
+        with mock.patch.object(parlay, "leg_price", side_effect=lambda ev, b: ev.best.best_odds):
+            p = parlay.best_for_target(legs, "FanDuel", 3.0)
+        self.assertGreaterEqual(p.decimal, 3.0)
+        self.assertEqual(len({ev.market.game_id for ev, _o in p.legs}), len(p.legs))     # one per game
+        favs_only = 0.86 ** 7                                                              # 7 favourites for 3x
+        self.assertGreater(p.prob, favs_only)
+        self.assertTrue(any(ev.best.label.startswith("Value") for ev, _o in p.legs))
+
+    def test_unreachable_target(self):
+        legs = [leg("g1", "A", "points", p=0.86, odds=-600)]
+        with mock.patch.object(parlay, "leg_price", side_effect=lambda ev, b: ev.best.best_odds):
+            self.assertIsNone(parlay.best_for_target(legs, "FanDuel", 6.0))
+
+
+class TargetCardTest(unittest.TestCase):
+    def test_card(self):
+        import asyncio
+        from linemaker import bot
+        legs = [leg(f"g{i}", f"P{i}", "points", p=0.62, odds=-120) for i in range(8)]
+        with mock.patch.object(parlay, "leg_price", side_effect=lambda ev, b: ev.best.best_odds):
+            async def build():
+                return bot.targets_card([{"rank": i, "ev": ev} for i, ev in enumerate(legs, 1)], ("FanDuel",))
+            embed, view = asyncio.run(build())
+        self.assertEqual(len(embed.fields), 4)
+        self.assertIn("in a row", embed.fields[1].value)
+        self.assertTrue(any((getattr(c, "label", "") or "").startswith("Log +200") for c in view.children))
