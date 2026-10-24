@@ -1505,7 +1505,8 @@ async def pretip_loop():
 
 @tasks.loop(minutes=12)
 async def news_loop():
-    """Re-price a game when a rotation player is newly ruled Out (basketball)."""
+    """Re-price a game when a rotation player is newly ruled Out (basketball, NFL) or an NHL
+    team's starting goalie changes."""
     from .alerts import NEWS_SPORTS, load_state, news_events, save_state
     from .chat import drop_slate, scan_events
     from .espn_projections import injuries
@@ -1551,6 +1552,62 @@ async def news_loop():
                     description=(f"Re-priced {game} with the usage bump for his teammates. "
                                  f"{len(res.evaluated)} props priced; nothing cleared the gates, "
                                  "so the books have likely already adjusted.")))
+    if "NHL" in _alert_sports() and sent < cap:
+        await _goalie_news(channel, date, now, sent, cap)
+
+
+async def _goalie_news(channel, date: str, now, sent: int, cap: int):
+    """NHL: a team's starting goalie changed (or a backup was confirmed): re-price that game."""
+    from .alerts import goalie_changes, load_state, save_state
+    from .chat import drop_slate, scan_events
+    from .nhl_goalies import goalie_effects, goalie_starts
+    try:
+        current = await asyncio.to_thread(goalie_starts, date)
+        previous = load_state(f"goalies_{date}.json", None)
+        save_state(f"goalies_{date}.json", current)
+        changed = dict(goalie_changes(previous, current))
+        alerted = set(load_state(f"goalies_alerted_{date}.json", []))
+        if previous is not None:   # a backup newly confirmed also counts
+            for team, (goalie, confirmed) in current.items():
+                old = (previous or {}).get(team)
+                if confirmed and old and not old[1]:
+                    changed.setdefault(team, goalie)
+        if not changed:
+            return
+        effects = await asyncio.to_thread(goalie_effects, date)
+        events = await asyncio.to_thread(_todays_events, "NHL", date)
+    except Exception:
+        log.exception("goalie news check failed")
+        return
+    from .alerts import event_for_team
+    for team, goalie in changed.items():
+        key = f"{team}|{goalie}"
+        eff = effects.get(team)
+        ev = event_for_team(events, eff["team"] if eff else team)
+        if key in alerted or not eff or not ev or sent >= cap:
+            continue                      # usual starter in net, not on tonight's slate, or done
+        if (dt.datetime.fromisoformat(ev["commence_time"].replace("Z", "+00:00")) - now).total_seconds() < 600:
+            continue
+        sent += 1
+        alerted.add(key)
+        save_state(f"news_sent_{date}.json", sent)
+        save_state(f"goalies_alerted_{date}.json", sorted(alerted))
+        game = f"{ev['away_team']} @ {ev['home_team']}"
+        drop_slate("NHL", date)
+        drop_slate("NHL", date, "games")
+        try:
+            messages, res = await asyncio.to_thread(
+                scan_events, "NHL", date, {ev["id"]}, f"🥅 {goalie} in net · Re-Price", False)
+        except Exception:
+            log.exception("goalie re-price failed: %s", game)
+            continue
+        if res.picks:
+            await _send_card(channel.send, messages)
+        else:
+            await channel.send(embed=discord.Embed(
+                title=f"🥅 {goalie} starting · {game}", color=0x3498DB,
+                description=(f"{eff['note']}.\nRe-priced {game}: {len(res.evaluated)} props priced; "
+                             "nothing cleared the gates, so the books have likely already adjusted.")))
 
 
 @tasks.loop(time=dt.time(10, 0, tzinfo=TZ))

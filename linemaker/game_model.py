@@ -197,6 +197,13 @@ def game_projections(sport: str, date: str, games: list, use_kalshi: bool = True
         except Exception as e:
             log.warning("kalshi unavailable: %s", e)
     from .context import game_kalshi
+    goalies = {}
+    if sport == "NHL":
+        from .nhl_goalies import goalie_effects
+        try:
+            goalies = goalie_effects(date)
+        except Exception as e:
+            log.warning("nhl goalies unavailable: %s", e)
     rows = []
     for away, home in games:
         k = game_kalshi(kalshi, away, home) if kalshi else None
@@ -205,6 +212,12 @@ def game_projections(sport: str, date: str, games: list, use_kalshi: bool = True
             log.info("game model: no ratings for %s @ %s", away, home)
             continue
         note = "game model: ESPN ratings" + (" + Kalshi" if k else "")
+        gh, ga = goalies.get(norm(home)), goalies.get(norm(away))
+        if gh or ga:   # a backup in net: extra goals for the other side
+            eh, ea = (gh or {}).get("extra", 0.0), (ga or {}).get("extra", 0.0)
+            g["margin"] += ea - eh
+            g["total"] += ea + eh
+            note += "; " + "; ".join(x["note"] for x in (gh, ga) if x)
         sd = SD.get(sport, 12.0)
         for market in ("moneyline", "spread"):
             rows.append({"sport": sport, "subject": home, "market": market,

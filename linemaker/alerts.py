@@ -5,9 +5,11 @@ Pre-tip   LINEMAKER_PRETIP_MINUTES (default 45) before each game, props for just
           reads of the day). Games tipping together are scanned together. Only posts when
           something clears the gates. ~5-10 credits per game.
 News      Every LINEMAKER_NEWS_MINUTES (default 12) ESPN's injury report is checked (free).
-          When a rotation player (18+ minutes) on a team that hasn't tipped yet changes to
-          Out, his game is re-priced with the teammate usage bump and posted. Capped at
-          LINEMAKER_NEWS_MAX_ALERTS per day (default 8). Basketball only.
+          When a rotation player on a team that hasn't started yet changes to Out (basketball:
+          18+ minutes; NFL: a QB, or 2.5+ catches / 6+ carries a game), his game is re-priced
+          with the teammate bump and posted. NHL: when a team's starting goalie changes, the
+          game is re-priced with the goalie adjustment. Capped at LINEMAKER_NEWS_MAX_ALERTS
+          per day (default 8).
 """
 import datetime as dt
 import json
@@ -18,7 +20,8 @@ from typing import Optional
 from .oddsapi import norm
 
 log = logging.getLogger("linemaker.alerts")
-NEWS_SPORTS = ("NBA", "WNBA")
+NEWS_SPORTS = ("NBA", "WNBA", "NFL")
+GOALIE_SPORTS = ("NHL",)
 
 
 def _env_int(name: str, default: Optional[int]) -> Optional[int]:
@@ -103,9 +106,12 @@ def event_for_team(events: list, team: str) -> Optional[dict]:
 
 
 def rotation_player(sport: str, athlete_id: str, date: str) -> bool:
-    from .adjustments import ROLE_MINUTES
+    from .adjustments import ROLE_MINUTES, _avg, _nfl_role, _recent
     from .gamelogs import game_log
     try:
+        if sport == "NFL":   # a QB, or a receiver / back with real volume
+            recent = _recent(game_log(sport, athlete_id, date), 5, "NFL")
+            return _nfl_role(recent) or (len(recent) >= 2 and _avg(recent, "passingAttempts") >= 20)
         games = [g for g in game_log(sport, athlete_id, date) if g["stats"].get("minutes")][:10]
     except Exception:
         return False
@@ -133,3 +139,17 @@ def news_events(sport: str, date: str, events: list, now: dt.datetime, previous:
         from .espn_projections import DISPLAY_NAMES
         hits.setdefault(ev["id"], (ev, []))[1].append(DISPLAY_NAMES.get(player, player.title()))
     return list(hits.values())
+
+
+def goalie_changes(previous: Optional[dict], current: dict) -> list:
+    """Teams whose starting goalie changed since the last check: [(team key, new goalie)].
+    previous/current: norm(team) -> [goalie, confirmed]. The first look of the day only
+    remembers (None -> [])."""
+    if previous is None:
+        return []
+    out = []
+    for team, (goalie, _confirmed) in current.items():
+        old = previous.get(team)
+        if old and old[0] != goalie:
+            out.append((team, goalie))
+    return out

@@ -213,9 +213,17 @@ def _apply_usage(sport: str, date: str, rows: list, index: dict, hurt: dict):
                 if got:
                     logs[got[0]] = got[1]
         boosts = usage_boosts(logs, by_team[team], sport)
+        qb = None
+        if sport == "NFL":
+            from .adjustments import BACKUP_QB, backup_qb
+            qb = backup_qb(logs, by_team[team])
         for r in rows:
             if norm(r["_team"]) != team:
                 continue
+            if qb and r["market"].lower() in BACKUP_QB and r["subject"] != qb:
+                f = BACKUP_QB[r["market"].lower()]
+                r["mean"] = f"{float(r['mean']) * f:.3f}"
+                r["notes"] += f"; ×{f:.2f} with {qb} (QB) out"
             b = boosts.get(r["subject"]) or {}
             m = r["market"].lower()
             add = (sum(b.get(k, 0.0) for k in ("points", "rebounds", "assists")) if m == "pra"
@@ -223,6 +231,26 @@ def _apply_usage(sport: str, date: str, rows: list, index: dict, hurt: dict):
             if add > 0.05:
                 r["mean"] = f"{float(r['mean']) + add:.3f}"
                 r["notes"] += f"; +{add:.1f} with {', '.join(b['_why'])} out"
+
+
+GOALIE_MARKETS = ("hockey points", "anytime goals")
+
+
+def _apply_goalies(date: str, rows: list):
+    """Opposing skaters' points and goals move with a backup goalie in net (see nhl_goalies)."""
+    from .nhl_goalies import goalie_effects, skater_factor
+    try:
+        effects = goalie_effects(date)
+    except Exception as e:
+        log.warning("nhl goalies unavailable: %s", e)
+        return
+    for r in rows:
+        g = effects.get(norm(r.get("_opp", "")))
+        if not g or r["market"].lower() not in GOALIE_MARKETS:
+            continue
+        f = skater_factor(g["extra"])
+        r["mean"] = f"{float(r['mean']) * f:.3f}"
+        r["notes"] += f"; ×{f:.2f}: {g['note']}"
 
 
 def warm_up(sport: str, date: str):
@@ -302,7 +330,7 @@ def espn_projections(sport: str, date: str, wanted: dict) -> list:
             row = {"sport": sport, "subject": name, "market": market, "mean": f"{mean:.3f}",
                    "stdev": f"{sd:.3f}",
                    "notes": f"ESPN game-log model ({len(games)} games); {team}{extra}",
-                   "_team": team, "_games": games}
+                   "_team": team, "_opp": opp, "_games": games}
             if hurt.get(norm(name)):
                 row["injury_status"] = hurt[norm(name)]
             rows.append(row)
@@ -312,10 +340,13 @@ def espn_projections(sport: str, date: str, wanted: dict) -> list:
     with ThreadPoolExecutor(max_workers=12) as pool:
         for rows in pool.map(one, wanted.items()):
             out += rows
-    if sport in BASKETBALL:
+    if sport in BASKETBALL or sport == "NFL":
         _apply_usage(sport, date, out, index, hurt)
+    if sport == "NHL":
+        _apply_goalies(date, out)
     for r in out:
         r.pop("_team", None)
+        r.pop("_opp", None)
         r.pop("_games", None)
     log.info("espn projections %s: %d players asked, %d projections built", sport, len(wanted), len(out))
     return out
