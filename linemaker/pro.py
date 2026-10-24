@@ -75,6 +75,16 @@ def sport_cfg(cfg, sport: str, cache: dict):
 START_WEIGHTS = {"UFC": 0.35}   # rough first-version models start leaning on the market
 
 
+def _move_limit() -> Optional[float]:
+    raw = os.environ.get("LINEMAKER_MAX_MOVE_AGAINST", "0.04").strip().lower()
+    if raw in ("", "off", "no", "false"):
+        return None
+    try:
+        return float(raw)
+    except ValueError:
+        return 0.04
+
+
 def _start_weight(sport: str, default: float) -> float:
     """A sport's weight before the auto-tuner has enough of it: LINEMAKER_<SPORT>_MODEL_WEIGHT
     if set, else the built-in start (UFC 0.35), else the overall weight."""
@@ -146,6 +156,9 @@ class ProConfig:
     # a sharp market is more often stale data (missed injury, moved line) than a real edge.
     min_gap: float = field(default_factory=lambda: _env_num("LINEMAKER_MIN_GAP", float) or 0.0)
     max_gap: Optional[float] = field(default_factory=lambda: _env_num("LINEMAKER_MAX_GAP", float))
+    # A model pick is dropped when the sharp consensus has moved this far against its side since
+    # the first read of the day (someone knows something: injury, lineup, weather). Blank = off.
+    max_move_against: Optional[float] = field(default_factory=lambda: _move_limit())
     min_ev: Optional[float] = field(default_factory=lambda: _env_num("LINEMAKER_MIN_EV", float))
     # Prop overs need a bigger gap: graded results showed the model's over leans run hot
     # (overs it liked by a little hit at the market's rate, not the model's). 0 / off = same
@@ -624,6 +637,12 @@ def run_pro(markets: list, slate_date: str, cfg: ProConfig, freezer=None,
         if tracker is not None:
             tracker.record(ev)
         c = sport_cfg(cfg, m.sport, per_sport)   # this sport's own gates, if any
+        if cfg.pick_tag == "model" and cfg.sport_settings:
+            from .autotune import pruned
+            why = pruned(m.sport, m.market)
+            if why:
+                res.passes.append((ev.best.label, f"market paused, it keeps losing ({why})"))
+                continue
         if c.rank_by == "prob":
             in_window = [s for s in ev.sides if _window_ok(s.best_odds, c)]
             if in_window:
@@ -646,6 +665,14 @@ def run_pro(markets: list, slate_date: str, cfg: ProConfig, freezer=None,
             res.passes.append((best.label, f"gap {best.gap:+.1%} too large to trust: check injuries "
                                            f"and the line before betting"))
             continue
+        if (c.max_move_against and cfg.pick_tag == "model" and tracker is not None
+                and m.key in tracker.records and len(m.side_keys) == 2):
+            from .tracking import market_move
+            move = market_move(tracker.records[m.key], best.side)
+            if move is not None and move < -c.max_move_against:
+                res.passes.append((best.label, f"sharp market moved {move * 100:+.1f} pts against this "
+                                               "side today (likely news the model hasn't seen)"))
+                continue
         if c.min_ev is not None and best.ev / 100 < c.min_ev:
             res.passes.append((best.label, f"EV {best.ev / 100:+.1%} per dollar below "
                                            f"{c.min_ev:.0%} floor"))

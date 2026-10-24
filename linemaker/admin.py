@@ -25,6 +25,7 @@ KEY_RE = re.compile(r"^[A-Z][A-Z0-9_]{1,80}$")
 STARTUP_ONLY = re.compile(r"DISCORD_TOKEN|CHANNEL|POST_TIME|_TIME$|GRADE_TIME|CHAT_CHANNELS|PROVIDER|"
                           r"ANTHROPIC|GEMINI|MODEL$|OWNER_IDS")
 _LOG = collections.deque(maxlen=2000)
+_ERRORS = collections.deque(maxlen=200)   # (unix time, message) of ERROR-level log lines
 _OWNERS = {}
 
 
@@ -53,6 +54,9 @@ class _Buffer(logging.Handler):
     def emit(self, record):
         try:
             _LOG.append(self.format(record))
+            if record.levelno >= logging.ERROR:
+                import time as _t
+                _ERRORS.append((_t.time(), record.getMessage()))
         except Exception:
             pass
 
@@ -191,4 +195,55 @@ def changelog() -> list:
         l = l.lstrip("# ").strip()
         if l and l != "(no changes yet)":
             out.append(l)
+    return out
+
+
+# ---- health alerts ---------------------------------------------------------------------
+# Checked every 30 minutes; each kind of warning is posted at most once per HEALTH_QUIET
+# hours so a lasting problem doesn't flood the channel.
+HEALTH_QUIET = {"credits": 24, "errors": 6, "update": 24}
+
+
+def health_problems(now: Optional[float] = None) -> list:
+    """[(kind, message)] for anything wrong right now."""
+    import time
+    now = now or time.time()
+    out = []
+    limit = int(os.environ.get("LINEMAKER_CREDIT_ALERT", "2000") or 0)
+    if limit:
+        try:
+            from .oddsapi import key_quotas
+            rows = key_quotas()
+            left = sum(r[2] for r in rows if r[2] is not None)
+            if rows and left < limit:
+                out.append(("credits", f"💳 **Odds API credits are low:** {left:,} left across "
+                                       f"{len(rows)} key(s) (alert below {limit:,}). Add a key with "
+                                       "/set or cut usage (LINEMAKER_CLOSE_MINUTES blank turns "
+                                       "closing reads off)."))
+        except Exception as e:
+            out.append(("credits", f"💳 Couldn't check Odds API credits: {_scrub(str(e))[:200]}"))
+    recent = [m for t, m in _ERRORS if now - t < 3600]
+    if len(recent) >= int(os.environ.get("LINEMAKER_ERROR_ALERT", "5") or 0) > 0:
+        out.append(("errors", f"⚠️ **{len(recent)} errors in the last hour.** Latest: "
+                              f"`{_scrub(recent[-1])[:300]}` · /logs search:ERROR for the rest."))
+    bad = os.path.join(root_dir(), ".git", "linemaker-bad-commit")
+    if os.path.exists(bad):
+        try:
+            commit = open(bad).read().strip()[:7]
+        except OSError:
+            commit = "?"
+        out.append(("update", f"🛑 **An update failed to load and was rolled back** (commit {commit}). "
+                              "The bot is still running the previous version; tell Claude."))
+    return out
+
+
+def due_alerts(problems: list, sent: dict, now: Optional[float] = None) -> list:
+    """The problems not posted within their quiet period; updates `sent` {kind: unix time}."""
+    import time
+    now = now or time.time()
+    out = []
+    for kind, msg in problems:
+        if now - sent.get(kind, 0) >= HEALTH_QUIET.get(kind, 6) * 3600:
+            sent[kind] = now
+            out.append(msg)
     return out

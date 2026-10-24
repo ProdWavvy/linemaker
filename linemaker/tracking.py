@@ -374,3 +374,38 @@ def clv_lines(records: list) -> list:
     out.append("Consistently positive = the model sees moves before the market makes them, the "
                "best early sign of a real edge (long before win/loss settles down).")
     return out
+
+
+def snapshot_fair(snap: dict, side: str) -> Optional[float]:
+    """Sharp-weighted no-vig probability of `side` (A/B) in one price snapshot."""
+    from .devig import no_vig
+    from .pro import book_key, sharp_weights
+    other = "B" if side == "A" else "A"
+    a, b = snap.get(side) or {}, snap.get(other) or {}
+    weights = sharp_weights()
+    num = den = 0.0
+    for book, odds in a.items():
+        if odds is None or b.get(book) is None:
+            continue
+        w = weights.get(book_key(book), 1.0)
+        if w <= 0:
+            continue
+        num += w * no_vig(odds, b[book])[0]
+        den += w
+    return num / den if den else None
+
+
+def market_move(rec: dict, side: str, min_minutes: float = 20) -> Optional[float]:
+    """How far the consensus moved toward (+) or against (-) `side` between the first and the
+    latest price snapshot of the day (None until they're min_minutes apart)."""
+    hist = rec.get("history") or []
+    if len(hist) < 2:
+        return None
+    try:
+        span = (dt.datetime.fromisoformat(hist[-1]["t"]) - dt.datetime.fromisoformat(hist[0]["t"]))
+    except (KeyError, ValueError):
+        return None
+    if span.total_seconds() < min_minutes * 60:
+        return None
+    first, last = snapshot_fair(hist[0], side), snapshot_fair(hist[-1], side)
+    return None if first is None or last is None else last - first

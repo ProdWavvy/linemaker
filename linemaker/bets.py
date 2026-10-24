@@ -148,3 +148,44 @@ def summary(days: Optional[int] = 30, today: Optional[str] = None) -> dict:
             "push": sum(b["status"] == "push" for b in done), "staked": staked, "profit": profit,
             "roi": profit / staked if staked else None, "by_kind": by_kind,
             "by_sport": by_sport}
+
+
+def _implied(odds: int) -> float:
+    return 100 / (odds + 100) if odds > 0 else -odds / (-odds + 100)
+
+
+def leg_clv(leg: dict, cache: dict) -> Optional[float]:
+    """Implied probability of the closing price at the leg's book minus the price you got
+    (positive = you beat the close). None until the game has started (the line hasn't closed)
+    or when the book's closing price wasn't seen."""
+    rec = _record(leg, cache)
+    if not rec or not rec.get("history") or leg.get("odds") is None:
+        return None
+    start = rec.get("commence") or ""
+    if not start or dt.datetime.fromisoformat(start.replace("Z", "+00:00")) > dt.datetime.now(dt.timezone.utc):
+        return None
+    from .pro import book_key
+    want = book_key(leg.get("book") or "")
+    for snap in reversed(rec["history"]):
+        close = next((o for b, o in (snap.get(leg["side"]) or {}).items() if book_key(b) == want), None)
+        if close is not None:
+            return _implied(close) - _implied(leg["odds"])
+    return None
+
+
+def clv_summary(days: Optional[int] = 30, today: Optional[str] = None) -> dict:
+    """Closing-line value across your logged legs (live bets left out: they close in-game)."""
+    end = dt.date.fromisoformat(today) if today else dt.date.today()
+    start = end - dt.timedelta(days=days) if days else None
+    cache, vals = {}, []
+    for b in load_bets():
+        if start and dt.date.fromisoformat(b["placed"][:10]) < start:
+            continue
+        for leg in b.get("legs", []):
+            if leg.get("live") or b.get("kind") == "pp":
+                continue
+            v = leg_clv(leg, cache)
+            if v is not None:
+                vals.append(v)
+    return {"n": len(vals), "beat": sum(v > 0.0005 for v in vals) / len(vals) if vals else None,
+            "avg": sum(vals) / len(vals) if vals else None}

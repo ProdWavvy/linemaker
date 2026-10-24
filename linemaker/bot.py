@@ -866,6 +866,8 @@ class LinemakerBot(discord.Client):
         if self.alert_channel_id() and news_minutes():
             news_loop.change_interval(minutes=news_minutes())
             news_loop.start()
+        if self.alert_channel_id() and not health_loop.is_running():
+            health_loop.start()
         weekly_at = os.environ.get("LINEMAKER_WEEKLY_TIME", "10:00").strip()
         if weekly_at and self.alert_channel_id():
             h, m = weekly_at.split(":")
@@ -1194,6 +1196,12 @@ async def record_cmd(interaction: discord.Interaction, days: Optional[int] = 30)
         else:
             lines.append("No settled bets yet. Tap **📝 I bet this** on a pick (or **Log parlay**) "
                          "after you place it, and it settles automatically after grading.")
+        from .bets import clv_summary
+        c = await asyncio.to_thread(clv_summary, days or None, today())
+        if c["n"]:
+            lines += ["", f"📉 **Vs the closing line:** you beat it on **{c['beat']:.0%}** of {c['n']} legs, "
+                          f"**{c['avg'] * 100:+.2f} pts** on average. Beating the close over time is the "
+                          "best sign your bets have a real edge, even before results catch up."]
         if s["open"]:
             lines += ["", f"**Open ({len(s['open'])}):** " + "; ".join(
                 (b["legs"][0]["label"] if b["kind"] == "single" else f"{len(b['legs'])}-leg parlay")
@@ -1674,6 +1682,26 @@ async def _goalie_news(channel, date: str, now, sent: int, cap: int):
                              "nothing cleared the gates, so the books have likely already adjusted.")))
 
 
+@tasks.loop(minutes=30)
+async def health_loop():
+    """Post a warning when credits run low, errors pile up, or an update was rolled back."""
+    from .admin import due_alerts, health_problems
+    from .alerts import load_state, save_state
+    channel = bot.get_channel(bot.alert_channel_id() or 0)
+    if channel is None:
+        return
+    try:
+        problems = await asyncio.to_thread(health_problems)
+    except Exception:
+        log.exception("health check failed")
+        return
+    sent = load_state("health_sent.json", {})
+    msgs = due_alerts(problems, sent)
+    if msgs:
+        save_state("health_sent.json", sent)
+        await channel.send("\n\n".join(msgs)[:1990])
+
+
 @tasks.loop(time=dt.time(10, 0, tzinfo=TZ))
 async def weekly_post():
     """Monday (LINEMAKER_WEEKLY_DAY, 0 = Monday) summary of the last 7 days."""
@@ -1704,9 +1732,17 @@ async def daily_grade():
         log.exception("daily grade failed")
         return
     log.info("daily grade %s: %d tracked markets graded", day, tracked)
-    await _warm_up()
     channel_id = os.environ.get("LINEMAKER_CHANNEL_ID") or bot.home
     channel = bot.get_channel(int(channel_id)) if channel_id else None
+    from .backup import configured, run_backup
+    if configured():   # everything learned overnight goes to the private backup repo
+        try:
+            log.info(await asyncio.to_thread(run_backup))
+        except Exception as e:
+            log.error("backup failed: %s", e)
+            if channel is not None:
+                await channel.send(f"💾⚠️ Nightly backup failed: {str(e)[:300]}")
+    await _warm_up()
     if channel is None or not (summary or tracked):
         return
     embeds[0].title = f"📈 Morning Grade · {day}"
@@ -1809,6 +1845,18 @@ async def envchanges_cmd(interaction: discord.Interaction):
     if log_lines:
         text += ["", "**Change log** (newest first):"] + [f"• {l}" for l in log_lines[:15]]
     await interaction.response.send_message("\n".join(text)[:1990], ephemeral=True)
+
+
+@bot.tree.command(name="backup", description="Owner: back up tracking, weights and bets to your private GitHub repo now")
+async def backup_cmd(interaction: discord.Interaction):
+    if not await _owner_only(interaction):
+        return
+    await interaction.response.defer(thinking=True, ephemeral=True)
+    try:
+        from .backup import run_backup
+        await interaction.followup.send(await asyncio.to_thread(run_backup), ephemeral=True)
+    except Exception as e:
+        await _report_error(interaction, e)
 
 
 @bot.tree.command(name="restart", description="Owner: restart the bot on the server")

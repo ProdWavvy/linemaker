@@ -254,6 +254,42 @@ def tune_bias(records: list, current: dict) -> tuple:
     return bias, changes
 
 
+# ---- pausing markets that keep losing ---------------------------------------------------
+# A market (e.g. "NBA threes") stops producing picks when, over its last PRUNE_MIN+ graded
+# model picks, it has lost money (ROI below -3%) AND the picks have closed worse than they
+# were taken (average closing-line value below 0). Both together are the signature of a
+# market the model reads badly, not of bad luck. It's checked again every grading run and
+# comes back once either turns. LINEMAKER_PRUNE=off disables it.
+PRUNE_MIN, PRUNE_ROI = 100, -0.03
+
+
+def tune_prune(records: list) -> tuple:
+    """({"NBA threes": reason}, [changes vs before])."""
+    if os.environ.get("LINEMAKER_PRUNE", "on").strip().lower() in ("off", "0", "no", "false"):
+        return {}, []
+    from .reports import pick_record
+    from .tracking import pick_clv
+    groups = {}
+    for r in records:
+        if r.get("picked") and r.get("result") and r.get("pick_odds") is not None:
+            groups.setdefault(f"{r.get('sport')} {r.get('market')}", []).append(r)
+    out = {}
+    for name, recs in groups.items():
+        pr = pick_record(recs)
+        n = pr["won"] + pr["lost"]
+        clvs = [c["prob"] for c in (pick_clv(r) for r in recs) if c]
+        if n < PRUNE_MIN or len(clvs) < PRUNE_MIN // 2:
+            continue
+        clv = sum(clvs) / len(clvs)
+        if pr["roi"] is not None and pr["roi"] < PRUNE_ROI and clv < 0:
+            out[name] = f"{n} picks, ROI {pr['roi']:+.1%}, closing-line value {clv * 100:+.2f} pts"
+    return out, []
+
+
+def pruned(sport: str, market: str) -> Optional[str]:
+    return load_weights().get("pruned", {}).get(f"{sport} {market}")
+
+
 def bias_for(sport: str, market: str) -> float:
     return float(load_weights().get("bias", {}).get(f"{sport} {market}", 1.0))
 
@@ -280,6 +316,10 @@ def run_autotune(tracking_dir: str, today: str) -> list:
     current = load_weights()
     new, changes = tune(records, current)
     new["bias"], bias_changes = tune_bias(records, current)
+    new["pruned"], _ = tune_prune(records)
+    before = current.get("pruned", {})
+    bias_changes += [f"⏸️ Paused {k}: {v}" for k, v in new["pruned"].items() if k not in before]
+    bias_changes += [f"▶️ {k} back on (no longer losing on both counts)" for k in before if k not in new["pruned"]]
     if bias_changes:
         changes = changes + bias_changes
         new["history"] = (new.get("history", []) + [{"date": dt.date.today().isoformat(),
@@ -312,6 +352,8 @@ def current_summary() -> str:
     if w.get("live_weight") is not None:
         parts.append(f"live {w['live_weight']:.2f}")
     out = "Auto-tuned weights: " + ", ".join(parts)
+    if w.get("pruned"):
+        out += "\nPaused markets: " + ", ".join(f"{k} ({v})" for k, v in sorted(w["pruned"].items()))
     if w.get("bias"):
         out += "\nProjection corrections: " + ", ".join(f"{k} ×{v:.2f}" for k, v in sorted(w["bias"].items()))
     return out
