@@ -72,6 +72,10 @@ def grade_day(date: str, rows: list, auto: bool):
     tracked = apply_results(track, rows) if rows and os.path.exists(track) else 0
     from .bets import settle
     settled = settle()
+    from .parlay_track import grade_parlays
+    n_parlays = grade_parlays(date)
+    if n_parlays:
+        summary.append(f"- 🎰 Auto-parlays graded: **{n_parlays}**")
     if settled:
         summary.append(f"- 🧾 Settled **{settled}** of your logged bets (`/record` for your P/L)")
     if tracked:

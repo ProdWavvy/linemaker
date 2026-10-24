@@ -143,8 +143,9 @@ async def route_component(interaction: discord.Interaction) -> bool:
         handler = _pp_log(key, int(parts[3]))
     elif kind == "mkparlay":
         handler = CompactView._parlay_picker(key)
-    elif kind == "slip":
-        handler = _slip_tap(key, parts[3], parts[4], parts[5])
+    elif kind == "slip":   # lm:slip:key:mask:page[:boost]:action (older slips have no boost)
+        handler = (_slip_tap(key, parts[3], parts[4], parts[6], parts[5]) if len(parts) >= 7
+                   else _slip_tap(key, parts[3], parts[4], parts[5]))
     elif kind == "notes":
         handler = CompactView._show_notes(key)
     elif kind == "board":
@@ -527,29 +528,34 @@ class CompactView(discord.ui.View):
 PARLAY_BOOKS = ("FanDuel", "DraftKings")
 
 
-def parlay_card(legs: list, books: Optional[tuple] = None) -> tuple:
+def parlay_card(legs: list, books: Optional[tuple] = None, boost: float = 0.0) -> tuple:
     """(embed, view) for a parlay you built: price, payout and hit chance at each book,
-    with Bet buttons that load every leg and Log buttons."""
+    with Bet buttons that load every leg and Log buttons. boost: a profit boost (0.25 = +25%)."""
     from .betlinks import parlay_link
     from .odds import fmt_odds as _fo
     from .parlay import custom_parlays, leg_price, sgp_check
+    from .parlay_math import leg_value
     from .staking import _money, stake_tier
     books = tuple(books or PARLAY_BOOKS)
     short = {"FanDuel": "FD", "DraftKings": "DK"}
     lines = []
     for ev in legs:
-        prices = " · ".join(f"{short.get(b, b)} {_fo(o) if o else '—'}"
-                            for b, o in ((b, leg_price(ev, b)) for b in books))
-        lines.append(f"• **{ev.best.label}** · {prices} · {ev.best.blended:.0%}")
+        quotes = [(b, leg_price(ev, b)) for b in books]
+        prices = " · ".join(f"{short.get(b, b)} {_fo(o) if o else '—'}" for b, o in quotes)
+        best = max((leg_value(ev, o) for _b, o in quotes if o), default=None)
+        val = "" if best is None else (f" · ✅ {best - 1:+.0%} EV" if best > 1 else f" · {best - 1:+.0%} EV")
+        lines.append(f"• **{ev.best.label}** · {prices} · {ev.best.blended:.0%}{val}")
     embed = discord.Embed(title=f"🎰 Your {len(legs)}-Leg Parlay", color=0xF1C40F,
                           description="\n".join(lines)[:3500])
-    built = custom_parlays(legs, books)
+    built = custom_parlays(legs, books, boost)
     view = discord.ui.View(timeout=None)
     for p, missing in built:
         stake = stake_tier(p.prob, p.american, parlay=True)
         from .discord_format import _style
         name, _tag, emoji, _c = _style(p.book)
-        value = (f"**{_fo(p.american)}** · hit chance **{p.prob:.0%}** · EV {p.ev:+.1f}%\n"
+        corr = f" ({p.indep_prob:.0%} if independent)" if abs(p.prob - p.indep_prob) >= 0.01 else ""
+        value = (f"**{_fo(p.american)}**" + (f" with the +{boost:.0%} boost" if boost else "")
+                 + f" · hit chance **{p.prob:.0%}**{corr} · EV {p.ev:+.1f}%\n"
                  + (f"{_money(stake)} pays **{_money(stake * p.decimal)}**" if stake else
                     f"$10 pays **${10 * p.decimal:,.2f}**"))
         if missing:
@@ -578,12 +584,11 @@ def parlay_card(legs: list, books: Optional[tuple] = None) -> tuple:
                         value=("Neither FanDuel nor DraftKings" if len(books) > 1 else books[0])
                               + " offers at least two of these legs.",
                         inline=False)
-    notes = ["Hit chance multiplies each leg's estimate, so it assumes the legs are independent. "
-             "Books' parlay prices can differ slightly from the multiplied odds."]
+    notes = ["✅ = leg is +EV at its best price. Hit chance counts same-game legs moving "
+             "together. Books' parlay prices can differ slightly from the multiplied odds."]
     if any(sgp_check(legs, b)["groups"] for b in books):
-        notes.insert(0, "Same-game legs move together, so the hit chance here (which treats legs "
-                        "as independent) is only a guide for those; check the book's SGP price "
-                        "on the slip before you bet.")
+        notes.insert(0, "Same-game legs: the book prices them as an SGP, usually lower than the "
+                        "multiplied odds shown; check its price on the slip before you bet.")
     embed.set_footer(text=" ".join(n.replace("**", "") for n in notes)[:2048])
     return embed, view
 
@@ -613,7 +618,36 @@ def _show_board(key: str, kind: str, mask: Optional[int] = None):
 SLIP_PAGE = 10   # leg buttons per page (2 rows); then the views, the controls, Bet / Log
 
 
-def slip_message(key: str, mask: int = 0, page: int = 0) -> tuple:
+BOOSTS = (0.0, 0.10, 0.20, 0.25, 0.30, 0.50, 1.00)   # profit boosts the 🚀 button cycles through
+
+
+def best_next_leg(picks: list, chosen: list, books) -> Optional[int]:
+    """The leg that makes the slip worth the most (correlated hit chance x payout) at the
+    book that prices it best, among legs the book will take on one ticket."""
+    from .parlay import leg_price, price, sgp_check
+    from .parlay_math import leg_value
+    best, best_val = None, None
+    for i, d in enumerate(picks):
+        if i in chosen:
+            continue
+        legs = [picks[j]["ev"] for j in chosen] + [d["ev"]]
+        for book in (books or PARLAY_BOOKS):
+            quotes = [(ev, leg_price(ev, book)) for ev in legs]
+            if any(o is None for _e, o in quotes):
+                continue
+            if len(legs) == 1:
+                val = leg_value(*quotes[0])
+            else:
+                if sgp_check(legs, book)["blocked"]:
+                    continue
+                p = price(book, quotes)
+                val = p.prob * p.decimal
+            if best_val is None or val > best_val:
+                best, best_val = i, val
+    return best
+
+
+def slip_message(key: str, mask: int = 0, page: int = 0, boost_i: int = 0) -> tuple:
     """(embed, view) for the live slip: one button per leg, and every tap re-prices it
     (hit chance, EV, payout, odds at each book). State rides in the buttons' custom_ids
     (pool key, chosen legs as a bitmask, page), so the slip never expires and survives
@@ -622,8 +656,9 @@ def slip_message(key: str, mask: int = 0, page: int = 0) -> tuple:
     detail = PICK_DETAILS[key]
     picks, books = detail["picks"], detail.get("books")
     chosen = [i for i in range(len(picks)) if mask >> i & 1]
+    boost_i = boost_i % len(BOOSTS)
     if len(chosen) >= 2:
-        embed, slip = parlay_card([picks[i]["ev"] for i in chosen], books)
+        embed, slip = parlay_card([picks[i]["ev"] for i in chosen], books, BOOSTS[boost_i])
         embed.title += " · live slip"
     else:
         slip = None
@@ -639,7 +674,7 @@ def slip_message(key: str, mask: int = 0, page: int = 0) -> tuple:
     pages = max(1, -(-len(picks) // SLIP_PAGE))
     page = min(max(page, 0), pages - 1)
     view = discord.ui.View(timeout=None)
-    base = f"lm:slip:{key}:{mask:x}:{page}"
+    base = f"lm:slip:{key}:{mask:x}:{page}:{boost_i}"
     short = {"FanDuel": "FD", "DraftKings": "DK"}
     for n, i in enumerate(range(page * SLIP_PAGE, min(len(picks), (page + 1) * SLIP_PAGE))):
         ev, on = picks[i]["ev"], mask >> i & 1
@@ -655,6 +690,9 @@ def slip_message(key: str, mask: int = 0, page: int = 0) -> tuple:
         for kind, (label, emoji, _fn) in BOARDS.items():
             view.add_item(discord.ui.Button(label=label, emoji=emoji, row=2,
                                             custom_id=f"lm:sboard:{key}:{mask:x}:{kind}"))
+    if len(chosen) < len(picks):
+        view.add_item(discord.ui.Button(label="Best next leg", emoji="➕", row=2,
+                                        style=discord.ButtonStyle.primary, custom_id=f"{base}:s"))
     if pages > 1:
         view.add_item(discord.ui.Button(label="Prev", emoji="◀️", row=3, disabled=page == 0,
                                         custom_id=f"{base}:p{page - 1}"))
@@ -664,13 +702,18 @@ def slip_message(key: str, mask: int = 0, page: int = 0) -> tuple:
                                     style=discord.ButtonStyle.primary, custom_id=f"{base}:all"))
     if mask:
         view.add_item(discord.ui.Button(label="Clear", emoji="🧹", row=3, custom_id=f"{base}:clr"))
+    if len(chosen) >= 2:
+        nxt = BOOSTS[(boost_i + 1) % len(BOOSTS)]
+        view.add_item(discord.ui.Button(
+            label=(f"Boost +{BOOSTS[boost_i]:.0%} (tap: " + (f"+{nxt:.0%})" if nxt else "off)")) if boost_i
+            else "Add a profit boost", emoji="🚀", row=3, custom_id=f"{base}:b"))
     for item in (slip.children if slip else []):     # Bet / Log for the current slip
         item.row = 4
         view.add_item(item)
     return embed, view
 
 
-def _slip_tap(key: str, mask: str, page: str, action: str):
+def _slip_tap(key: str, mask: str, page: str, action: str, boost: str = "0"):
     async def callback(interaction: discord.Interaction):
         if key not in PICK_DETAILS:
             await interaction.response.send_message(
@@ -678,8 +721,17 @@ def _slip_tap(key: str, mask: str, page: str, action: str):
                 ephemeral=True)
             return
         PICK_DETAILS[key] = PICK_DETAILS.pop(key)    # in use: keep it from being pruned
-        m, pg, n = int(mask, 16), int(page), len(PICK_DETAILS[key]["picks"])
-        if action.startswith("t"):
+        m, pg, n, bi = int(mask, 16), int(page), len(PICK_DETAILS[key]["picks"]), int(boost or 0)
+        if action == "b":
+            bi = (bi + 1) % len(BOOSTS)
+        elif action == "s":
+            d = PICK_DETAILS[key]
+            nxt = await asyncio.to_thread(best_next_leg, d["picks"], [i for i in range(n) if m >> i & 1],
+                                          d.get("books"))
+            if nxt is not None:
+                m |= 1 << nxt
+                pg = nxt // SLIP_PAGE
+        elif action.startswith("t"):
             m ^= 1 << int(action[1:])
         elif action.startswith("p"):
             pg = int(action[1:])
@@ -687,7 +739,7 @@ def _slip_tap(key: str, mask: str, page: str, action: str):
             m = (1 << n) - 1
         elif action == "clr":
             m = 0
-        embed, view = slip_message(key, m, pg)
+        embed, view = slip_message(key, m, pg, bi)   # builds a View: needs the event loop
         await interaction.response.edit_message(content=None, embed=embed, view=view)
         await asyncio.to_thread(save_details)
     return callback

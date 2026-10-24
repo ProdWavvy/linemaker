@@ -59,6 +59,10 @@ def weekly_lines(today: str) -> list:
     out.append("**Weights:** " + ("; ".join(changes) if changes else "no changes this week")
                + f"\n{current_summary()}")
     graded = sum(1 for r in recs if r.get("result"))
+    from .parlay_track import load_range, summary_lines
+    parlay_lines = summary_lines(load_range(7, today))
+    if parlay_lines:
+        out.append("🎰 **Auto-parlays**\n" + "\n".join(parlay_lines))
     working = whats_working(recs)
     if working:
         out.append("🔍 **What's working**\n" + "\n".join(working))

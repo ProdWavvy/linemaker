@@ -757,40 +757,56 @@ def volume_messages(sections: list, date: str, cfg, title: str = "") -> list:
                               "books": books}))
         from .betlinks import parlay_link
         parlays = build_parlays(legs, books=books) + build_sgps(legs, books=books)
+        from .parlay_math import leg_value
+        try:
+            from .parlay_track import log_parlays
+            log_parlays(parlays, date)
+        except Exception:
+            pass   # tracking must never block a card
         for book in books:
             mine = [p for p in parlays if p.book == book]
+            value = [p for p in mine if p.style == "value"]
+            # one value parlay per book (the best EV) keeps the card readable
+            mine = [p for p in mine if p.style != "value"] + ([max(value, key=lambda p: p.ev)] if value else [])
             if not mine:
                 continue
             bname, _tag, emoji, colour = _style(book)
             e = discord.Embed(title=f"{emoji} {bname} Parlays", color=colour)
             buttons = []
             for p in mine:
-                legs_txt = "\n".join(f"• {ev.best.label} ({fmt_odds(o)})" for ev, o in p.legs)
+                legs_txt = "\n".join(
+                    f"• {ev.best.label[:42]} ({fmt_odds(o)}) {'✅' if leg_value(ev, o) > 1 else ''}"
+                    for ev, o in p.legs)
                 url = parlay_link(p)
                 tag = f" {p.kind}" if p.kind else ""
                 slip = f"\n[🧾 Open this {len(p.legs)}-leg{tag} slip on {bname}]({url})" if url else ""
                 if url:
                     buttons.append((f"{len(p.legs)}-leg{tag} on {bname}", url))
                 from .staking import stake_line
-                body = (f"{legs_txt}\nHit chance **{_pct(p.prob)}** · $100 pays "
+                corr = (f" ({_pct(p.indep_prob)} if independent)"
+                        if abs(p.prob - p.indep_prob) >= 0.01 else "")
+                body = (f"{legs_txt}\nHit chance **{_pct(p.prob)}**{corr} · $100 pays "
                         f"**${p.payout:,.0f}** · EV {fmt_money(p.ev)}\n"
                         + stake_line(p.prob, p.american, parlay=True))
                 if p.kind:
                     body += f"\n🔗 Same-game legs: {bname} prices the {p.kind} itself, lower than shown."
-                e.add_field(name=f"{'🔗' if p.kind else '🔒'} {len(p.legs)}-Leg{tag} · {fmt_odds(p.american)}",
+                icon = "🔗" if p.kind else "💰" if p.style == "value" else "🔒"
+                label = " Value" if p.style == "value" and not p.kind else ""
+                e.add_field(name=f"{icon} {len(p.legs)}-Leg{tag}{label} · {fmt_odds(p.american)}",
                             value=body + slip if len(body + slip) <= 1024 else _clip(body, 1024),
                             inline=False)
-            e.set_footer(text="🔒 one leg per game · 🔗 same-game legs on one ticket · payout "
-                              "multiplies the legs' prices; the book's parlay price may differ "
-                              "(more so for SGPs) · check every leg before you bet")
+            e.set_footer(text="🔒 safest legs, one per game · 💰 legs that beat their price (+EV) · 🔗 "
+                              "same-game legs on one ticket · ✅ leg is +EV at this price · hit chance "
+                              "counts legs from one game moving together · check every leg before you bet")
             out.append(([e], {"links": buttons, "parlays": mine}))
     notes = discord.Embed(title="🧠 Volume Mode, Honestly", color=PURPLE, description=(
-        "These legs are picked to **hit often**, not because the price is wrong. Parlaying "
-        "heavy favorites multiplies the book's margin on every leg, so the expected value of a "
-        "parlay is usually slightly negative even when each leg is likely. Treat it as "
-        "entertainment money: small stakes, and fewer legs is safer than more.\n\n"
-        "Legs from the same game are never combined, but legs from different games can still "
-        "move together (late scratches, blowouts)."))
+        "🔒 parlays are built to **hit often**, not because the price is wrong. Parlaying "
+        "heavy favorites multiplies the book's margin on every leg, so they're usually slightly "
+        "negative EV even when each leg is likely; legs priced 2%+ worse than fair are left out "
+        "when there are enough others. 💰 parlays use only legs that beat their price, so they "
+        "pay more and are +EV, but hit less often. Small stakes either way; fewer legs is safer.\n\n"
+        "Hit chances on same-game legs account for them moving together (a shootout lifts "
+        "every over at once). Legs from different games can still move together on late news."))
     out.append(([notes, _scoping([(s, r, ex["profiles"]) for s, r, ex in sections])], None))
     return out
 

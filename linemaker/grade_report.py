@@ -148,6 +148,15 @@ def market_picks_embed(main: dict) -> Optional[discord.Embed]:
                          color=GREEN if units >= 0 else RED)
 
 
+def parlays_embed(date: str) -> Optional[discord.Embed]:
+    from .parlay_track import _load, summary_lines
+    lines = summary_lines(list(_load(date).values()))
+    if not lines:
+        return None
+    return discord.Embed(title="🎰 Auto-Parlays (1 unit each)", description="\n".join(lines)[:4000],
+                         color=PURPLE)
+
+
 def model_embed(main: dict) -> Optional[discord.Embed]:
     """How the model read every two-way market, picks or not."""
     graded = [r for r in main.values() if r.get("result") and r["result"].get("winner") in ("A", "B")
@@ -380,7 +389,7 @@ def grade_report(date: str, summary: list, before: set, remaining) -> tuple:
     records = day_records(date)
     newly = len(graded_keys(records) - before)
     embeds = [overview_embed(date, records, newly)]
-    for e in (picks_embed(records["main"]), market_picks_embed(records["main"]),
+    for e in (picks_embed(records["main"]), market_picks_embed(records["main"]), parlays_embed(date),
               model_embed(records["main"]), side_book_embed(records),
               bets_embed(date, settled_now)):
         if e is not None:

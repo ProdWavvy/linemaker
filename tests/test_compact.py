@@ -420,3 +420,47 @@ class BoardButtonsTest(unittest.TestCase):
             embed = it.response.sent["embed"]
             self.assertIn("Every Pick", embed.title)
             self.assertEqual(embed.description.count("\n"), len(legs) + 2)   # header + one row per pick
+
+
+class SlipBoostSuggestTest(unittest.TestCase):
+    def test_boost_and_best_next_leg(self):
+        from linemaker import bot
+        legs = ParlayButtonTest._legs(ParlayButtonTest())
+        key = bot._remember({"picks": [{"rank": i, "ev": ev} for i, ev in enumerate(legs, 1)]})
+
+        class Resp:
+            async def edit_message(self, **kw):
+                self.edited = kw
+
+        def tap(cid):
+            it = NS(data={"custom_id": cid}, response=Resp())
+            self.assertTrue(asyncio.run(bot.route_component(it)))
+            return it.response.edited["embed"], it.response.edited["view"]
+
+        def btn(view, suffix):
+            return next(c for c in view.children if (c.custom_id or "").endswith(suffix))
+
+        async def first():
+            return bot.slip_message(key, 0b11)
+        e0, v = asyncio.run(first())
+        fd0 = next(f.value for f in e0.fields if "FanDuel" in f.name)
+        e, v = tap(btn(v, ":b").custom_id)                    # +10% boost
+        fd1 = next(f.value for f in e.fields if "FanDuel" in f.name)
+        self.assertIn("with the +10% boost", fd1)
+        self.assertNotEqual(fd0, fd1)
+        self.assertIn("Boost +10%", btn(v, ":b").label)
+        e, v = tap(btn(v, ":s").custom_id)                    # adds the third leg
+        self.assertEqual(e.title, "🎰 Your 3-Leg Parlay · live slip")
+        self.assertIn("with the +10% boost", next(f.value for f in e.fields if "FanDuel" in f.name))
+
+    def test_old_slip_buttons_still_work(self):
+        from linemaker import bot
+        legs = ParlayButtonTest._legs(ParlayButtonTest())
+        key = bot._remember({"picks": [{"rank": i, "ev": ev} for i, ev in enumerate(legs, 1)]})
+
+        class Resp:
+            async def edit_message(self, **kw):
+                self.edited = kw
+        it = NS(data={"custom_id": f"lm:slip:{key}:1:0:t1"}, response=Resp())   # pre-boost format
+        self.assertTrue(asyncio.run(bot.route_component(it)))
+        self.assertEqual(it.response.edited["embed"].title, "🎰 Your 2-Leg Parlay · live slip")

@@ -215,7 +215,8 @@ def volume_config(**overrides) -> "ProConfig":
             "LINEMAKER_VOLUME_MIN_GAP", "").strip() else -0.02,
         max_gap=_env_num("LINEMAKER_MAX_GAP", float), min_ev=None,
         max_picks=_env_num("LINEMAKER_VOLUME_LEGS", int) or 25,
-        require_model_edge=False, rank_by="prob", over_min_gap=None, sport_settings=False)
+        require_model_edge=False, rank_by="prob", over_min_gap=None, sport_settings=False,
+        pick_tag="volume")   # parlay legs: logged apart from the model's own picks
     for k, v in overrides.items():
         setattr(cfg, k, v)
     return cfg

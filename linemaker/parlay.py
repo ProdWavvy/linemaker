@@ -25,6 +25,9 @@ class Parlay:
     prob: float = 1.0
     decimal: float = 1.0
     kind: str = ""          # "", or SGP / SGPx / SGP+ (same-game legs on one ticket)
+    style: str = "safest"   # safest (likeliest legs) or value (legs that beat their price)
+    indep_prob: float = 1.0  # hit chance if the legs were independent (shown next to prob)
+    boost: float = 0.0      # profit boost applied to `decimal` (0.25 = +25%)
 
     @property
     def american(self) -> int:
@@ -41,38 +44,67 @@ class Parlay:
         return (self.prob * self.decimal - 1) * 100
 
 
+def price(book: str, chosen: list, kind: str = "", style: str = "safest", boost: float = 0.0) -> Parlay:
+    """A Parlay for [(ev, odds at this book)]: payout multiplies the prices (plus any boost),
+    hit chance is the correlated joint chance (parlay_math)."""
+    from .parlay_math import boosted, joint_prob
+    p = Parlay(book=book, legs=list(chosen), kind=kind, style=style, boost=boost)
+    for ev, odds in p.legs:
+        p.indep_prob *= ev.best.blended
+        p.decimal *= american_to_decimal(odds)
+    p.decimal = boosted(p.decimal, boost) if boost else p.decimal
+    p.prob = joint_prob([ev for ev, _o in p.legs])
+    return p
+
+
 def leg_price(ev, book: str):
     prices = book_prices(ev.market, ev.best.side)
     return next((o for b, o in prices.items() if _key(b) == _key(book)), None)
 
 
-def build_parlays(legs: list, sizes=(2, 3, 4), books=PARLAY_BOOKS) -> list:
-    """Safest parlay of each size at each book: the likeliest legs, one per game."""
+FAIR_VALUE = 0.98   # legs worth less than this (2%+ under fair) are left out when possible
+
+
+def _one_per_game(priced: list, size: int) -> list:
+    chosen, games = [], set()
+    for ev, odds in priced:
+        if ev.market.game_id in games:
+            continue
+        chosen.append((ev, odds))
+        games.add(ev.market.game_id)
+        if len(chosen) == size:
+            return chosen
+    return []
+
+
+def build_parlays(legs: list, sizes=(2, 3, 4), books=PARLAY_BOOKS, value: bool = True) -> list:
+    """Per book and size, one leg per game:
+      safest  the likeliest legs, skipping legs priced 2%+ worse than fair while enough remain
+      value   the legs that beat their price by the most (hit chance x odds above 1), only
+              when the whole parlay is +EV; usually a bigger payout for the same number of legs
+    """
+    from .parlay_math import leg_value
     out = []
     for book in books:
         priced = [(ev, leg_price(ev, book)) for ev in legs]
-        priced = sorted([(ev, o) for ev, o in priced if o is not None],
-                        key=lambda x: x[0].best.blended, reverse=True)
+        priced = [(ev, o) for ev, o in priced if o is not None]
+        by_prob = sorted(priced, key=lambda x: x[0].best.blended, reverse=True)
+        fair = [x for x in by_prob if leg_value(*x) >= FAIR_VALUE]
+        by_value = sorted([x for x in priced if leg_value(*x) > 1.0], key=lambda x: leg_value(*x), reverse=True)
         for size in sizes:
-            chosen, games = [], set()
-            for ev, odds in priced:
-                if ev.market.game_id in games:
-                    continue
-                chosen.append((ev, odds))
-                games.add(ev.market.game_id)
-                if len(chosen) == size:
-                    break
-            if len(chosen) < size:
-                continue
-            p = Parlay(book=book, legs=chosen)
-            for ev, odds in chosen:
-                p.prob *= ev.best.blended
-                p.decimal *= american_to_decimal(odds)
-            out.append(p)
+            chosen = _one_per_game(fair, size) or _one_per_game(by_prob, size)
+            if chosen:
+                out.append(price(book, chosen))
+            if value:
+                best = _one_per_game(by_value, size)
+                if best and {id(e) for e, _o in best} != {id(e) for e, _o in chosen}:
+                    p = price(book, best, style="value")
+                    if p.prob * p.decimal > 1:
+                        out.append(p)
     return out
 
 
-def custom_parlays(legs: list, books=PARLAY_BOOKS) -> list:
+def custom_parlays(legs: list, books=PARLAY_BOOKS, boost: float = 0.0) -> list:
     """Your own parlay from chosen picks, priced at each book with that book's leg prices.
     Returns [(Parlay, [labels of legs that book doesn't offer])]. Same-game legs are kept
     (it's your slip) but flagged by same_game()."""
@@ -87,11 +119,7 @@ def custom_parlays(legs: list, books=PARLAY_BOOKS) -> list:
                 priced.append((ev, odds))
         if len(priced) < 2:
             continue
-        p = Parlay(book=book, legs=priced)
-        for ev, odds in priced:
-            p.prob *= ev.best.blended
-            p.decimal *= american_to_decimal(odds)
-        out.append((p, missing))
+        out.append((price(book, priced, boost=boost), missing))
     return out
 
 
@@ -165,8 +193,8 @@ def build_sgps(legs: list, books=PARLAY_BOOKS, sgp_size: int = 3, sgpx_size: int
     """Auto same-game parlays at each book: the likeliest 3-leg SGP from one game, and an
     SGPx / SGP+ of the two likeliest 2-leg game groups (or one group plus the best legs from
     other games). Legs that clash (two lines of one stat, both sides, ML + spread) are
-    skipped. The hit chance still multiplies the legs, which overstates a same-game group a
-    little either way; the book's SGP price is lower than the multiplied odds."""
+    skipped. The hit chance accounts for the legs moving together (parlay_math); the book's
+    SGP price is lower than the multiplied odds."""
     out = []
     for book in books:
         by_game = {}
@@ -174,14 +202,10 @@ def build_sgps(legs: list, books=PARLAY_BOOKS, sgp_size: int = 3, sgpx_size: int
             odds = leg_price(ev, book)
             if odds is not None:
                 by_game.setdefault(ev.market.game_id, []).append(ev)
-        price = {id(ev): leg_price(ev, book) for evs in by_game.values() for ev in evs}
+        odds_of = {id(ev): leg_price(ev, book) for evs in by_game.values() for ev in evs}
 
         def make(chosen, kind):
-            p = Parlay(book=book, legs=[(ev, price[id(ev)]) for ev in chosen], kind=kind)
-            for ev, odds in p.legs:
-                p.prob *= ev.best.blended
-                p.decimal *= american_to_decimal(odds)
-            return p
+            return price(book, [(ev, odds_of[id(ev)]) for ev in chosen], kind=kind)
 
         def score(group):
             prob = 1.0

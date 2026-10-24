@@ -84,7 +84,7 @@ class Tracker:
             "updated": now.isoformat(timespec="seconds"),
             "result": old.get("result") if old else None,
         }
-        for k in PICK_FIELDS + ("market_pick",):   # the price we picked at, kept for closing-line value
+        for k in PICK_FIELDS + ("market_pick", "volume_pick"):   # the price we picked at, kept for closing-line value
             if old and k in old:
                 self.records[m.key][k] = old[k]
         self._touched.add(m.key)
@@ -94,8 +94,8 @@ class Tracker:
         for ev in picks:
             if ev.market.key in self._touched:
                 rec = self.records[ev.market.key]
-                if tag == "market":   # market-edge picks are logged apart from the model's record
-                    rec.setdefault("market_pick", {"side": ev.best.side, "time": now.isoformat(timespec="seconds"),
+                if tag != "model":   # market-edge / parlay-leg picks are logged apart from the model's record
+                    rec.setdefault(f"{tag}_pick", {"side": ev.best.side, "time": now.isoformat(timespec="seconds"),
                                                    "odds": ev.best.best_odds, "book": ev.best.best_book,
                                                    "market_prob": ev.best.market_prob})
                     continue
