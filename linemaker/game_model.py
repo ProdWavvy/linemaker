@@ -204,6 +204,13 @@ def game_projections(sport: str, date: str, games: list, use_kalshi: bool = True
             goalies = goalie_effects(date)
         except Exception as e:
             log.warning("nhl goalies unavailable: %s", e)
+    rain = {}
+    if sport in ("NFL", "NCAAF"):
+        from .game_context import game_weather_total
+        try:
+            rain = game_weather_total(sport, date)
+        except Exception as e:
+            log.warning("weather unavailable: %s", e)
     pitchers = {}
     if sport == "MLB":
         from .mlb_matchups import starters
@@ -225,6 +232,9 @@ def game_projections(sport: str, date: str, games: list, use_kalshi: bool = True
             g["margin"] += ea - eh
             g["total"] += ea + eh
             note += "; " + "; ".join(x["note"] for x in (gh, ga) if x)
+        if norm(home) in rain:
+            g["total"] -= rain[norm(home)]
+            note += f"; bad weather −{rain[norm(home)]:g} total"
         ph, pa = pitchers.get(norm(home)), pitchers.get(norm(away))
         if (ph and ph.get("rates")) or (pa and pa.get("rates")):   # tonight's starters vs league average
             from .mlb_matchups import extra_runs

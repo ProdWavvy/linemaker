@@ -421,6 +421,8 @@ def espn_projections(sport: str, date: str, wanted: dict) -> list:
         _apply_shots(date, out, teams)
     if sport == "MLB":
         _apply_mlb(date, out)
+    from .game_context import apply as apply_game_context
+    apply_game_context(sport, date, out)   # market's team totals; NFL weather
     from .autotune import bias_for
     for r in out:   # learned projection-bias correction (autotune.tune_bias)
         f = bias_for(sport, r["market"])
