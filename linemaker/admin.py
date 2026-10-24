@@ -149,3 +149,43 @@ def status_lines() -> list:
     errors = [l for l in list(_LOG)[-500:] if " ERROR " in l]
     out.append(f"• Errors in recent logs: {len(errors)}" + (f" (latest: {_scrub(errors[-1])[:200]})" if errors else ""))
     return out
+
+
+def env_changes() -> list:
+    """Settings running from settings.env (GitHub) or /set that differ from the server's .env:
+    the lines to copy into .env to make them permanent."""
+    disc, repo, env = (vals for _s, vals in layers())
+    out = []
+    for source, vals in (("set from Discord", disc), ("settings.env (GitHub)", repo)):
+        for k, v in vals.items():
+            if env.get(k) == v:
+                continue
+            was = env.get(k)
+            if SECRET.search(k):
+                out.append(f"• `{k}` · {source} · new key/token: paste it into .env yourself (hidden here)")
+            else:
+                out.append(f"• `{k}={v}` · {source} · .env has "
+                           + (f"`{was}`" if was not in (None, "") else "nothing"))
+    return out
+
+
+def changelog() -> list:
+    """The change-log comment lines from settings.env."""
+    path = os.path.join(root_dir(), "settings.env")
+    try:
+        with open(path) as f:
+            lines = f.read().splitlines()
+    except OSError:
+        return []
+    try:
+        start = next(i for i, l in enumerate(lines) if "Change log" in l) + 1
+    except StopIteration:
+        return []
+    out = []
+    for l in lines[start:]:
+        if l.startswith("# ----"):
+            break
+        l = l.lstrip("# ").strip()
+        if l and l != "(no changes yet)":
+            out.append(l)
+    return out

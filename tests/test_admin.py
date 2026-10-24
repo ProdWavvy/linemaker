@@ -78,3 +78,17 @@ class SettingsLayersTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class EnvChangesTest(SettingsLayersTest):
+    def test_lists_lines_to_copy(self):
+        from linemaker import admin
+        with open(os.path.join(self.root, "settings.env"), "a") as f:
+            f.write("# ---- Change log (newest first)\n# 10-24 · LINEMAKER_MIN_GAP · 0.03 → 0.02 · test\n"
+                    "# ---- Active\nLINEMAKER_MAX_PICKS=25\n")
+        admin.apply_set("LINEMAKER_OVER_MIN_GAP", "0.05")
+        out = "\n".join(admin.env_changes())
+        self.assertIn("`LINEMAKER_MIN_GAP=0.02` · settings.env (GitHub) · .env has `0.03`", out)
+        self.assertIn("`LINEMAKER_OVER_MIN_GAP=0.05` · set from Discord · .env has nothing", out)
+        self.assertNotIn("MAX_PICKS", out)               # same as .env: nothing to copy
+        self.assertEqual(admin.changelog(), ["10-24 · LINEMAKER_MIN_GAP · 0.03 → 0.02 · test"])

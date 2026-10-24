@@ -1571,6 +1571,20 @@ async def unset_cmd(interaction: discord.Interaction, key: str):
     await interaction.response.send_message(apply_unset(key), ephemeral=True)
 
 
+@bot.tree.command(name="envchanges", description="Owner: settings changed remotely, and the lines to copy into .env")
+async def envchanges_cmd(interaction: discord.Interaction):
+    if not await _owner_only(interaction):
+        return
+    from .admin import changelog, env_changes
+    lines = env_changes()
+    text = ["📝 **Copy these into your server's .env** (then ask Claude to clear settings.env, "
+            "or /unset the Discord ones):"] + (lines or ["Nothing: everything running matches your .env."])
+    log_lines = changelog()
+    if log_lines:
+        text += ["", "**Change log** (newest first):"] + [f"• {l}" for l in log_lines[:15]]
+    await interaction.response.send_message("\n".join(text)[:1990], ephemeral=True)
+
+
 @bot.tree.command(name="restart", description="Owner: restart the bot on the server")
 async def restart_cmd(interaction: discord.Interaction):
     if not await _owner_only(interaction):
