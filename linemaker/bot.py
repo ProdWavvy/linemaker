@@ -34,10 +34,10 @@ import tempfile
 from typing import Optional
 from zoneinfo import ZoneInfo
 
-from .envfile import load_env
+from .envfile import load_all, load_env
 
-load_env()  # .env in the working directory; real environment variables take priority
-load_env(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), ".env"))
+load_all()  # /set overrides, settings.env from GitHub, then the project's .env
+load_env()  # a .env in some other working directory last; real environment variables win
 
 import discord
 from discord import app_commands
@@ -1521,6 +1521,89 @@ async def daily_post():
         log.exception("daily post failed")
 
 
+# ---- remote admin: settings, restart and logs from Discord (owner only) ----------------
+
+async def _owner_only(interaction: discord.Interaction) -> bool:
+    from .admin import is_owner
+    if await is_owner(bot, interaction.user):
+        return True
+    await interaction.response.send_message("Only the bot's owner can use this.", ephemeral=True)
+    return False
+
+
+@bot.tree.command(name="settings", description="Owner: show the bot's settings and where each comes from")
+@app_commands.describe(search="Only settings containing this, e.g. GAP or ODDS")
+async def settings_cmd(interaction: discord.Interaction, search: Optional[str] = None):
+    if not await _owner_only(interaction):
+        return
+    from .admin import settings_lines
+    lines = settings_lines(search)
+    text = "\n".join(lines)
+    if len(text) <= 1900:
+        await interaction.response.send_message(text or "No settings match.", ephemeral=True)
+    else:
+        await interaction.response.send_message(
+            f"{len(lines) - 1} settings (attached). Use `search:` to narrow it down.", ephemeral=True,
+            file=discord.File(io.BytesIO(text.encode()), filename="settings.txt"))
+
+
+@bot.tree.command(name="set", description="Owner: change a setting on the server (like editing .env)")
+@app_commands.describe(key="Setting name, e.g. LINEMAKER_OVER_MIN_GAP", value="New value (blank turns it off)",
+                       restart="Restart now so every part of the bot picks it up (default: no)")
+async def set_cmd(interaction: discord.Interaction, key: str, value: str = "", restart: bool = False):
+    if not await _owner_only(interaction):
+        return
+    from .admin import apply_set
+    msg = apply_set(key, value)
+    await interaction.response.send_message(msg + ("\n🔄 Restarting in a few seconds…" if restart else ""),
+                                            ephemeral=True)
+    if restart:
+        from .admin import restart_soon
+        restart_soon()
+
+
+@bot.tree.command(name="unset", description="Owner: undo a /set (back to settings.env / .env)")
+@app_commands.describe(key="Setting name")
+async def unset_cmd(interaction: discord.Interaction, key: str):
+    if not await _owner_only(interaction):
+        return
+    from .admin import apply_unset
+    await interaction.response.send_message(apply_unset(key), ephemeral=True)
+
+
+@bot.tree.command(name="restart", description="Owner: restart the bot on the server")
+async def restart_cmd(interaction: discord.Interaction):
+    if not await _owner_only(interaction):
+        return
+    from .admin import restart_soon
+    await interaction.response.send_message("🔄 Restarting. Back in about 15–30 seconds.", ephemeral=True)
+    restart_soon()
+
+
+@bot.tree.command(name="logs", description="Owner: the bot's recent console output")
+@app_commands.describe(lines="How many lines (default 60)", search="Only lines containing this")
+async def logs_cmd(interaction: discord.Interaction, lines: Optional[int] = 60, search: Optional[str] = None):
+    if not await _owner_only(interaction):
+        return
+    from .admin import recent_logs
+    text = recent_logs(lines or 60, search)
+    if len(text) <= 1900:
+        await interaction.response.send_message(f"```\n{text or '(nothing yet)'}\n```", ephemeral=True)
+    else:
+        await interaction.response.send_message(
+            "Recent log lines attached.", ephemeral=True,
+            file=discord.File(io.BytesIO(text.encode()), filename="linemaker.log"))
+
+
+@bot.tree.command(name="status", description="Owner: version, uptime and health of the bot")
+async def status_cmd(interaction: discord.Interaction):
+    if not await _owner_only(interaction):
+        return
+    from .admin import status_lines
+    await interaction.response.send_message("\n".join(await asyncio.to_thread(status_lines)),
+                                            ephemeral=True)
+
+
 @daily_post.before_loop
 async def _wait_ready():
     await bot.wait_until_ready()
@@ -1528,6 +1611,8 @@ async def _wait_ready():
 
 def main():
     logging.basicConfig(level=logging.INFO)
+    from .admin import install_log_buffer
+    install_log_buffer()
     token = os.environ.get("DISCORD_TOKEN")
     if not token:
         raise SystemExit("Set DISCORD_TOKEN to your bot token.")

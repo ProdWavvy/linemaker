@@ -8,9 +8,9 @@ import sys
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 
-from linemaker.envfile import load_env  # noqa: E402
+from linemaker.envfile import load_all  # noqa: E402
 
-load_env(os.path.join(HERE, ".env"))
+load_all(HERE)   # Discord /set overrides, then settings.env (GitHub), then .env
 
 from linemaker.bot import main  # noqa: E402
 
