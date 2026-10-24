@@ -82,5 +82,34 @@ class RoundsTest(unittest.TestCase):
                            ufc_model.finish_chance(grinder, grinder, 0.5))
 
 
+class FighterPropsTest(unittest.TestCase):
+    def test_count_sim_centres_on_projection_and_quick_finishes_hurt_overs(self):
+        from linemaker.sim import simulate
+        r = simulate(60.0, 59.5, "ufccount|0.5000|3", 1, 40000, "k")
+        self.assertAlmostEqual(r.mean, 60.0)
+        self.assertTrue(0.35 < r.p_over < 0.55)          # mean 60, but finishes skew it below
+        slow = simulate(60.0, 59.5, "ufccount|0.1000|3", 1, 40000, "k")
+        self.assertGreater(slow.p_over, r.p_over)       # fewer early finishes: fatter middle
+
+    def test_minutes_and_expected_rounds(self):
+        from linemaker.sim import simulate
+        self.assertEqual(ufc_model.expected_rounds(0.0, 3), 3)
+        self.assertLess(ufc_model.expected_rounds(1.0, 3), 1.5)
+        r = simulate(0.5, 14.5, "ufcminutes", 3, 20000, "k")
+        self.assertTrue(0.48 < r.p_over < 0.55)          # goes the distance (15:00) about half the time
+
+    def test_prop_grading_reads_espn_fight_stats(self):
+        comp = {"uid": "u1", "status": {"type": {"completed": True}, "period": 1, "displayClock": "3:54"}}
+        stats = {"categories": [
+            {"displayName": "striking", "labels": ["SSL", "SSA"], "statistics": [{"uid": "u1", "stats": ["31", "60"]}]},
+            {"displayName": "Clinch", "labels": ["TDL\t", "TDA"], "statistics": [{"uid": "u1", "stats": ["2", "5"]}]}]}
+        recs = {m: {"sport": "UFC", "game_id": "g", "subject": "Noah Gugnon", "market": m,
+                    "inputs": {"line": 0.5}, "result": None} for m in ufc_model.UFC_PROP_MARKETS}
+        with mock.patch.object(ufc_model, "card", return_value=[("Noah Gugnon", "1", "Kody Steele", "2", comp)]), \
+                mock.patch.object(ufc_model, "_get", return_value=stats):
+            got = {r["market"]: r["actual"] for r in ufc_model.fighter_prop_results(recs, "2026-10-24")}
+        self.assertEqual(got, {"significant strikes": "31", "takedowns": "2", "fight time": "3.9"})
+
+
 if __name__ == "__main__":
     unittest.main()

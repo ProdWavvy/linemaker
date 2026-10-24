@@ -48,7 +48,7 @@ class DiscordFormatTest(unittest.TestCase):
     def test_bot_registers_commands(self):
         from linemaker.bot import bot
         names = {c.name for c in bot.tree.get_commands()}
-        self.assertEqual(names, {"pro", "lite", "grade", "devig", "fair", "ev", "live", "odds", "quota", "picks", "calibrate", "parlay", "record", "clv", "tips", "settings", "set", "unset", "restart", "logs", "status", "envchanges"})
+        self.assertEqual(names, {"pro", "lite", "grade", "devig", "fair", "ev", "live", "odds", "quota", "picks", "calibrate", "parlay", "record", "clv", "tips", "settings", "set", "unset", "restart", "logs", "status", "envchanges", "ufc"})
 
 
 class TipsTest(unittest.TestCase):

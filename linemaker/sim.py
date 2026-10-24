@@ -90,9 +90,30 @@ def _finish_time(u: float, rounds: float) -> float:
     return -math.log(1 - u * (1 - math.exp(-FINISH_HAZARD * rounds))) / FINISH_HAZARD
 
 
+def _ufc_params(dist: str) -> tuple:
+    """'ufccount|p_early|rounds' -> (p_early, rounds)."""
+    _name, p, r = dist.split("|")
+    return float(p), float(r)
+
+
+def _mean_rounds(p: float, r: float) -> float:
+    lam = FINISH_HAZARD
+    return p * (1 / lam - r * math.exp(-lam * r) / (1 - math.exp(-lam * r))) + (1 - p) * r
+
+
+UFC_RATE_SHAPE = 4.0   # fight-to-fight spread of a fighter's pace (gamma shape)
+
+
 def _draw(rng: random.Random, dist: str, mean: float, sd: float) -> float:
     if dist == "ufcrounds":
         return _finish_time(rng.random(), sd) if rng.random() < mean else sd
+    if dist == "ufcminutes":
+        return 5 * (_finish_time(rng.random(), sd) if rng.random() < mean else sd)
+    if dist.startswith("ufccount"):
+        p, r = _ufc_params(dist)
+        t = _finish_time(rng.random(), r) if rng.random() < p else r
+        pace = rng.gammavariate(UFC_RATE_SHAPE, 1 / UFC_RATE_SHAPE)
+        return _poisson(rng, mean / _mean_rounds(p, r) * t * pace)
     if dist == "poisson":
         return _poisson(rng, mean)
     if dist == "negbin":
@@ -114,10 +135,16 @@ except ImportError:   # pure-Python fallback below (about 100x slower)
 
 
 def _np_draws(rng, dist: str, mean: float, sd: float, n: int):
-    if dist == "ufcrounds":
+    if dist in ("ufcrounds", "ufcminutes"):
         early = rng.random(n) < mean
         t = -np.log(1 - rng.random(n) * (1 - math.exp(-FINISH_HAZARD * sd))) / FINISH_HAZARD
-        return np.where(early, t, sd)
+        return np.where(early, t, sd) * (5 if dist == "ufcminutes" else 1)
+    if dist.startswith("ufccount"):
+        p, r = _ufc_params(dist)
+        early = rng.random(n) < p
+        t = np.where(early, -np.log(1 - rng.random(n) * (1 - math.exp(-FINISH_HAZARD * r))) / FINISH_HAZARD, r)
+        pace = rng.gamma(UFC_RATE_SHAPE, 1 / UFC_RATE_SHAPE, n)
+        return rng.poisson(np.maximum(mean / _mean_rounds(p, r) * t * pace, 0.0))
     if dist == "poisson":
         return rng.poisson(max(mean, 0.0), n)
     if dist == "negbin":

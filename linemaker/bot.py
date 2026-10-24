@@ -1102,6 +1102,31 @@ async def grade_cmd(interaction: discord.Interaction, results: Optional[discord.
         await _report_error(interaction, e)
 
 
+@bot.tree.command(name="ufc", description="UFC fighter projections: win chance, significant strikes, takedowns, fight time")
+async def ufc_cmd(interaction: discord.Interaction):
+    await interaction.response.defer(thinking=True)
+    try:
+        from .ufc_model import next_card_date, props_table
+        date = await asyncio.to_thread(next_card_date, today())
+        lines, rows = await asyncio.to_thread(props_table, date)
+        if not rows:
+            await interaction.followup.send("No upcoming UFC fights on ESPN's schedule right now.")
+            return
+        early = {}
+        for f in rows:
+            early.setdefault(tuple(sorted((f["fighter"], f["opponent"]))), (f["early"], f["rounds"]))
+        embed = discord.Embed(title=f"🥊 UFC Fighter Projections · {date}", color=0xE74C3C,
+                              description="```\n" + "\n".join(lines)[:3900] + "\n```")
+        embed.add_field(name="Ends early", inline=False, value="\n".join(
+            f"{a} vs {b}: {p:.0%} ({r} rds)" for (a, b), (p, r) in list(early.items())[:15])[:1024])
+        embed.set_footer(text="SigStr = significant strikes landed · TD = takedowns · Mins = expected fight "
+                              "minutes. From ESPN's UFC stats; compare with PrizePicks lines. The bot prices "
+                              "them automatically once a fighter-props odds feed is connected.")
+        await interaction.followup.send(embed=embed)
+    except Exception as e:
+        await _report_error(interaction, e)
+
+
 @bot.tree.command(name="record", description="Your logged bets: open bets, record, profit and ROI")
 @app_commands.describe(days="How many days back (default 30; 0 = all time)")
 async def record_cmd(interaction: discord.Interaction, days: Optional[int] = 30):

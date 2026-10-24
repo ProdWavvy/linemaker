@@ -272,8 +272,10 @@ def ufc_results(records: dict, date: str) -> list:
         rounds = fight_length(status)
         if rounds is not None:
             length.update({k: rounds for k in flags})
-    rows = []
+    rows = fighter_prop_results(records, date)
     for r in recs:
+        if r["market"] in UFC_PROP_MARKETS:
+            continue
         if r["market"] == "total rounds":
             if norm(r["subject"]) in length:
                 rows.append({"game_id": r["game_id"], "subject": r["subject"], "market": r["market"],
@@ -318,3 +320,139 @@ def next_card_note(date: str) -> str:
         return ("Every fight on today's UFC card has already started or finished, and started "
                 "fights aren't priced (the model is pre-fight only). Ask again before the next card.")
     return "No UFC card found on ESPN's schedule for the next few days."
+
+
+# ---- fighter props: significant strikes, takedowns, fight time ---------------------------
+# A fighter's count is his career rate (ESPN's UFC stats: significant strikes landed per
+# minute, takedowns per 15 minutes) times how long the fight should last:
+#   expected minutes = 5 x [P(early) x mean finish round + (1 - P(early)) x scheduled rounds]
+# with early finishes front-loaded as in the total-rounds model. Strikes are trimmed a little
+# when the opponent is a heavy wrestler (time on the mat is time not striking at range).
+# For pricing, the sim draws the fight length first, then the count around rate x length, so
+# a quick finish drags every over down together (that's the real risk in these props).
+UFC_PROP_MARKETS = ("significant strikes", "takedowns", "fight time")
+
+
+def expected_rounds(p_early: float, rounds: int) -> float:
+    lam = 0.35   # same front-loaded finish curve as sim.FINISH_HAZARD
+    e_early = 1 / lam - rounds * math.exp(-lam * rounds) / (1 - math.exp(-lam * rounds))
+    return p_early * e_early + (1 - p_early) * rounds
+
+
+def fighter_props(date: str) -> list:
+    """Per fighter on the card: win chance, chance the fight ends early, expected minutes and
+    projected significant strikes / takedowns. Free (ESPN only)."""
+    fights = [f for f in card(date)
+              if not (f[4].get("status", {}).get("type", {}).get("completed"))]
+    ids = sorted({i for f in fights for i in (f[1], f[3])})
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        info = dict(zip(ids, pool.map(fighter, ids)))
+    out = []
+    for fa, ida, fb, idb, comp in fights:
+        a, b = info[ida], info[idb]
+        p, _s = win_prob(a, b)
+        p = min(max(p, 0.02), 0.98)
+        rounds = ((comp.get("format") or {}).get("regulation") or {}).get("periods") or 3
+        early = finish_chance(a, b, p)
+        minutes = 5 * expected_rounds(early, rounds)
+        for me, opp, name, opp_name, win in ((a, b, fa, fb, p), (b, a, fb, fa, 1 - p)):
+            wrestle = 1 - min(0.25, 0.03 * (opp.get("td") or 0))
+            out.append({"fighter": name, "opponent": opp_name, "rounds": rounds, "win": win,
+                        "early": early, "minutes": minutes, "when": comp.get("date", ""),
+                        "sig_strikes": (me.get("slpm") or 0) * minutes * wrestle if me.get("slpm") is not None else None,
+                        "takedowns": (me.get("td") or 0) / 15 * minutes if me.get("td") is not None else None})
+    return out
+
+
+def fighter_prop_rows(date: str) -> list:
+    """Projection rows for the engine (joined to a fighter-props feed when one is connected)."""
+    rows = []
+    for f in fighter_props(date):
+        dist = f"ufccount|{f['early']:.4f}|{f['rounds']}"
+        for market, key in (("significant strikes", "sig_strikes"), ("takedowns", "takedowns")):
+            if f[key] is not None:
+                rows.append({"sport": "UFC", "subject": f["fighter"], "market": market, "dist": dist,
+                             "mean": f"{f[key]:.3f}", "stdev": "1",
+                             "notes": f"UFC model: {f['minutes']:.1f} expected minutes"})
+        rows.append({"sport": "UFC", "subject": f["fighter"], "market": "fight time", "dist": "ufcminutes",
+                     "mean": f"{f['early']:.4f}", "stdev": str(f["rounds"]),
+                     "notes": f"UFC model: {f['early']:.0%} chance it ends early"})
+    return rows
+
+
+def _stat(stats: dict, uid: str, category: str, label: str) -> Optional[float]:
+    for c in stats.get("categories", []):
+        if c.get("displayName", "").lower() != category:
+            continue
+        labels = [l.strip() for l in c.get("labels", [])]
+        if label not in labels:
+            return None
+        for s in c.get("statistics", []):
+            if s.get("uid") == uid:
+                try:
+                    return float(str(s["stats"][labels.index(label)]).split("/")[0].rstrip("%"))
+                except (ValueError, IndexError):
+                    return None
+    return None
+
+
+def fighter_prop_results(records: dict, date: str) -> list:
+    """Results rows for graded fighter props, from ESPN's per-fight stats."""
+    recs = [r for r in records.values() if r.get("sport") == "UFC" and r.get("result") is None
+            and r.get("market") in UFC_PROP_MARKETS]
+    if not recs:
+        return []
+    fights = card(date)
+    who = {}
+    for fa, ida, fb, idb, comp in fights:
+        if comp.get("status", {}).get("type", {}).get("completed"):
+            who[norm(fa)] = (ida, comp)
+            who[norm(fb)] = (idb, comp)
+    rows = []
+    for r in recs:
+        hit = who.get(norm(r["subject"]))
+        if not hit:
+            continue
+        aid, comp = hit
+        if r["market"] == "fight time":
+            length = fight_length(comp.get("status", {}))
+            actual = None if length is None else 5 * length
+        else:
+            stats = _get(f"{WEB}/athletes/{aid}/stats", max_age=3600)
+            actual = (_stat(stats, comp.get("uid", ""), "striking", "SSL") if r["market"] == "significant strikes"
+                      else _stat(stats, comp.get("uid", ""), "clinch", "TDL"))
+        if actual is not None:
+            rows.append({"game_id": r["game_id"], "subject": r["subject"], "market": r["market"],
+                         "line": str(r["inputs"]["line"]), "actual": f"{actual:g}"})
+    return rows
+
+
+def next_card_date(date: str) -> str:
+    """Today if a fight is still to come, otherwise the date of ESPN's next UFC event."""
+    if fighter_props_cached(date):
+        return date
+    data = _get(f"{SITE}/scoreboard", max_age=1800)
+    for ev in data.get("events", []):
+        return ev["date"][:10]
+    return date
+
+
+def fighter_props_cached(date: str) -> bool:
+    return any(not f[4].get("status", {}).get("type", {}).get("completed") for f in card(date))
+
+
+def props_table(date: str) -> tuple:
+    """(title, code-block text) for /ufc: the model's numbers for every fighter on the card."""
+    rows = fighter_props(date)
+    lines = [f"{'Fighter':<20} {'Win':>4} {'SigStr':>6} {'TD':>4} {'Mins':>5}"]
+    last_pair = None
+    for f in rows:
+        pair = tuple(sorted((f["fighter"], f["opponent"])))
+        if last_pair and pair != last_pair:
+            lines.append("")
+        last_pair = pair
+        ss = f"{f['sig_strikes']:.1f}" if f["sig_strikes"] is not None else "—"
+        td = f"{f['takedowns']:.1f}" if f["takedowns"] is not None else "—"
+        name = f["fighter"] if len(f["fighter"]) <= 20 else f["fighter"][:19] + "…"
+        lines.append(f"{name:<20} {f['win']:>4.0%} {ss:>6} {td:>4} {f['minutes']:>5.1f}")
+    return lines, rows
