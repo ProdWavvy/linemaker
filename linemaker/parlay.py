@@ -245,7 +245,9 @@ def best_for_target(legs: list, book: str, target: float, max_legs: int = 6, poo
     priced furthest above fair, and as few of them as the payout allows."""
     import itertools
     import math
-    from .parlay_math import hit_chance, leg_value
+    from .parlay_math import hit_chance, joint_prob, leg_value
+    if len({ev.market.game_id for ev in legs}) == 1:
+        return _best_same_game(legs, book, target, max_legs, pool)
     best_per_game = {}
     for ev in legs:
         o = leg_price(ev, book)
@@ -270,3 +272,34 @@ def best_for_target(legs: list, book: str, target: float, max_legs: int = 6, poo
     if best is None:
         return None
     return price(book, [cands[i] for i in best], style="target")
+
+
+def _best_same_game(legs: list, book: str, target: float, max_legs: int, pool: int):
+    """One game only (you asked about one team or matchup): the same search, but legs share
+    the game, so one leg per player, combos the book refuses are skipped, and the hit chance
+    is the correlated joint chance."""
+    import itertools
+    import math
+    from .parlay_math import joint_prob, leg_value
+    best_per_player = {}
+    for ev in legs:
+        o = leg_price(ev, book)
+        if o is None or leg_value(ev, o) < 0.97:
+            continue
+        k = ev.market.subject if ev.market.bet_type == "prop" else ev.market.key
+        if k not in best_per_player or leg_value(ev, o) > leg_value(*best_per_player[k]):
+            best_per_player[k] = (ev, o)
+    cands = sorted(best_per_player.values(), key=lambda x: leg_value(*x), reverse=True)[:min(pool, 10)]
+    best, best_key = None, None
+    for k in range(1, min(max_legs, len(cands)) + 1):
+        for combo in itertools.combinations(cands, k):
+            d = math.prod(american_to_decimal(o) for _e, o in combo)
+            if d < target or (k > 1 and sgp_check([e for e, _o in combo], book)["blocked"]):
+                continue
+            p = joint_prob([e for e, _o in combo], draws=3000) if k > 1 else leg_value(*combo[0]) / d
+            if best_key is None or (p, p * d) > best_key:
+                best, best_key = combo, (p, p * d)
+    if best is None:
+        return None
+    one, _multi = SGP_NAMES.get(book, ("SGP", "SGP+"))
+    return price(book, list(best), kind=one if len(best) > 1 else "", style="target")

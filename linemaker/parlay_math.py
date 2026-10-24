@@ -151,7 +151,7 @@ def hit_chance(ev) -> float:
     return p_a if ev.best.side == "A" else 1 - p_a
 
 
-def joint_prob(legs: list, probs: Optional[list] = None) -> float:
+def joint_prob(legs: list, probs: Optional[list] = None, draws: int = N_DRAWS) -> float:
     """P(every leg hits), same-game legs correlated (see the module notes)."""
     probs = probs if probs is not None else [hit_chance(ev) for ev in legs]
     n = len(legs)
@@ -171,17 +171,17 @@ def joint_prob(legs: list, probs: Optional[list] = None) -> float:
     try:
         import numpy as np
         rng = np.random.default_rng(seed)
-        z = rng.standard_normal((N_DRAWS, n)) @ np.array(L).T
+        z = rng.standard_normal((draws, n)) @ np.array(L).T
         return float((z < np.array(cut)).all(axis=1).mean())
     except ImportError:
         import random
         rng = random.Random(seed)
         hits = 0
-        for _ in range(N_DRAWS // 4):
+        for _ in range(draws // 4):
             e = [rng.gauss(0, 1) for _ in range(n)]
             z = [sum(L[i][k] * e[k] for k in range(i + 1)) for i in range(n)]
             hits += all(z[i] < cut[i] for i in range(n))
-        return hits / (N_DRAWS // 4)
+        return hits / (draws // 4)
 
 
 def leg_value(ev, odds: int) -> float:

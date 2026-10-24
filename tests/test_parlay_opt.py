@@ -117,3 +117,13 @@ class TargetCardTest(unittest.TestCase):
         self.assertEqual(len(embed.fields), 4)
         self.assertIn("in a row", embed.fields[1].value)
         self.assertTrue(any((getattr(c, "label", "") or "").startswith("Log +200") for c in view.children))
+
+
+class SameGameTargetTest(unittest.TestCase):
+    def test_one_game_builds_an_sgp(self):
+        legs = [leg("g1", f"P{i}", "points", p=0.62, odds=-120) for i in range(5)]
+        with mock.patch.object(parlay, "leg_price", side_effect=lambda ev, b: ev.best.best_odds):
+            p = parlay.best_for_target(legs, "FanDuel", 3.0)
+        self.assertGreaterEqual(p.decimal, 3.0)
+        self.assertEqual(p.kind, "SGP")
+        self.assertEqual(len({ev.market.subject for ev, _o in p.legs}), len(p.legs))   # one per player

@@ -344,3 +344,29 @@ class LeagueAskTest(unittest.TestCase):
         self.assertEqual(quick_plays_request("ufc props"), ["UFC"])
         self.assertEqual(quick_plays_request("nhl picks"), ["NHL"])
         self.assertIsNone(quick_plays_request("why did the nba props lose"))
+
+
+class TeamAskTest(unittest.TestCase):
+    TEAMS = {"NBA": {"new york knicks": "New York Knicks", "boston celtics": "Boston Celtics",
+                     "portland trail blazers": "Portland Trail Blazers"},
+             "NHL": {"new york rangers": "New York Rangers"}, "MLB": {"texas rangers": "Texas Rangers"}}
+
+    def test_find_teams(self):
+        from unittest import mock
+        from linemaker import chat
+        today = {"NBA": {"new york knicks": "New York Knicks", "boston celtics": "Boston Celtics",
+                         "portland trail blazers": "Portland Trail Blazers", "golden state warriors": "Golden State Warriors"},
+                 "NHL": {"new york rangers": "New York Rangers", "detroit red wings": "Detroit Red Wings"},
+                 "MLB": {"texas rangers": "Texas Rangers"}, "NCAAF": {"hawaii rainbow warriors": "Hawai'i Rainbow Warriors"}}
+        league = {"NFL": {"pittsburgh steelers": "Pittsburgh Steelers"}, "WNBA": {"dallas wings": "Dallas Wings"}}
+        with mock.patch.object(chat, "todays_teams", return_value=today), \
+                mock.patch.object(chat, "all_teams", side_effect=lambda s: league.get(s, {})), \
+                mock.patch.dict("os.environ", {"LINEMAKER_OFFLINE": ""}):
+            self.assertEqual(chat.find_teams("best props for the knicks", "d"), [("NBA", "New York Knicks", True)])
+            self.assertEqual(len(chat.find_teams("knicks vs celtics parlay", "d")), 2)
+            self.assertEqual(chat.find_teams("trail blazers props", "d"), [("NBA", "Portland Trail Blazers", True)])
+            self.assertEqual(chat.find_teams("best new york props", "d"), [])          # a city alone is ambiguous
+            self.assertEqual({s for s, _t, _p in chat.find_teams("rangers props", "d")}, {"NHL", "MLB"})
+            self.assertEqual(chat.find_teams("warriors props", "d"), [("NBA", "Golden State Warriors", True)])
+            self.assertEqual(chat.find_teams("red wings props", "d"), [("NHL", "Detroit Red Wings", True)])
+            self.assertEqual(chat.find_teams("steelers props", "d"), [("NFL", "Pittsburgh Steelers", False)])

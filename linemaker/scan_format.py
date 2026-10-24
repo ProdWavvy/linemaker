@@ -313,7 +313,8 @@ def scan_messages(sections: list, date: str, cfg, title: str = "") -> list:
     scanned = ", ".join(_scope(sp, res) for sp, res, _p in sections)
     live = all(getattr(res, "kind", "") == "live" for _s, res, _p in sections)
     only = books_of([res for _s, res, _p in sections])
-    title = title or (f"{only[0]} " if len(only) == 1 else "") + ("Cross-Sport " if len(sections) > 1 else
+    focus = next((getattr(res, "focus", "") for _s, res, _p in sections if getattr(res, "focus", "")), "")
+    title = title or (f"{only[0]} " if len(only) == 1 else "") + (f"{focus} · " if focus else "") + ("Cross-Sport " if len(sections) > 1 else
                       f"{SPORT_NAMES.get(sections[0][0], sections[0][0])} ") + (
         "Live Edge Scan" if live else "Market Edges" if market else "Value Scan")
     books = books_of([res for _s, res, _p in sections])
@@ -717,7 +718,8 @@ def volume_messages(sections: list, date: str, cfg, title: str = "") -> list:
     profiles = {k: v for _s, _r, ex in sections for k, v in ex["profiles"].items()}
     books = books_of([res for _s, res, _e in sections])
     name = "Cross-Sport" if len(sections) > 1 else SPORT_NAMES.get(sections[0][0], sections[0][0])
-    title = title or (f"{books[0]} " if len(books) == 1 else "") + f"{name} Volume Mode"
+    focus = next((getattr(res, "focus", "") for _s, res, _e in sections if getattr(res, "focus", "")), "")
+    title = title or (f"{books[0]} " if len(books) == 1 else "") + (f"{focus} · " if focus else "") + f"{name} Volume Mode"
 
     def _scope(sp, res):
         n = len(res.slate) or res.games

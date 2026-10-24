@@ -596,14 +596,21 @@ def parlay_card(legs: list, books: Optional[tuple] = None, boost: float = 0.0) -
     return embed, view
 
 
-def targets_card(picks: list, books) -> tuple:
+def target_parlays(picks: list, books) -> dict:
+    """{(target, book): Parlay or None}: the search (slow for one game: run it in a thread)."""
+    from .parlay import TARGETS, best_for_target
+    legs = [d["ev"] for d in picks]
+    return {(t, b): best_for_target(legs, b, t) for t in TARGETS for b in tuple(books or PARLAY_BOOKS)}
+
+
+def targets_card(picks: list, books, found: Optional[dict] = None) -> tuple:
     """(embed, view): for each payout target, the highest-hit-chance parlay at each book."""
     from .betlinks import parlay_link
     from .odds import fmt_odds as _fo
-    from .parlay import TARGETS, best_for_target
+    from .parlay import TARGETS
     from .staking import parlay_pay_line
     books = tuple(books or PARLAY_BOOKS)
-    legs = [d["ev"] for d in picks]
+    found = found if found is not None else target_parlays(picks, books)
     embed = discord.Embed(title="🎯 Safest Parlay for Each Payout", color=0x1ABC9C, description=(
         "For each payout, the legs with the **highest real hit chance** that reach it: one leg per "
         "game, every leg priced fair or better. At a set payout, hit chance comes from legs priced "
@@ -613,7 +620,7 @@ def targets_card(picks: list, books) -> tuple:
     for target in TARGETS:
         lines = []
         for book in books:
-            p = best_for_target(legs, book, target)
+            p = found.get((target, book))
             if p is None:
                 continue
             legs_txt = " + ".join(f"{ev.best.label} ({_fo(o)})" for ev, o in p.legs)
@@ -645,8 +652,10 @@ def _show_targets(key: str):
                                                     ephemeral=True)
             return
         try:
-            embed, view = targets_card(detail["picks"], detail.get("books"))
-            await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
+            await interaction.response.defer(ephemeral=True, thinking=True)   # the search can take a few seconds
+            found = await asyncio.to_thread(target_parlays, detail["picks"], detail.get("books"))
+            embed, view = targets_card(detail["picks"], detail.get("books"), found)
+            await interaction.followup.send(embed=embed, view=view, ephemeral=True)
             await asyncio.to_thread(save_details)
         except Exception as e:
             await _report_error(interaction, e)

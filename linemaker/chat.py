@@ -30,7 +30,7 @@ from .freeze import Freezer, grade
 from .live import auto_results, board_lines, fetch_feed, run_auto, run_live
 from .odds import (american_to_decimal, expected_value, fair_odds, fmt_money, fmt_odds,
                    implied_probability, parse_odds)
-from .oddsapi import SPORT_KEYS, OddsAPI
+from .oddsapi import SPORT_KEYS, OddsAPI, norm
 from .pro import ProConfig
 from .pro_report import render_pro
 
@@ -174,6 +174,9 @@ TOOLS = [
                 "refresh": {"type": "boolean",
                             "description": "true only when the user asks for fresh/updated "
                                            "odds; otherwise odds under 30 minutes old are reused"},
+                "teams": {"type": "array", "items": {"type": "string"},
+                          "description": "only these teams' games, full names (e.g. New York Knicks); "
+                                         "two teams = that matchup"},
                 "book": {"type": "string", "enum": ["FanDuel", "DraftKings"],
                          "description": "only when the user asks for one sportsbook's picks "
                                         "(e.g. best FanDuel picks): price and parlay at that "
@@ -335,6 +338,12 @@ class LinemakerChat:
             snaps = os.environ.get("LINEMAKER_SNAPSHOTS", "snapshots")
             rows, slate, remaining, warning, source = slate_for(sport, date, kind,
                                                                 bool(args.get("refresh")))
+            focus = [t for t in (args.get("teams") or []) if t]
+            if focus:   # one team's game (or a matchup): the same odds pull, filtered
+                keys = [norm(t) for t in focus]
+                rows = [r for r in rows if any(k in norm(r.get("game", "")) for k in keys)]
+                slate = [g for g in slate if any(k in norm(g[0] if isinstance(g, (list, tuple)) else str(g))
+                                                 for k in keys)]
             if kind == "props" and date == _today():
                 from .alerts import arm_pretip
                 if arm_pretip(sport, date):
@@ -369,6 +378,7 @@ class LinemakerChat:
                 from .pp import select_legs
                 res.picks = select_legs(res.picks, cfg.pp_floor)
             res.slate = slate
+            res.focus = " vs ".join(focus) if focus else ""
             res.source_warning = warning
             res.projection_source = source
             res.kind = kind
@@ -464,6 +474,28 @@ class LinemakerChat:
             history.append({"role": "user", "content": f"{author}: {text}"})
             history.append({"role": "assistant", "content": reply})
             return Turn(reply, ctx["files"], [])
+        teams = []
+        if not attached_csv and (BET_WORDS.search(text) or GAME_LINE_WORDS.search(text)
+                                 or STRONG_VOLUME.search(text) or PLAYS_INTENT.search(text)):
+            try:
+                teams = await asyncio.to_thread(find_teams, text, _today())
+            except Exception as e:
+                log.warning("team lookup failed: %s", e)
+        if teams and (PLAYS_INTENT.search(text) or not QUESTION_WORDS.search(text)):   # not "why did..."
+            named = {s for s, pat in SPORT_WORDS.items() if re.search(pat, text, re.I)}
+            teams = [x for x in teams if not named or x[0] in named]
+            idle = [n for _s, n, playing in teams if not playing]
+            teams = [(s, n) for s, n, playing in teams if playing]
+            if idle and not teams:
+                reply = (f"**{' and '.join(idle)}** {'don' if len(idle) > 1 else 'doesn'}'t play today, and "
+                         "scans only price today's games, so I didn't run anything (no credits used). "
+                         "Ask again on game day.")
+                history.append({"role": "user", "content": f"{author}: {text}"})
+                history.append({"role": "assistant", "content": reply})
+                return Turn(reply, ctx["files"], [])
+            sports = sorted({s for s, _t in teams})
+            if sports:
+                quick = sports   # "best props for the knicks": that team's game only
         if quick:
             mode, kind = quick_mode(text), quick_kind(text)
             book = None if kind == "pp" else quick_book(text)
@@ -476,7 +508,8 @@ class LinemakerChat:
                     await asyncio.to_thread(self.run_tool, "find_plays",
                                             {"sport": sport, "mode": mode,
                                              "kind": "games" if sport == "UFC" else kind,   # fights: winners only
-                                             "refresh": refresh, "book": book}, ctx)
+                                             "refresh": refresh, "book": book,
+                                             "teams": [t for s, t in teams if s == sport]}, ctx)
                 except Exception as e:
                     errors.append(friendly_error(sport, e))
             reply = "\n".join(errors)   # the pick cards carry the answer
@@ -887,6 +920,73 @@ def quick_kind(text: str) -> str:
     if LIVE_WORDS.search(text):
         return "live"
     return "games" if GAME_LINE_WORDS.search(text) else "props"
+
+
+_TEAMS = {}
+
+
+def todays_teams(date: str) -> dict:
+    """sport -> {norm(team name): team name} for every team playing today (ESPN, cached)."""
+    if os.environ.get("LINEMAKER_OFFLINE"):   # tests: no live lookups
+        return {}
+    if date not in _TEAMS:
+        from .context import _team_ids
+        from .gamelogs import PATHS
+        out = {}
+        for sport in PATHS:
+            try:
+                out[sport] = {k: v[1] for k, v in _team_ids(sport, date).items()}
+            except Exception as e:
+                log.warning("teams %s: %s", sport, e)
+        _TEAMS.clear()
+        _TEAMS[date] = out
+    return _TEAMS[date]
+
+
+_ALL_TEAMS = {}
+PRO = ("NBA", "WNBA", "NFL", "NHL", "MLB")
+
+
+def all_teams(sport: str) -> dict:
+    """norm(team name) -> team name for the whole league (ESPN, cached for the process)."""
+    if sport not in _ALL_TEAMS:
+        from .boxscores import _get
+        from .gamelogs import PATHS
+        try:
+            data = _get(f"{PATHS[sport]}/teams", limit=1000 if sport == "NCAAF" else 100)
+            teams = data["sports"][0]["leagues"][0]["teams"]
+            _ALL_TEAMS[sport] = {norm(t["team"]["displayName"]): t["team"]["displayName"] for t in teams}
+        except Exception as e:
+            log.warning("team list %s: %s", sport, e)
+            return {}
+    return _ALL_TEAMS[sport]
+
+
+def find_teams(text: str, date: str) -> list:
+    """[(sport, team name, playing today)] named in the message: full name, nickname
+    ("knicks") or a two-word nickname ("trail blazers", "red wings"). A city alone is
+    ambiguous (New York has eight teams) and doesn't count. When a pro team and a college
+    team share a nickname ("warriors", "bruins") the pro team wins, and a longer name beats
+    one hidden inside it ("red wings" over the WNBA's "wings")."""
+    if os.environ.get("LINEMAKER_OFFLINE") and not _ALL_TEAMS and not _TEAMS:
+        return []
+    t = f" {norm(text)} "
+    today = todays_teams(date)
+    from .gamelogs import PATHS
+    hits = []
+    for sport in PATHS:
+        league = {**(all_teams(sport) if not os.environ.get("LINEMAKER_OFFLINE") else {}), **today.get(sport, {})}
+        for key, name in league.items():
+            words = key.split()
+            aliases = [key, " ".join(words[-2:]), words[-1]] if len(words) >= 3 else [key, words[-1]]
+            alias = next((a for a in aliases if len(a) >= 3 and f" {a} " in t), None)
+            if alias:
+                hits.append((sport, name, key in today.get(sport, {}), alias))
+    hits = [h for h in hits if not any(h[3] != o[3] and f" {h[3]} " in f" {o[3]} " for o in hits)]
+    if any(h[0] in PRO for h in hits):
+        pro_aliases = {h[3] for h in hits if h[0] in PRO}
+        hits = [h for h in hits if h[0] in PRO or h[3] not in pro_aliases]
+    return [(s, n, playing) for s, n, playing, _a in hits]
 
 
 def quick_book(text: str) -> Optional[str]:
