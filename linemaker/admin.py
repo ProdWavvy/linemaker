@@ -161,11 +161,14 @@ def env_changes() -> list:
             if env.get(k) == v:
                 continue
             was = env.get(k)
+            # CHANGE: the line is already in .env (edit it, don't add a second one).
+            # ADD: .env has no such line yet.
+            action = "✏️ CHANGE existing line" if was is not None else "➕ ADD new line"
             if SECRET.search(k):
-                out.append(f"• `{k}` · {source} · new key/token: paste it into .env yourself (hidden here)")
+                out.append(f"• {action}: `{k}` · {source} · key/token: paste it yourself (hidden here)")
             else:
-                out.append(f"• `{k}={v}` · {source} · .env has "
-                           + (f"`{was}`" if was not in (None, "") else "nothing"))
+                out.append(f"• {action}: `{k}={v}` · {source} · .env has "
+                           + (f"`{was}`" if was not in (None, "") else "it blank" if was == "" else "no such line"))
     return out
 
 

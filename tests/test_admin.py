@@ -88,7 +88,7 @@ class EnvChangesTest(SettingsLayersTest):
                     "# ---- Active\nLINEMAKER_MAX_PICKS=25\n")
         admin.apply_set("LINEMAKER_OVER_MIN_GAP", "0.05")
         out = "\n".join(admin.env_changes())
-        self.assertIn("`LINEMAKER_MIN_GAP=0.02` · settings.env (GitHub) · .env has `0.03`", out)
-        self.assertIn("`LINEMAKER_OVER_MIN_GAP=0.05` · set from Discord · .env has nothing", out)
+        self.assertIn("✏️ CHANGE existing line: `LINEMAKER_MIN_GAP=0.02` · settings.env (GitHub) · .env has `0.03`", out)
+        self.assertIn("➕ ADD new line: `LINEMAKER_OVER_MIN_GAP=0.05` · set from Discord · .env has no such line", out)
         self.assertNotIn("MAX_PICKS", out)               # same as .env: nothing to copy
         self.assertEqual(admin.changelog(), ["10-24 · LINEMAKER_MIN_GAP · 0.03 → 0.02 · test"])
