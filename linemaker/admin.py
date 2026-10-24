@@ -243,7 +243,8 @@ def due_alerts(problems: list, sent: dict, now: Optional[float] = None) -> list:
     now = now or time.time()
     out = []
     for kind, msg in problems:
-        if now - sent.get(kind, 0) >= HEALTH_QUIET.get(kind, 6) * 3600:
+        last = sent.get(kind)
+        if last is None or now - last >= HEALTH_QUIET.get(kind, 6) * 3600:
             sent[kind] = now
             out.append(msg)
     return out

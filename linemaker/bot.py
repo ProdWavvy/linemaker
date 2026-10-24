@@ -1140,6 +1140,18 @@ async def markets_cmd(interaction: discord.Interaction, sport: Optional[str] = "
         await _report_error(interaction, e)
 
 
+@bot.tree.command(name="weekly", description="The last 7 days: record, closing-line value, what's working, weight changes")
+async def weekly_cmd(interaction: discord.Interaction):
+    await interaction.response.defer(thinking=True)
+    try:
+        from .reports import weekly_lines
+        lines = await asyncio.to_thread(weekly_lines, today())
+        await interaction.followup.send(embed=discord.Embed(
+            title="🗓️ Weekly Summary · last 7 days", description="\n\n".join(lines)[:4000], color=0x9B59B6))
+    except Exception as e:
+        await _report_error(interaction, e)
+
+
 @bot.tree.command(name="ufc", description="UFC fighter projections: win chance, significant strikes, takedowns, fight time")
 async def ufc_cmd(interaction: discord.Interaction):
     await interaction.response.defer(thinking=True)
