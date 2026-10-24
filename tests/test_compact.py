@@ -1,4 +1,5 @@
 import asyncio
+from types import SimpleNamespace as NS
 import os
 from zoneinfo import ZoneInfo
 import unittest
@@ -382,3 +383,28 @@ class LiveSlipTest(unittest.TestCase):
         self.assertEqual(sum(":t" in c.custom_id for c in v0.children if c.custom_id), 15)
         self.assertEqual(sum(":t" in c.custom_id for c in v1.children if c.custom_id), 10)
         self.assertLessEqual(len(v0.children), 25)
+
+
+class BoardButtonsTest(unittest.TestCase):
+    def test_main_card_has_whole_card_views(self):
+        from linemaker import bot
+        legs = ParlayButtonTest._legs(ParlayButtonTest())
+
+        class Resp:
+            async def send_message(self, **kw):
+                self.sent = kw
+
+        async def build():
+            return bot.compact_card([([discord_embed("🎯 h")], None)] +
+                                    [([discord_embed(f"{i}. x")], {"rank": i, "ev": ev, "profile": None,
+                                                                    "history": None})
+                                     for i, ev in enumerate(legs, 1)])
+        _embeds, view = asyncio.run(build())
+        boards = [c for c in view.children if ":board:" in (getattr(c, "custom_id", "") or "")]
+        self.assertEqual([b.label for b in boards], ["Odds", "Hit Rates", "Line Moves", "Key Stats"])
+        for b in boards:
+            it = NS(data={"custom_id": b.custom_id}, response=Resp())
+            self.assertTrue(asyncio.run(bot.route_component(it)))
+            embed = it.response.sent["embed"]
+            self.assertIn("Every Pick", embed.title)
+            self.assertEqual(embed.description.count("\n"), len(legs) + 2)   # header + one row per pick

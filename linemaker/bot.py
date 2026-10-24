@@ -147,6 +147,8 @@ async def route_component(interaction: discord.Interaction) -> bool:
         handler = _slip_tap(key, parts[3], parts[4], parts[5])
     elif kind == "notes":
         handler = CompactView._show_notes(key)
+    elif kind == "board":
+        handler = _show_board(key, parts[3])
     elif kind in pages:
         handler = PickView._handler(key, pages[kind])
     else:
@@ -413,6 +415,14 @@ class CompactView(discord.ui.View):
                                      options=options, row=0, custom_id=f"lm:pick:{options[0].value}")
             self.add_item(pick)
         row, count = 1, 0
+        if picks:   # whole-card views of every pick: odds, hit rates, line moves, key stats
+            from .scan_format import BOARDS
+            bkey = _remember({"picks": [d for _e, d in picks[:25]]})
+            for kind, (label, emoji, _fn) in BOARDS.items():
+                self.add_item(discord.ui.Button(label=label, emoji=emoji, row=1,
+                                                style=discord.ButtonStyle.secondary,
+                                                custom_id=f"lm:board:{bkey}:{kind}"))
+            row = 2
         for _embed, detail in [p for p in parlays if "pp" in p[1]]:
             from .pp import board_link, entry_link
             key = _remember(detail)
@@ -574,6 +584,21 @@ def parlay_card(legs: list, books: Optional[tuple] = None) -> tuple:
                         "on the slip before you bet.")
     embed.set_footer(text=" ".join(n.replace("**", "") for n in notes)[:2048])
     return embed, view
+
+
+def _show_board(key: str, kind: str):
+    async def callback(interaction: discord.Interaction):
+        from .scan_format import BOARDS
+        detail = PICK_DETAILS.get(key)
+        if detail is None or kind not in BOARDS:
+            await interaction.response.send_message(
+                "This card is too old for that view. Ask again for fresh picks.", ephemeral=True)
+            return
+        try:
+            await interaction.response.send_message(embed=BOARDS[kind][2](detail["picks"]), ephemeral=True)
+        except Exception as e:
+            await _report_error(interaction, e)
+    return callback
 
 
 SLIP_PAGE = 15   # leg buttons per page (3 rows); the last two rows hold the controls

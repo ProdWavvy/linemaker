@@ -813,3 +813,76 @@ def pp_messages(sections: list, date: str, title: str = "") -> list:
             out.append(([e_embed], {"pp": entries[:10]}))
     out.append(([_scoping([(s, r, ex["profiles"]) for s, r, ex in sections])], None))
     return out
+
+
+# ---- whole-card views (the buttons on the main message) ------------------------------
+
+def _short_label(ev, n: int = 26) -> str:
+    return ev.best.label if len(ev.best.label) <= n else ev.best.label[:n - 1] + "…"
+
+
+def _board_embed(title: str, header: str, rows: list, footer: str) -> discord.Embed:
+    body = "```\n" + "\n".join([header] + rows) + "\n```"
+    e = discord.Embed(title=title, color=GOLD, description=_clip(body, 4096))
+    e.set_footer(text=footer + " · pick one in the dropdown for its full page")
+    return e
+
+
+def odds_board(details: list) -> discord.Embed:
+    from .parlay import leg_price
+    rows = []
+    for d in details:
+        ev = d["ev"]
+        fd, dk = leg_price(ev, "FanDuel"), leg_price(ev, "DraftKings")
+        rows.append(f"{d['rank']:>2} {_short_label(ev):<26} {fmt_odds(fd) if fd else '—':>6} "
+                    f"{fmt_odds(dk) if dk else '—':>6} {fmt_odds(ev.best.fair):>6} {_pct(ev.best.blended):>4}")
+    return _board_embed("🏷️ Odds, Every Pick", f"{'#':>2} {'Pick':<26} {'FD':>6} {'DK':>6} {'Fair':>6} {'Us':>4}",
+                        rows, "Fair = our estimate as odds · Us = our hit chance")
+
+
+def hits_board(details: list) -> discord.Embed:
+    rows = []
+    for d in details:
+        ev, prof = d["ev"], d.get("profile")
+
+        def rate(n):
+            w = prof.recent.get(n) if prof else None
+            return _pct(w.rate) if w else "—"
+        szn = _pct(prof.season.rate) if prof and prof.season else "—"
+        rows.append(f"{d['rank']:>2} {_short_label(ev):<26} {szn:>4} {rate(5):>4} {rate(10):>4} {rate(20):>4}")
+    return _board_embed("📊 Hit Rates, Every Pick", f"{'#':>2} {'Pick':<26} {'Szn':>4} {'L5':>4} {'L10':>4} {'L20':>4}",
+                        rows, "How often this side cleared this line · — = no game log (game lines)")
+
+
+def movement_board(details: list) -> discord.Embed:
+    rows = []
+    for d in details:
+        ev, hist = d["ev"], d.get("history") or []
+        book = ev.best.best_book
+        seen = [v for _t, books in hist for b, v in (books.get(ev.best.side) or {}).items()
+                if _book_key(b) == _book_key(book)]
+        if len(seen) >= 2:
+            move = f"{fmt_odds(seen[0])} → {fmt_odds(seen[-1])}"
+            arrow = "⬆" if seen[-1] < seen[0] else ("⬇" if seen[-1] > seen[0] else "·")
+        else:
+            move, arrow = f"{fmt_odds(ev.best.best_odds)} (no move yet)", " "
+        rows.append(f"{d['rank']:>2} {_short_label(ev):<26} {move:<16} {arrow}")
+    return _board_embed("📉 Line Movement, Every Pick", f"{'#':>2} {'Pick':<26} {'First → now':<16}",
+                        rows, "At the best book · ⬆ the price got shorter (market moved our way)")
+
+
+def stats_board(details: list) -> discord.Embed:
+    rows = []
+    for d in details:
+        ev, prof = d["ev"], d.get("profile")
+        m, s = ev.market, ev.best
+        avg = f"{prof.recent[10].avg:.1f}" if prof and 10 in prof.recent else "—"
+        rows.append(f"{d['rank']:>2} {_short_label(ev):<26} {m.mean:>5.1f} {avg:>5} "
+                    f"{_pct(s.model_prob):>4} {_pct(s.market_prob):>4}")
+    return _board_embed("📈 Key Stats, Every Pick", f"{'#':>2} {'Pick':<26} {'Proj':>5} {'L10':>5} {'Mod':>4} {'Mkt':>4}",
+                        rows, "Proj = our projection (margin/total for game lines) · L10 = last-10 average · "
+                              "Mod / Mkt = model vs no-vig market chance")
+
+
+BOARDS = {"odds": ("Odds", "🏷️", odds_board), "hits": ("Hit Rates", "📊", hits_board),
+          "move": ("Line Moves", "📉", movement_board), "stats": ("Key Stats", "📈", stats_board)}
