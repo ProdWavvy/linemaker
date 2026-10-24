@@ -78,7 +78,21 @@ def _poisson(rng: random.Random, lam: float) -> int:
         k += 1
 
 
+# UFC total rounds ("ufcrounds"): mean = chance the fight ends early, sd = scheduled rounds.
+# An early finish lands at a time drawn from a front-loaded curve (hazard FINISH_HAZARD per
+# round: about 45% of finishes in round 1, 32% in round 2, 23% in round 3 of a 3-rounder);
+# otherwise the fight goes the distance and the outcome is the full scheduled rounds.
+FINISH_HAZARD = 0.35
+
+
+def _finish_time(u: float, rounds: float) -> float:
+    """Inverse of the exponential curve truncated to the scheduled rounds."""
+    return -math.log(1 - u * (1 - math.exp(-FINISH_HAZARD * rounds))) / FINISH_HAZARD
+
+
 def _draw(rng: random.Random, dist: str, mean: float, sd: float) -> float:
+    if dist == "ufcrounds":
+        return _finish_time(rng.random(), sd) if rng.random() < mean else sd
     if dist == "poisson":
         return _poisson(rng, mean)
     if dist == "negbin":
@@ -100,6 +114,10 @@ except ImportError:   # pure-Python fallback below (about 100x slower)
 
 
 def _np_draws(rng, dist: str, mean: float, sd: float, n: int):
+    if dist == "ufcrounds":
+        early = rng.random(n) < mean
+        t = -np.log(1 - rng.random(n) * (1 - math.exp(-FINISH_HAZARD * sd))) / FINISH_HAZARD
+        return np.where(early, t, sd)
     if dist == "poisson":
         return rng.poisson(max(mean, 0.0), n)
     if dist == "negbin":

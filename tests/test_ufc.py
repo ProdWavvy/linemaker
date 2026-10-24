@@ -42,8 +42,11 @@ class UFCModelTest(unittest.TestCase):
         with mock.patch.object(ufc_model, "card", return_value=self._card()), \
                 mock.patch.object(ufc_model, "fighter", side_effect=lambda i: info[i]):
             rows = ufc_model.ufc_projections("2026-10-24", [("Alexander Volkanovski", "Movsar Evloev")])
-        self.assertEqual(len(rows), 1)
+        self.assertEqual([r["market"] for r in rows], ["moneyline", "total rounds"])
         self.assertEqual(rows[0]["subject"], "Movsar Evloev")
+        self.assertEqual(rows[1]["dist"], "ufcrounds")
+        self.assertEqual(rows[1]["stdev"], "3")
+        self.assertTrue(0.2 < float(rows[1]["mean"]) < 0.8)
         self.assertGreater(float(rows[0]["mean"]), 0)          # the stronger record is the home side here
 
     def test_results_from_espn(self):
@@ -55,6 +58,28 @@ class UFCModelTest(unittest.TestCase):
             rows = ufc_model.ufc_results(recs, "2026-10-24")
         self.assertEqual(rows, [{"game_id": "g", "subject": "Movsar Evloev", "market": "moneyline",
                                  "line": "0.0", "actual": "1"}])   # Merab's fight isn't final
+
+
+class RoundsTest(unittest.TestCase):
+    def test_rounds_distribution(self):
+        from linemaker.sim import simulate
+        r = simulate(0.5, 2.5, "ufcrounds", 3, 40000, "x")
+        # half go the distance (over 2.5) plus early finishes after 2:30 of round 3
+        self.assertTrue(0.52 < r.p_over < 0.58)
+        r1 = simulate(0.5, 1.5, "ufcrounds", 3, 40000, "x")
+        self.assertGreater(r1.p_over, r.p_over)
+        self.assertAlmostEqual(simulate(0.0, 2.5, "ufcrounds", 3, 1000, "x").p_over, 1.0)
+
+    def test_fight_length(self):
+        self.assertAlmostEqual(ufc_model.fight_length({"period": 2, "displayClock": "1:44"}), 1 + 104 / 300)
+        self.assertEqual(ufc_model.fight_length({"period": 3, "displayClock": "5:00"}), 3.0)
+
+    def test_finish_chance(self):
+        killer = fighter(wins=20, finishes=18)
+        chin = fighter(losses=10, finished=9)
+        grinder = fighter(wins=20, finishes=2, losses=2, finished=0)
+        self.assertGreater(ufc_model.finish_chance(killer, chin, 0.7),
+                           ufc_model.finish_chance(grinder, grinder, 0.5))
 
 
 if __name__ == "__main__":

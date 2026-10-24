@@ -246,7 +246,7 @@ def run_live(api: OddsAPI, sports: list, projections: list, date: str, tz: ZoneI
              cfg: ProConfig, freezer=None, props: Optional[bool] = None,
              max_events: Optional[int] = None, only: Optional[set] = None) -> LiveRun:
     # Only spend credits on what the projections need.
-    game_types = {"moneyline", "spread", "game total", "total goals", "match result"}
+    game_types = {"moneyline", "spread", "game total", "total goals", "match result", "total rounds"}
     markets = {p.get("market", "").strip().lower() for p in projections}
     if props is None:
         props = bool(markets - game_types)

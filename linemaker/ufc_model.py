@@ -120,7 +120,8 @@ def fighter(aid: str) -> dict:
         rec = _get(f"{CORE}/athletes/{aid}/records").get("items", [])
         stats = {s["name"]: s.get("value") or 0 for s in (rec[0]["stats"] if rec else [])}
         f.update(wins=stats.get("wins", 0), losses=stats.get("losses", 0),
-                 finishes=stats.get("tkos", 0) + stats.get("submissions", 0))
+                 finishes=stats.get("tkos", 0) + stats.get("submissions", 0),
+                 finished=stats.get("tkoLosses", 0) + stats.get("submissionLosses", 0))
     except Exception as e:
         log.warning("ufc record %s: %s", aid, e)
     try:
@@ -188,14 +189,28 @@ def win_prob(a: dict, b: dict) -> tuple:
     return 1 / (1 + math.exp(-z)), steps
 
 
+FINISH_PRIOR, PRIOR_N = 0.5, 4   # about half of UFC fights end early
+
+
+def finish_chance(a: dict, b: dict, p_a: float) -> float:
+    """P(the fight ends before the final bell): each way the fight can be won, the winner's
+    finishing rate averaged with how often the loser gets finished, both pulled toward the
+    UFC norm (about half of fights end early) so short records don't swing it."""
+    def rate(k, n):
+        return ((k or 0) + FINISH_PRIOR * PRIOR_N) / ((n or 0) + PRIOR_N)
+    a_fin, b_fin = rate(a.get("finishes"), a.get("wins")), rate(b.get("finishes"), b.get("wins"))
+    a_got, b_got = rate(a.get("finished"), a.get("losses")), rate(b.get("finished"), b.get("losses"))
+    return p_a * (a_fin + b_got) / 2 + (1 - p_a) * (b_fin + a_got) / 2
+
+
 def _match(name: str, fights: list) -> Optional[tuple]:
     n = norm(name)
-    for fa, ida, fb, idb, _c in fights:
+    for fa, ida, fb, idb, c in fights:
         if n in (norm(fa), norm(fb)):
-            return (fa, ida, fb, idb)
+            return (fa, ida, fb, idb, c)
     last = n.split()[-1] if n else ""
     hits = [f for f in fights if last and last in (norm(f[0]).split()[-1], norm(f[2]).split()[-1])]
-    return hits[0][:4] if len(hits) == 1 else None
+    return hits[0] if len(hits) == 1 else None
 
 
 def ufc_projections(date: str, games: list) -> list:
@@ -213,20 +228,25 @@ def ufc_projections(date: str, games: list) -> list:
         if not m:
             log.info("ufc: %s vs %s not on ESPN's card", away, home)
             continue
-        fa, ida, fb, idb = m
+        fa, ida, fb, idb, comp = m
         home_id, away_id = (ida, idb) if norm(home) == norm(fa) or (
             norm(home).split()[-1:] == norm(fa).split()[-1:]) else (idb, ida)
-        pairs.append((away, home, away_id, home_id))
-    ids = sorted({i for p in pairs for i in p[2:]})
+        rounds = ((comp.get("format") or {}).get("regulation") or {}).get("periods") or 3
+        pairs.append((away, home, away_id, home_id, rounds))
+    ids = sorted({i for p in pairs for i in p[2:4]})
     with ThreadPoolExecutor(max_workers=8) as pool:
         info = dict(zip(ids, pool.map(fighter, ids)))
     rows = []
-    for away, home, away_id, home_id in pairs:
+    for away, home, away_id, home_id, rounds in pairs:
         p, steps = win_prob(info[home_id], info[away_id])
         p = min(max(p, 0.02), 0.98)
         rows.append({"sport": "UFC", "subject": home, "market": "moneyline",
                      "mean": f"{NormalDist().inv_cdf(p):.4f}", "stdev": "1",
                      "notes": "UFC model: ESPN fighter stats (" + "; ".join(f"{k} {v}" for k, v in steps)[:300] + ")"})
+        early = finish_chance(info[home_id], info[away_id], p)
+        rows.append({"sport": "UFC", "subject": home, "market": "total rounds", "dist": "ufcrounds",
+                     "mean": f"{early:.4f}", "stdev": str(rounds),
+                     "notes": f"UFC model: {early:.0%} chance it ends early, {rounds} rounds scheduled"})
     log.info("ufc model %s: %d fights asked, %d projected", date, len(games), len(rows))
     return rows
 
@@ -242,14 +262,23 @@ def ufc_results(records: dict, date: str) -> list:
     except Exception as e:
         log.warning("ufc results %s: %s", date, e)
         return []
-    winners = {}
+    winners, length = {}, {}
     for fa, _ia, fb, _ib, comp in fights:
-        if not (comp.get("status", {}).get("type", {}).get("completed")):
+        status = comp.get("status", {})
+        if not status.get("type", {}).get("completed"):
             continue
         flags = {norm(c["athlete"]["displayName"]): c.get("winner") for c in comp.get("competitors", [])}
         winners.update({k: (v, flags) for k, v in flags.items()})
+        rounds = fight_length(status)
+        if rounds is not None:
+            length.update({k: rounds for k in flags})
     rows = []
     for r in recs:
+        if r["market"] == "total rounds":
+            if norm(r["subject"]) in length:
+                rows.append({"game_id": r["game_id"], "subject": r["subject"], "market": r["market"],
+                             "line": str(r["inputs"]["line"]), "actual": f"{length[norm(r['subject'])]:.3f}"})
+            continue
         hit = winners.get(norm(r["subject"]))
         if hit is None:
             continue
@@ -258,6 +287,15 @@ def ufc_results(records: dict, date: str) -> list:
         rows.append({"game_id": r["game_id"], "subject": r["subject"], "market": r["market"],
                      "line": str(r["inputs"]["line"]), "actual": str(actual)})
     return rows
+
+
+def fight_length(status: dict) -> Optional[float]:
+    """Rounds fought, e.g. 1:44 of round 2 -> 1.347 (ESPN's clock is the time of the finish)."""
+    try:
+        mins, secs = str(status.get("displayClock", "")).split(":")
+        return int(status["period"]) - 1 + (int(mins) * 60 + int(secs)) / 300
+    except (KeyError, ValueError, TypeError):
+        return None
 
 
 def next_card_note(date: str) -> str:

@@ -34,7 +34,7 @@ SPORT_KEYS = {
     "MLB": "baseball_mlb", "UCL": "soccer_uefa_champs_league", "LALIGA": "soccer_spain_la_liga",
     "EPL": "soccer_epl", "MLS": "soccer_usa_mls", "UFC": "mma_mixed_martial_arts",
 }
-GAME_MARKETS = {"UFC": "h2h"}   # fights: winner only (no spreads or totals in the feed)
+GAME_MARKETS = {"UFC": "h2h,totals"}   # fights: winner, and total rounds where a book has it
 SOCCER = {"UCL", "LALIGA", "EPL", "MLS"}
 
 # Odds API market key -> engine market name, per sport family.
@@ -353,7 +353,8 @@ def parse_game_odds(events: list, sport: str, tz: ZoneInfo) -> list:
                     for o in outs:
                         pt = float(o["point"])
                         base = dict(common, bet_type="total", subject=home, opponent=away,
-                                    market="game total" if sport_u not in SOCCER else "total goals",
+                                    market=("total goals" if sport_u in SOCCER else
+                                            "total rounds" if sport_u == "UFC" else "game total"),
                                     line=pt)
                         side = 0 if o["name"] == "Over" else 1
                         g.add(base, (ev["id"], "total", pt), book, side, 2, o["price"], mk, o,
