@@ -535,7 +535,7 @@ def parlay_card(legs: list, books: Optional[tuple] = None, boost: float = 0.0) -
     from .odds import fmt_odds as _fo
     from .parlay import custom_parlays, leg_price, sgp_check
     from .parlay_math import hit_chance, leg_value
-    from .staking import _money, stake_tier
+    from .staking import parlay_pay_line
     books = tuple(books or PARLAY_BOOKS)
     short = {"FanDuel": "FD", "DraftKings": "DK"}
     lines = []
@@ -550,14 +550,12 @@ def parlay_card(legs: list, books: Optional[tuple] = None, boost: float = 0.0) -
     built = custom_parlays(legs, books, boost)
     view = discord.ui.View(timeout=None)
     for p, missing in built:
-        stake = stake_tier(p.prob, p.american, parlay=True)
         from .discord_format import _style
         name, _tag, emoji, _c = _style(p.book)
         corr = f" ({p.indep_prob:.0%} if independent)" if abs(p.prob - p.indep_prob) >= 0.01 else ""
         value = (f"**{_fo(p.american)}**" + (f" with the +{boost:.0%} boost" if boost else "")
                  + f" · hit chance **{p.prob:.0%}**{corr} · EV {p.ev:+.1f}%\n"
-                 + (f"{_money(stake)} pays **{_money(stake * p.decimal)}**" if stake else
-                    f"$10 pays **${10 * p.decimal:,.2f}**"))
+                 + parlay_pay_line(p.prob, p.american, p.decimal))
         if missing:
             value += f"\n⚠️ Not offered here: {', '.join(missing)[:200]}"
         sgp = sgp_check([ev for ev, _o in p.legs], p.book)

@@ -788,12 +788,11 @@ def volume_messages(sections: list, date: str, cfg, title: str = "") -> list:
                 slip = f"\n[🧾 Open this {len(p.legs)}-leg{tag} slip on {bname}]({url})" if url else ""
                 if url:
                     buttons.append((f"{len(p.legs)}-leg{tag} on {bname}", url))
-                from .staking import stake_line
+                from .staking import parlay_pay_line
                 corr = (f" ({_pct(p.indep_prob)} if independent)"
                         if abs(p.prob - p.indep_prob) >= 0.01 else "")
-                body = (f"{legs_txt}\nHit chance **{_pct(p.prob)}**{corr} · $100 pays "
-                        f"**${p.payout:,.0f}** · EV {fmt_money(p.ev)}\n"
-                        + stake_line(p.prob, p.american, parlay=True))
+                body = (f"{legs_txt}\nHit chance **{_pct(p.prob)}**{corr} · EV {p.ev:+.1f}%\n"
+                        + parlay_pay_line(p.prob, p.american, p.decimal))
                 if p.kind:
                     body += f"\n🔗 Same-game legs: {bname} prices the {p.kind} itself, lower than shown."
                 icon = "🔗" if p.kind else "💰" if p.style == "value" else "🔒"

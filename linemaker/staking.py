@@ -95,3 +95,13 @@ def suggested_dollars(p: float, american: int, parlay: bool = False) -> Optional
     roll = bankroll()
     share = suggested(p, american)
     return round(share * roll, 2) if roll and share > 0 else None
+
+
+def parlay_pay_line(p: float, american: int, decimal: float) -> str:
+    """'💵 Stake $5 → pays $27.80 ($22.80 profit)' at your suggested amount for a parlay."""
+    amount = suggested_dollars(p, american, parlay=True)
+    if not amount:
+        return stake_line(p, american, parlay=True) + f" · $10 pays **${10 * decimal:,.2f}**"
+    fun = " · fun money: no edge, keep it small" if suggested(p, american) <= 0 else ""
+    return (f"💵 **Stake {_money(amount)}** → pays **{_money(round(amount * decimal, 2))}** "
+            f"({_money(round(amount * (decimal - 1), 2))} profit){fun}")
