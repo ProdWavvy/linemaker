@@ -181,10 +181,12 @@ TOOLS = [
                          "description": "only when the user asks for one sportsbook's picks "
                                         "(e.g. best FanDuel picks): price and parlay at that "
                                         "book only"},
-                "kind": {"type": "string", "enum": ["props", "games", "live", "pp"],
+                "kind": {"type": "string", "enum": ["props", "games", "live", "live_props", "pp"],
                          "description": "props (default); games = pre-game moneyline, spread, "
                                         "total; live = in-game moneyline/spread/total for games "
-                                        "in progress (score + clock model); pp = PrizePicks "
+                                        "in progress (score + clock model); live_props = in-game "
+                                        "player props (box score so far + projection for the rest); "
+                                        "pp = PrizePicks "
                                         "lines with Power/Flex entries"},
                 "mode": {"type": "string", "enum": ["smart", "volume", "market"],
                          "description": "smart = best edges (default); volume = likeliest legs "
@@ -358,7 +360,7 @@ class LinemakerChat:
                 cfg, freezer = pp_config(), None
                 if os.environ.get("LINEMAKER_TRACKING", "on").lower() not in ("off", "0", "false", "no"):
                     tracker = Tracker(os.path.join(os.environ.get("LINEMAKER_TRACKING_DIR", "tracking"), "pp"), date)
-            if kind == "live":
+            if kind in ("live", "live_props"):
                 from .live import live_settings
                 cfg, tracker = live_settings(cfg, date)
                 freezer = None
@@ -381,7 +383,7 @@ class LinemakerChat:
             res.focus = " vs ".join(focus) if focus else ""
             res.source_warning = warning
             res.projection_source = source
-            res.kind = kind
+            res.kind = "live" if kind == "live_props" else kind
             res.odds_age = slate_age_minutes(sport, date, kind)
             extras = enrich(res, sport, date, cfg.min_prob if mode == "volume" else None)
             extras["mode"] = mode
@@ -396,7 +398,8 @@ class LinemakerChat:
                     "market edges (FanDuel/DraftKings vs the sharp-book consensus, no model)"
                     if mode == "market" else "plays") + (
                 " (moneylines, spreads, totals)" if kind == "games" else
-                " (live in-game lines)" if kind == "live" else "")
+                " (live in-game lines)" if kind == "live" else
+                " (live in-game player props)" if kind == "live_props" else "")
             out = summarize(_LR, f"{sport} {date} ({mode} mode, {what}): {source} projections "
                                  f"matched {len(rows)} posted {'/'.join(res.books)} lines; Odds API "
                                  f"credits left {remaining}.")
@@ -658,7 +661,7 @@ def slate_for(sport: str, date: str, kind: str = "props", refresh: bool = False)
 def _slate_for(sport: str, date: str, kind: str, refresh: bool) -> tuple:
     key = (sport, date, kind)
     hit = None if refresh else (_SLATES.get(key) or load_slate_cache(sport, date, kind))
-    window = LIVE_CACHE_SECONDS if kind == "live" else PLAYS_CACHE_SECONDS
+    window = LIVE_CACHE_SECONDS if kind in ("live", "live_props") else PLAYS_CACHE_SECONDS
     if hit and time.time() - hit[0] < window:
         log.info("%s %s %s: reusing odds from %.0f min ago (0 credits)", sport, date, kind,
                  (time.time() - hit[0]) / 60)
@@ -679,7 +682,10 @@ def _slate_for(sport: str, date: str, kind: str, refresh: bool) -> tuple:
                         "PrizePicks lines vs the props model")
         save_slate_cache(sport, date, _SLATES[key], kind)
         return tuple(_SLATES[key][1:])
-    if kind == "live":
+    if kind == "live_props":
+        from .live_props import run_live_props
+        lr = run_live_props(OddsAPI(), [sport], date, _tz())
+    elif kind == "live":
         # The pre-game line saved earlier (if any) anchors the live model.
         from .live import live_dates
         rows = []
@@ -918,7 +924,8 @@ def quick_kind(text: str) -> str:
     if PP_WORDS.search(text):
         return "pp"
     if LIVE_WORDS.search(text):
-        return "live"
+        # "live ml parlay" / "live spreads": in-game game lines; anything else live is props
+        return "live" if GAME_LINE_WORDS.search(text) else "live_props"
     return "games" if GAME_LINE_WORDS.search(text) else "props"
 
 

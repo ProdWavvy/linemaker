@@ -29,6 +29,10 @@ def grade_day(date: str, rows: list, auto: bool):
         if os.path.exists(live_track):   # in-game reads: graded from the same final scores
             from .tracking import apply_results
             live_rows = auto_results(api, live_track)
+            import json as _json
+            from .boxscores import prop_results
+            with open(live_track) as f:
+                live_rows += prop_results(_json.load(f), date)   # live player props: box scores
             if live_rows:
                 n_live = apply_results(live_track, live_rows)
                 if n_live:

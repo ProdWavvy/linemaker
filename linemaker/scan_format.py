@@ -327,7 +327,13 @@ def scan_messages(sections: list, date: str, cfg, title: str = "") -> list:
     sources = sorted({getattr(res, "projection_source", "") for _s, res, _p in sections} - {""})
     if sources:
         intro[0] += f" Projections: {', '.join(sources)}."
-    if live:
+    live_props = live and any("props" in getattr(res, "projection_source", "") for _s, res, _p in sections)
+    if live_props:
+        intro.append("🔴 **Live props:** games in progress only. Each player's projected final = what he "
+                     "has so far (live box score) + his pre-game projection for the share of the game "
+                     "left (cut in a blowout). Live books react within seconds, so the market gets most "
+                     "of the weight and stale prices are thrown out. Check the line in the app first.")
+    elif live:
         intro.append("🔴 **Live mode:** only games in progress, priced from the score, the clock "
                      "and the pre-game line. The market gets most of the weight because live books "
                      "see possession, fouls, injuries and lineups within seconds and this model "

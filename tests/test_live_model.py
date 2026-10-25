@@ -130,8 +130,12 @@ class RunLiveTest(unittest.TestCase):
         from linemaker.chat import quick_kind, quick_plays_request
         self.assertEqual(quick_plays_request("any live edges right now"), ["NBA"])
         self.assertEqual(quick_plays_request("best live nhl bets"), ["NHL"])
-        self.assertEqual(quick_kind("any live edges right now"), "live")
+        self.assertEqual(quick_kind("any live edges right now"), "live_props")
         self.assertEqual(quick_kind("best in-game moneylines"), "live")
+        self.assertEqual(quick_kind("live ml parlay"), "live")
+        self.assertEqual(quick_kind("live props parlay nba"), "live_props")
+        self.assertEqual(quick_plays_request("live props parlay nba"), ["NBA"])
+        self.assertEqual(quick_plays_request("live ml parlay nhl"), ["NHL"])
         self.assertEqual(quick_kind("best nba props today"), "props")
 
 
