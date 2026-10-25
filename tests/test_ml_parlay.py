@@ -186,7 +186,7 @@ class LiveGameParlayTest(unittest.TestCase):
         from linemaker.tracking import Tracker, load_day
         with tempfile.TemporaryDirectory() as d:
             cfg, _t = live_settings(ml_parlay_config(("moneyline", "spread")), "2026-10-25")
-            self.assertEqual((cfg.phase, cfg.min_odds, cfg.max_odds, cfg.max_parlay_legs), ("live", -130, -450, 3))
+            self.assertEqual((cfg.phase, cfg.min_odds, cfg.max_odds, cfg.max_parlay_legs), ("live", -130, -450, 6))
             live = os.path.join(d, "live")
             res = run_pro(slate([-150, -200, -250, -300, -380, -600], spreads=True), "2026-10-25", cfg, None,
                           Tracker(live, "2026-10-25"))

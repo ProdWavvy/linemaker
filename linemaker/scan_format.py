@@ -794,9 +794,12 @@ def volume_messages(sections: list, date: str, cfg, title: str = "") -> list:
                                        for i, ev in enumerate(legs, 1)],
                               "books": books}))
         from .betlinks import parlay_link
-        parlays = build_parlays(legs, books=books) + build_sgps(legs, books=books)
+        sizes = tuple(range(2, max(cfg.max_parlay_legs or 4, 2) + 1))
+        parlays = build_parlays(legs, sizes=sizes, books=books) + build_sgps(legs, books=books)
         if cfg.max_parlay_legs:
             parlays = [p for p in parlays if len(p.legs) <= cfg.max_parlay_legs]
+        if cfg.parlay_min_ev is not None:   # bigger tickets only while they still hold their value
+            parlays = [p for p in parlays if len(p.legs) <= 2 or p.prob * p.decimal - 1 >= cfg.parlay_min_ev]
         if not parlays:
             header.description += (
                 f"\n\n**{len(legs)} leg{' only' if len(legs) == 1 else 's'}, no parlay:** "

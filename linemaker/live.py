@@ -204,7 +204,12 @@ def live_parlay_gates(cfg: ProConfig) -> ProConfig:
     cfg.min_odds = _env_num("LINEMAKER_LIVE_ODDS_MIN", int) or -130
     cfg.max_odds = _env_num("LINEMAKER_LIVE_ODDS_MAX", int) or -450
     cfg.min_prob = _env_num("LINEMAKER_LIVE_MIN_PROB", float) or 0.66
-    cfg.max_parlay_legs = _env_num("LINEMAKER_LIVE_PARLAY_LEGS", int) or 3
+    # As many legs as still pay their way: every size up to 6 is built, and a parlay past 2
+    # legs is shown only while its EV (hit chance x payout - 1) stays above -3%, since each
+    # added favourite multiplies in the book's margin.
+    cfg.max_parlay_legs = _env_num("LINEMAKER_LIVE_PARLAY_LEGS", int) or 6
+    min_ev = os.environ.get("LINEMAKER_LIVE_PARLAY_MIN_EV", "").strip()
+    cfg.parlay_min_ev = float(min_ev) if min_ev else -0.03
     return cfg
 
 

@@ -150,7 +150,8 @@ class ProConfig:
     pick_tag: str = "model"            # what a pick is logged as in tracking ("model" / "market")
     calibrate: bool = False            # use calibrated hit chances (volume, PrizePicks: see autotune)
     phase: str = "pre"                 # pre-game or live: separate weights, calibration, tracking
-    max_parlay_legs: Optional[int] = None   # cap on auto-parlay size (live parlays: 3)
+    max_parlay_legs: Optional[int] = None   # cap on auto-parlay size (live parlays: 6)
+    parlay_min_ev: Optional[float] = None   # parlays past 2 legs shown only at this EV or better
     game_parlay_types: tuple = ()      # game-line parlay legs (ml_parlay_config): bet types used
     one_per_player: bool = False       # at most one leg per player (volume: his legs move together)
     # Log every priced market (not just picks) to tracking/<date>.json for calibration.
