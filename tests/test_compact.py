@@ -567,3 +567,33 @@ class BetDropdownTest(unittest.TestCase):
         embed, pview = asyncio.run(open_one())
         self.assertTrue(any((getattr(c, "label", "") or "").startswith("Open ") for c in pview.children))
         self.assertIn("no one-tap slip", embed.fields[0].value)
+
+
+class OneLegVolumeTest(unittest.TestCase):
+    def test_single_leg_gets_bet_dropdown_and_note(self):
+        import json
+        from linemaker import bot
+        from linemaker.pro import rows_to_markets, run_pro, volume_config
+        from linemaker.scan_format import volume_messages
+        links = {"DraftKings": [None, {"link": "https://sportsbook.draftkings.com/event/1?outcomes=o1", "sid": "o1"}]}
+        rows = [{"date": "2026-10-25", "sport": "NFL", "game_id": "g1", "game": "A @ H", "bet_type": "prop",
+                 "subject": "Geno Smith", "market": "passing tds", "line": "2.5", "mean": "1.2", "stdev": "0.9",
+                 "books": "DraftKings:+230/-280", "links": json.dumps(links)}]
+        cfg = volume_config()
+        cfg.min_prob, cfg.min_odds, cfg.max_odds, cfg.min_gap, cfg.track = 0.5, -100, -10000, -1.0, False
+        res = run_pro(rows_to_markets(rows), "2026-10-25", cfg)
+        self.assertEqual(len(res.picks), 1)
+        msgs = volume_messages([("NFL", res, {"profiles": {}, "context": {}, "history": {}})], "2026-10-25", cfg)
+
+        async def build():
+            return bot.compact_card(msgs)
+        embeds, view = asyncio.run(build())
+        self.assertIn("no parlay", embeds[0].description)
+        sel = next(c for c in view.children if getattr(c, "placeholder", "") and "Bet a leg" in c.placeholder)
+        detail = bot.PICK_DETAILS[sel.options[0].value]
+
+        async def open_leg():
+            return bot.PickView(sel.options[0].value, detail)
+        pv = asyncio.run(open_leg())
+        self.assertTrue(any(getattr(c, "url", None) for c in pv.children))            # Bet on DraftKings
+        self.assertTrue(any(getattr(c, "label", "") == "I bet this" for c in pv.children))

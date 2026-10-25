@@ -797,6 +797,12 @@ def volume_messages(sections: list, date: str, cfg, title: str = "") -> list:
         parlays = build_parlays(legs, books=books) + build_sgps(legs, books=books)
         if cfg.max_parlay_legs:
             parlays = [p for p in parlays if len(p.legs) <= cfg.max_parlay_legs]
+        if not parlays:
+            header.description += (
+                f"\n\n**{len(legs)} leg{' only' if len(legs) == 1 else 's'}, no parlay:** "
+                + ("one leg can't make a parlay. " if len(legs) == 1 else
+                   "these legs can't go on one ticket together (same game / same player). ")
+                + "Bet a leg straight from 🧾 below, or ask again in a few minutes as prices move.")
         from .parlay_math import leg_value
         try:
             from .parlay_track import log_parlays

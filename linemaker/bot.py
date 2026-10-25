@@ -402,6 +402,26 @@ def moneyline_button(moneylines: list, row: int = 4, books: Optional[tuple] = No
                              style=discord.ButtonStyle.primary, custom_id=f"lm:mkparlay:{key}")
 
 
+def _leg_detail(d: dict, books) -> dict:
+    """A volume leg as a pick detail (write-up embed, Bet links, I bet this)."""
+    from .betlinks import pick_links
+    from .parlay import leg_price
+    from .odds import american_to_decimal
+    ev = d["ev"]
+    s = ev.best
+    books = tuple(books or PARLAY_BOOKS)
+    prices = [(b, leg_price(ev, b)) for b in books]
+    lines = [" · ".join(f"{b} {fmt_odds(o)}" for b, o in prices if o) or f"{s.best_book} {fmt_odds(s.best_odds)}",
+             f"Hit chance **{s.blended:.0%}** · EV {s.blended * american_to_decimal(s.best_odds) - 1:+.0%} at the best price"]
+    prof = d.get("profile")
+    if prof is not None and getattr(prof, "season", None):
+        lines.append(f"Season hit rate at this line: {prof.season.rate:.0%}")
+    if ev.market.notes:
+        lines.append(ev.market.notes[:300])
+    embed = discord.Embed(title=f"{d['rank']}. {s.label}"[:256], description="\n".join(lines), color=0xF1C40F)
+    return dict(d, embed=embed.to_dict(), links=pick_links(ev, books), books=books)
+
+
 class CompactView(discord.ui.View):
     """One scan, one message: a dropdown for each pick's write-up and buttons, parlay
     buttons, and a Notes button. Details answer privately (only you see them)."""
@@ -424,6 +444,14 @@ class CompactView(discord.ui.View):
             pick = discord.ui.Select(placeholder="🔎 See a pick: write-up, Bet buttons, I bet this",
                                      options=options, row=0, custom_id=f"lm:pick:{options[0].value}")
             self.add_item(pick)
+        elif legs:   # a volume board: every leg can be bet straight, parlay or not
+            options = [discord.SelectOption(label=f"{d['rank']}. {d['ev'].best.label}"[:100],
+                                            description=f"{fmt_odds(d['ev'].best.best_odds)} {d['ev'].best.best_book} · "
+                                                        f"{d['ev'].best.blended:.0%} hit"[:100],
+                                            value=_remember(_leg_detail(d, books)))
+                       for d in list(legs)[:25]]
+            self.add_item(discord.ui.Select(placeholder="🧾 Bet a leg: Bet buttons, I bet this",
+                                            options=options, row=0, custom_id=f"lm:pick:{options[0].value}"))
         row, count = 1, 0
         if picks:   # whole-card views of every pick: odds, hit rates, line moves, key stats
             from .scan_format import BOARDS
