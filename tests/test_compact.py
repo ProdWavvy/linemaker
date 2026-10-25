@@ -483,3 +483,30 @@ class SlipBoostSuggestTest(unittest.TestCase):
         it = NS(data={"custom_id": f"lm:slip:{key}:1:0:t1"}, response=Resp())   # pre-boost format
         self.assertTrue(asyncio.run(bot.route_component(it)))
         self.assertEqual(it.response.edited["embed"].title, "🎰 Your 2-Leg Parlay · live slip")
+
+
+class OneBookTest(unittest.TestCase):
+    def test_fanduel_only_hides_draftkings(self):
+        from linemaker.pro import rows_to_markets, run_pro
+        from linemaker.scan_format import BOARDS, _price_sentence, movement_page
+        from dataclasses import replace
+        rows = [{"date": "2026-10-21", "sport": "NBA", "game_id": f"g{i}", "game": f"A{i} @ H{i}",
+                 "bet_type": "prop", "subject": f"Player {i}", "market": "points", "line": "15.5",
+                 "mean": "24", "stdev": "4", "books": "FanDuel:-150/+120|DraftKings:-140/+115"}
+                for i in range(3)]
+        res = run_pro(rows_to_markets(rows), "2026-10-21",
+                      replace(ProConfig(track=False), bet_books=("FanDuel",), min_gap=-1.0, min_ev=None))
+        self.assertTrue(res.picks)
+        for ev in res.evaluated:
+            ev.shown_books = ("FanDuel",)
+        ev = res.picks[0]
+        self.assertIn("FanDuel", _price_sentence(ev))
+        self.assertNotIn("DraftKings", _price_sentence(ev))
+        board = BOARDS["odds"][2]([{"rank": 1, "ev": ev}]).description
+        self.assertIn("FD", board)
+        self.assertNotIn("DK", board)
+        hist = [("2026-10-21T20:00:00+00:00", {ev.best.side: {"FanDuel": -150, "DraftKings": -140}}),
+                ("2026-10-21T21:00:00+00:00", {ev.best.side: {"FanDuel": -160, "DraftKings": -145}})]
+        self.assertNotIn("DraftKings", movement_page({"ev": ev, "history": hist}).description)
+        ev.shown_books = None                                   # both books by default
+        self.assertIn("DraftKings", movement_page({"ev": ev, "history": hist}).description)

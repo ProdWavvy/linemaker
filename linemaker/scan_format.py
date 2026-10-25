@@ -40,8 +40,9 @@ def _day(date: str) -> str:
 
 def _price_sentence(ev) -> str:
     prices = book_prices(ev.market, ev.best.side)
+    from .discord_format import shown_book_keys
     shown = []
-    for key in ("fanduel", "draftkings"):
+    for key in shown_book_keys(ev):
         o = next((v for b, v in prices.items() if _book_key(b) == key), None)
         name = BOOK_STYLE[key][0]
         if o is not None:
@@ -665,14 +666,16 @@ def movement_page(detail: dict, tz_name: str = None) -> discord.Embed:
         return discord.Embed(title=f"📉 Line Movement · {s.label}", color=GREY,
                              description="Only one price snapshot so far. Movement is recorded "
                                          "each time the board is scanned and a price changes.")
-    rows = [f"{'Time':<9} {'FanDuel':>8} {'DraftKings':>11}"]
+    from .discord_format import shown_book_keys
+    keys = shown_book_keys(ev)
+    width = {"fanduel": 8, "draftkings": 11}
+    rows = [f"{'Time':<9} " + " ".join(f"{BOOK_STYLE[k][0]:>{width[k]}}" for k in keys)]
     for t, books in history[-15:]:
         side = books.get(s.side, {})
-        fd = next((v for b, v in side.items() if _book_key(b) == "fanduel"), None)
-        dk = next((v for b, v in side.items() if _book_key(b) == "draftkings"), None)
+        cells = [next((v for b, v in side.items() if _book_key(b) == k), None) for k in keys]
         when = dt.datetime.fromisoformat(t).astimezone(tz).strftime("%I:%M %p").lstrip("0")
-        rows.append(f"{when:<9} {fmt_odds(fd) if fd is not None else '—':>8} "
-                    f"{fmt_odds(dk) if dk is not None else '—':>11}")
+        rows.append(f"{when:<9} " + " ".join(f"{fmt_odds(v) if v is not None else '—':>{width[k]}}"
+                                             for k, v in zip(keys, cells)))
     return discord.Embed(title=f"📉 Line Movement · {s.label}", color=GOLD,
                          description="Prices for this side at each scan where something moved:\n"
                                      "```\n" + "\n".join(rows) + "\n```")
@@ -894,13 +897,17 @@ def _board_embed(title: str, header: str, rows: list, footer: str) -> discord.Em
 
 def odds_board(details: list) -> discord.Embed:
     from .parlay import leg_price
+    from .discord_format import shown_book_keys
+    keys = [k for k in ("fanduel", "draftkings") if any(k in shown_book_keys(d["ev"]) for d in details)]
     rows = []
     for d in details:
         ev = d["ev"]
-        fd, dk = leg_price(ev, "FanDuel"), leg_price(ev, "DraftKings")
-        rows.append(f"{d['rank']:>2} {_short_label(ev):<26} {fmt_odds(fd) if fd else '—':>6} "
-                    f"{fmt_odds(dk) if dk else '—':>6} {fmt_odds(ev.best.fair):>6} {_pct(ev.best.blended):>5}")
-    return _board_embed("🏷️ Odds, Every Pick", f"{'#':>2} {'Pick':<26} {'FD':>6} {'DK':>6} {'Fair':>6} {'Us':>5}",
+        cells = " ".join(f"{fmt_odds(o) if o else '—':>6}" for k in keys
+                         for o in [leg_price(ev, BOOK_STYLE[k][0])])
+        rows.append(f"{d['rank']:>2} {_short_label(ev):<26} {cells} {fmt_odds(ev.best.fair):>6} "
+                    f"{_pct(ev.best.blended):>5}")
+    heads = " ".join(f"{BOOK_STYLE[k][1]:>6}" for k in keys)
+    return _board_embed("🏷️ Odds, Every Pick", f"{'#':>2} {'Pick':<26} {heads} {'Fair':>6} {'Us':>5}",
                         rows, "Fair = our estimate as odds · Us = our hit chance")
 
 

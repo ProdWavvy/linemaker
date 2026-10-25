@@ -86,6 +86,8 @@ leagues there are no automatic projections: ask for one, or use price_saved_proj
 - When a player is listed questionable or doubtful, say so next to the play.
 - Flag plays from the same game as correlated, not independent.
 - Use Discord formatting: short headers, bullet points, bold for the key numbers. No tables.
+- When the user names one sportsbook (FanDuel or DraftKings), pass book and talk about that \
+book's prices and parlays only; never suggest the other book.
 - Pick cards with every play's FanDuel and DraftKings odds are posted under your reply \
 automatically, so don't repeat each play's numbers: give a short take (best spots, risks, \
 correlated legs) in a few lines.
@@ -376,6 +378,9 @@ class LinemakerChat:
                 book = None
             res = run_pro(rows_to_markets(rows), date, cfg, freezer, tracker)
             res.books = (book,) if book else ("FanDuel", "DraftKings")
+            if book:
+                for ev in res.evaluated:
+                    ev.shown_books = res.books   # write-ups and odds views: that book only
             if kind == "pp":
                 from .pp import select_legs
                 res.picks = select_legs(res.picks, cfg.pp_floor)

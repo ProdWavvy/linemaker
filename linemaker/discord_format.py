@@ -180,13 +180,19 @@ def _kickoff(commence: str) -> str:
     return t.strftime("%-I:%M %p") if os.name != "nt" else t.strftime("%#I:%M %p")
 
 
+def shown_book_keys(ev) -> tuple:
+    """fanduel / draftkings keys to show for a pick: just one when the ask named one book."""
+    books = getattr(ev, "shown_books", None) or ("FanDuel", "DraftKings")
+    return tuple(k for k in ("fanduel", "draftkings") if k in {_book_key(b) for b in books})
+
+
 def _price_line(ev) -> str:
     """'**FD -110** │ DK -115' with the best (bettable) price bold."""
     from .pro import book_prices
     s = ev.best
     prices = book_prices(ev.market, s.side)
     parts = []
-    for key in ("fanduel", "draftkings"):
+    for key in shown_book_keys(ev):
         match = next((o for b, o in prices.items() if _book_key(b) == key), None)
         tag = BOOK_STYLE[key][1]
         if match is None:
