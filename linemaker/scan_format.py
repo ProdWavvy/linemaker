@@ -812,22 +812,16 @@ def volume_messages(sections: list, date: str, cfg, title: str = "") -> list:
             log_parlays(parlays, date)
         except Exception:
             pass   # tracking must never block a card
+        from .parlay_format import legs_lines, money_line
         for book in books:
             mine = [p for p in parlays if p.book == book]
             value = [p for p in mine if p.style == "value"]
             # one value parlay per book (the best EV) keeps the card readable
             mine = [p for p in mine if p.style != "value"] + ([max(value, key=lambda p: p.ev)] if value else [])
-            if not mine:
-                continue
             bname, _tag, emoji, colour = _style(book)
-            e = discord.Embed(title=f"{emoji} {bname} Parlays", color=colour)
-            buttons = []
-            from .parlay_format import legs_lines, money_line
-            for p in mine:
+            for j, p in enumerate(mine):
+                # One box per parlay, in the book's colour; the card numbers them (#1, #2 ...).
                 url = parlay_link(p)
-                tag = f" {p.kind}" if p.kind else ""
-                if url:
-                    buttons.append((f"{len(p.legs)}-leg{tag} on {bname}", url))
                 icon = "🔗" if p.kind else "💰" if p.style == "value" else "🔒"
                 kind = p.kind or ("Value" if p.style == "value" else "Safest")
                 lines = legs_lines(p) + [money_line(p)]
@@ -835,16 +829,14 @@ def volume_messages(sections: list, date: str, cfg, title: str = "") -> list:
                     lines.append(f"↔️ {_pct(p.indep_prob)} if the legs were independent")
                 if p.kind:
                     lines.append(f"⚠️ {bname} prices the {p.kind} itself, lower than shown")
-                if url:
-                    lines.append(f"[🧾 Open this slip on {bname}]({url})")
-                body = "\n".join(lines)
-                if len(body) > 1024:
-                    body = "\n".join(lines[:-1])[:1024]
-                e.add_field(name=f"{icon} {len(p.legs)}-leg {kind} · {fmt_odds(p.american)} · {_pct(p.prob)} hit",
-                            value=body, inline=False)
-            e.set_footer(text="🔒 safest legs, one per game · 💰 legs priced above fair · 🔗 same-game "
-                              "ticket · ✅ leg is +EV at this price")
-            out.append(([e], {"links": buttons, "parlays": mine}))
+                e = discord.Embed(title=f"{emoji} {bname} · {icon} {len(p.legs)}-leg {kind} · "
+                                        f"{fmt_odds(p.american)} · {_pct(p.prob)} hit",
+                                  color=colour, description="\n".join(lines)[:4096])
+                if j == len(mine) - 1:
+                    e.set_footer(text="🔒 safest legs, one per game · 💰 legs priced above fair · 🔗 same-game "
+                                      "ticket · ✅ leg is +EV at this price")
+                links = [(f"{len(p.legs)}-leg on {bname}", url)] if url else []
+                out.append(([e], {"links": links, "parlays": [p]}))
     notes = discord.Embed(title="🧠 Volume Mode, Honestly", color=PURPLE, description=(
         "🔒 parlays are built to **hit often**, not because the price is wrong. Parlaying "
         "heavy favorites multiplies the book's margin on every leg, so they're usually slightly "

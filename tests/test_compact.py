@@ -97,8 +97,14 @@ class CompactCardTest(unittest.TestCase):
             return bot.compact_card(messages)
         embeds, view = asyncio.run(build())
         self.assertLessEqual(total(embeds), 6000)
-        self.assertTrue(any("Parlays" in (e.title or "") for e in embeds))
-        self.assertTrue(any((getattr(c, "label", "") or "").startswith("Log ") for c in view.children))
+        boxes = [e for e in embeds if (e.title or "").startswith("#")]
+        self.assertTrue(boxes and boxes[0].title.startswith("#1 · "))            # numbered, one box each
+        menu = next(c for c in view.children if str(getattr(c, "custom_id", "")).startswith("lm:pbet:"))
+        self.assertTrue(menu.options[0].label.startswith("#1 · "))               # same numbers in the menu
+        self.assertEqual(menu.row, 1)
+        rows = {getattr(c, "label", None): c.row for c in view.children if getattr(c, "label", None)}
+        self.assertEqual(rows.get("Odds"), 3)                                     # views always on row 3
+        self.assertEqual(rows.get("Safest by payout"), 4)                         # tools always on row 4
         self.assertTrue(any(e.title == "✅ High-Hit-Rate Legs" for e in embeds))     # the board stays
         build = next(c for c in view.children if getattr(c, "label", "") == "Build my own parlay")
         from linemaker import bot as _bot

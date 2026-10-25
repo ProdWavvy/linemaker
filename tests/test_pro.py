@@ -341,8 +341,8 @@ class VolumeEngineTest(unittest.TestCase):
         titles = [e.title for group, _d in msgs for e in group]
         self.assertTrue(titles[0].startswith("🎰 NBA Volume Mode"))
         self.assertIn("✅ High-Hit-Rate Legs", titles)
-        self.assertIn("🟦 FanDuel Parlays", titles)
-        self.assertIn("🟩 DraftKings Parlays", titles)
+        self.assertTrue(any(t.startswith("🟦 FanDuel · 🔒 2-leg Safest") for t in titles))   # one box per parlay
+        self.assertTrue(any(t.startswith("🟩 DraftKings · ") for t in titles))
         self.assertIn("🧠 Volume Mode, Honestly", titles)
 
 

@@ -346,6 +346,9 @@ def _embed_len(e: discord.Embed) -> int:
     return n + sum(len(f.name) + len(f.value) for f in e.fields)
 
 
+MAX_PARLAY_BOXES = 6   # parlays shown as boxes on a card; every one is in the Bet a parlay menu
+
+
 def _clip_embed(e: discord.Embed, chars: int) -> discord.Embed:
     d = e.description or ""
     if len(d) > chars:
@@ -382,7 +385,19 @@ def compact_card(messages: list) -> tuple:
                 continue          # "🏀 NBA · 10 plays from 6 games" section labels
             else:
                 notes.append(e)
-    embeds = [e for e in [header] + boards + [p[0] for p in parlays] if e is not None][:10]
+    # Number every parlay in card order (#1, #2 ...): its box, the Bet a parlay menu and the
+    # Bet buttons all use the same number.
+    n = 0
+    for e, d in parlays:
+        if "parlays" in d:
+            d["numbers"] = list(range(n + 1, n + 1 + len(d["parlays"])))
+            n += len(d["parlays"])
+            if len(d["parlays"]) == 1 and e.title and not e.title.startswith("#"):
+                e.title = f"#{d['numbers'][0]} · {e.title}"[:256]
+    parlay_boxes = [p[0] for p in parlays if "parlays" in p[1]]
+    shown = parlay_boxes[:MAX_PARLAY_BOXES] + [p[0] for p in parlays if "parlays" not in p[1]]
+    hidden = len(parlay_boxes) - min(len(parlay_boxes), MAX_PARLAY_BOXES)
+    embeds = [e for e in [header] + boards + shown if e is not None][:10]
     if not picks and not parlays:        # nothing cleared: the notes are the answer
         embeds += notes[:10 - len(embeds)]
         notes = []
@@ -390,8 +405,19 @@ def compact_card(messages: list) -> tuple:
         over = sum(_embed_len(e) for e in embeds) - EMBED_BUDGET
         if over > 0:
             _clip_embed(header, max(len(header.description or "") - over, 300))
+    boxes = {id(e) for e in parlay_boxes}
     while len(embeds) > 1 and sum(_embed_len(e) for e in embeds) > EMBED_BUDGET:
-        notes.insert(0, embeds.pop())        # still too long: move the last one behind Notes
+        last = embeds.pop()                  # still too long: parlays to the menu, the rest behind Notes
+        if id(last) in boxes:
+            hidden += 1
+        else:
+            notes.insert(0, last)
+    if hidden and header is not None:
+        header.description = (header.description or "") + (
+            f"\n\n🧾 **{hidden} more parlay{'s' if hidden != 1 else ''}** in the **Bet a parlay** menu below.")
+        over = sum(_embed_len(e) for e in embeds) - EMBED_BUDGET
+        if over > 0:
+            _clip_embed(header, max(len(header.description or "") - over, 300))
     view = CompactView(picks, parlays, notes, legs, mls, books)
     return embeds, view
 
@@ -452,77 +478,67 @@ class CompactView(discord.ui.View):
                        for d in list(legs)[:25]]
             self.add_item(discord.ui.Select(placeholder="🧾 Bet a leg: Bet buttons, I bet this",
                                             options=options, row=0, custom_id=f"lm:pick:{options[0].value}"))
-        row, count = 1, 0
-        if picks:   # whole-card views of every pick: odds, hit rates, line moves, key stats
-            from .scan_format import BOARDS
-            bkey = _remember({"picks": [d for _e, d in picks[:25]]})
-            for kind, (label, emoji, _fn) in BOARDS.items():
-                self.add_item(discord.ui.Button(label=label, emoji=emoji, row=1,
-                                                style=discord.ButtonStyle.secondary,
-                                                custom_id=f"lm:board:{bkey}:{kind}"))
-            row = 2
+        # Fixed rows, the same on every card:
+        #   0  🔎 see a pick / 🧾 bet a leg          (dropdown)
+        #   1  🧾 bet a parlay #1, #2 ...            (dropdown: Bet and Log for any parlay)
+        #   2  Bet #1 · Bet #2 ...                   (one-tap slips; PrizePicks entries)
+        #   3  Odds · Hit Rates · Line Moves · Key Stats   (PrizePicks: Log buttons)
+        #   4  Safest by payout · Build a parlay · Parlay moneylines · Market edges · Notes
+        auto = [(_remember(d), d) for _e, d in parlays if "parlays" in d]
+        if auto:
+            from .betlinks import parlay_link
+            from .parlay_format import short_label
+            options = []
+            for key, detail in auto:
+                nums = detail.get("numbers") or []
+                for i, p in enumerate(detail.get("parlays") or []):
+                    kind = getattr(p, "kind", "") or ("Value" if p.style == "value" else "Safest")
+                    leg_text = ", ".join(short_label(ev.best.label) for ev, _o in p.legs)
+                    num = f"#{nums[i]} · " if i < len(nums) else ""
+                    options.append(discord.SelectOption(
+                        label=f"{num}{p.book} · {len(p.legs)}-leg {kind} · {fmt_odds(p.american)}"[:100],
+                        description=f"{p.prob:.0%} hit · {leg_text}"[:100], value=f"{key}:{i}",
+                        emoji="🟦" if p.book == "FanDuel" else "🟩"))
+            if options:
+                self.add_item(discord.ui.Select(placeholder="🧾 Bet a parlay: pick #1, #2 ... for its Bet & Log buttons",
+                                                options=options[:25], row=1,
+                                                custom_id=f"lm:pbet:{options[0].value}"))
+            bets = 0
+            for key, detail in auto:
+                nums = detail.get("numbers") or []
+                for i, p in enumerate(detail.get("parlays") or []):
+                    url = parlay_link(p)
+                    if bets < 5 and url and len(url) <= 512:
+                        tag = f"#{nums[i]} " if i < len(nums) else ""
+                        self.add_item(discord.ui.Button(
+                            label=f"Bet {tag}{'FD' if p.book == 'FanDuel' else 'DK'} {fmt_odds(p.american)}"[:80],
+                            url=url, row=2, emoji="🟦" if p.book == "FanDuel" else "🟩"))
+                        bets += 1
+        pp_used = False
         for _embed, detail in [p for p in parlays if "pp" in p[1]]:
             from .pp import board_link, entry_link
             key = _remember(detail)
             links = [(e, entry_link(e)) for e in detail["pp"]]
             if not any(u for _e, u in links):
-                self.add_item(discord.ui.Button(label="Open PrizePicks", url=board_link(), row=row,
-                                                emoji="🟣"))
-                count += 1
-            for i, (e, url) in enumerate(links[:8]):
-                if row > 3:
-                    break
-                if url and len(url) <= 512:
-                    self.add_item(discord.ui.Button(label=f"{e.size}-pick {e.kind}", url=url, row=row,
-                                                    emoji="🟣"))
-                    count += 1
-                    row, count = (row + 1, 0) if count == 5 else (row, count)
-                if row > 3:
-                    break
-                b = discord.ui.Button(label=f"Log {e.size}-pick {e.kind}", emoji="📝", row=row,
-                                      style=discord.ButtonStyle.success, custom_id=f"lm:pplog:{key}:{i}")
-                self.add_item(b)
-                count += 1
-                row, count = (row + 1, 0) if count == 5 else (row, count)
-        auto = [(_remember(d), d) for _e, d in parlays if "parlays" in d]
-        if auto:
-            from .parlay_format import short_label
-            # Every parlay on the card, one dropdown: pick one for its Bet and Log buttons.
-            if count:
-                row, count = row + 1, 0
-            options = []
-            for key, detail in auto:
-                for i, p in enumerate(detail.get("parlays") or []):
-                    kind = getattr(p, "kind", "") or ("Value" if p.style == "value" else "Safest")
-                    leg_text = ", ".join(short_label(ev.best.label) for ev, _o in p.legs)
-                    options.append(discord.SelectOption(
-                        label=f"{p.book} · {len(p.legs)}-leg {kind} · {fmt_odds(p.american)}"[:100],
-                        description=f"{p.prob:.0%} hit · {leg_text}"[:100], value=f"{key}:{i}",
-                        emoji="🟦" if p.book == "FanDuel" else "🟩"))
-            if options and row <= 3:
-                self.add_item(discord.ui.Select(placeholder="🧾 Bet a parlay: pick one for its Bet & Log buttons",
-                                                options=options[:25], row=row,
-                                                custom_id=f"lm:pbet:{options[0].value}"))
-                row += 1
-            # Then one-tap Bet buttons for as many as fit, then Log buttons.
-            for key, detail in auto:
-                for label, url in detail.get("links") or []:
-                    if url and len(url) <= 512 and row <= 3:
-                        self.add_item(discord.ui.Button(label=label[:80], url=url, row=row,
-                                                        emoji="🟦" if "FanDuel" in label else "🟩"))
-                        count += 1
-                        row, count = (row + 1, 0) if count == 5 else (row, count)
-            for key, detail in auto:
-                for i, p in enumerate((detail.get("parlays") or [])[:6]):
-                    if row > 3:
-                        break
-                    tag = f" {p.kind}" if getattr(p, "kind", "") else ""
-                    b = discord.ui.Button(label=f"Log {len(p.legs)}-leg{tag} {p.book}", emoji="📝", row=row,
-                                          style=discord.ButtonStyle.success,
-                                          custom_id=f"lm:betp:{key}:{i}")
-                    self.add_item(b)
-                    count += 1
-                    row, count = (row + 1, 0) if count == 5 else (row, count)
+                self.add_item(discord.ui.Button(label="Open PrizePicks", url=board_link(), row=2, emoji="🟣"))
+            on_row2 = sum(1 for c in self.children if c.row == 2)
+            for i, (e, url) in enumerate(links[:5]):
+                if url and len(url) <= 512 and on_row2 < 5:
+                    self.add_item(discord.ui.Button(label=f"{e.size}-pick {e.kind}", url=url, row=2, emoji="🟣"))
+                    on_row2 += 1
+                if sum(1 for c in self.children if c.row == 3) < 5:
+                    self.add_item(discord.ui.Button(label=f"Log {e.size}-pick {e.kind}", emoji="📝", row=3,
+                                                    style=discord.ButtonStyle.success,
+                                                    custom_id=f"lm:pplog:{key}:{i}"))
+                    pp_used = True
+        views = [d for _e, d in picks[:25]] or list(legs or [])[:25]
+        if views and not pp_used:   # whole-card views of every pick / leg
+            from .scan_format import BOARDS
+            bkey = _remember({"picks": views})
+            for kind, (label, emoji, _fn) in BOARDS.items():
+                self.add_item(discord.ui.Button(label=label, emoji=emoji, row=3,
+                                                style=discord.ButtonStyle.secondary,
+                                                custom_id=f"lm:board:{bkey}:{kind}"))
         pool = [d for _e, d in picks[:25]] or list(legs or [])[:25]
         if len(pool) >= 2:
             pkey = _remember({"picks": pool, "books": books})
@@ -983,10 +999,10 @@ async def _send_card(send, messages: list, markdown=None, filename=None, text: s
         messages = [(messages, None)]
     if card_style() == "compact" and any(d is not None for _e, d in messages):
         embeds, view = compact_card(messages)
-        if market_key and len(view.children) < 25:
-            view.add_item(discord.ui.Button(label="Market edges", emoji="⚡", row=4 if sum(
-                1 for c in view.children if c.row == 4) < 5 else None, style=discord.ButtonStyle.secondary,
-                custom_id=f"lm:mkt:{market_key}"))
+        if market_key and sum(1 for c in view.children if c.row == 4) < 5:
+            view.add_item(discord.ui.Button(label="Market edges", emoji="⚡", row=4,
+                                            style=discord.ButtonStyle.secondary,
+                                            custom_id=f"lm:mkt:{market_key}"))
         await send(content=text[:2000] or None, embeds=embeds, view=view)
         await asyncio.to_thread(save_details)
         return
