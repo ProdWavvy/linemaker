@@ -510,3 +510,60 @@ class OneBookTest(unittest.TestCase):
         self.assertNotIn("DraftKings", movement_page({"ev": ev, "history": hist}).description)
         ev.shown_books = None                                   # both books by default
         self.assertIn("DraftKings", movement_page({"ev": ev, "history": hist}).description)
+
+
+class BetDropdownTest(unittest.TestCase):
+    def _card(self, with_links=True):
+        import json
+        from linemaker import bot
+        from linemaker.pro import ml_parlay_config, rows_to_markets, run_pro
+        from linemaker.scan_format import volume_messages
+        rows = []
+        for i in range(8):
+            f = -260 - i * 20
+            links = {"FanDuel": [{"link": f"https://sportsbook.fanduel.com/addToBetslip?marketId[0]=m{i}&selectionId[0]=s{i}",
+                                  "sid": f"s{i}", "msid": f"m{i}"}, None],
+                     "DraftKings": [{"link": "", "sid": f"o{i}", "msid": ""}, None]} if with_links else {}
+            rows.append({"date": "2026-10-25", "sport": "NFL", "game_id": f"g{i}", "game": f"A{i} @ H{i}",
+                         "bet_type": "moneyline", "subject": f"H{i}", "opponent": f"A{i}", "market": "moneyline",
+                         "line": "0", "mean": str(6 + i), "stdev": "13.5",
+                         "books": f"FanDuel:{f}/+{int(-f * 0.8)}|DraftKings:{f - 5}/+{int(-f * 0.8) - 5}",
+                         "links": json.dumps(links)})
+        cfg = ml_parlay_config(track=False)
+        res = run_pro(rows_to_markets(rows), "2026-10-25", cfg)
+        self.assertGreaterEqual(len(res.picks), 4)
+        msgs = volume_messages([("NFL", res, {"profiles": {}, "context": {}, "history": {}})], "2026-10-25", cfg)
+
+        async def build():
+            return bot.compact_card(msgs)
+        return asyncio.run(build())
+
+    def test_every_parlay_reachable_with_bet_buttons(self):
+        from linemaker import bot
+        _embeds, view = self._card()
+        select = next(c for c in view.children if str(getattr(c, "custom_id", "")).startswith("lm:pbet:"))
+        keys = {o.value.rsplit(":", 1)[0] for o in select.options}
+        n = sum(len(bot.PICK_DETAILS[k]["parlays"]) for k in keys)
+        self.assertEqual(len(select.options), n)                          # every parlay on the card
+        self.assertGreaterEqual(n, 6)
+        self.assertTrue(any(getattr(c, "url", None) for c in view.children))   # one-tap Bet buttons kept
+
+        async def open_one():
+            return bot.parlay_card([ev for ev, _o in bot.PICK_DETAILS[select.options[0].value.rsplit(":", 1)[0]]
+                                    ["parlays"][0].legs], ("FanDuel",))
+        _e, pview = asyncio.run(open_one())
+        urls = [c.url for c in pview.children if getattr(c, "url", None)]
+        self.assertTrue(urls and "addToBetslip" in urls[0])
+
+    def test_no_slip_ids_gives_open_book_button(self):
+        from linemaker import bot
+        _embeds, view = self._card(with_links=False)
+        select = next(c for c in view.children if str(getattr(c, "custom_id", "")).startswith("lm:pbet:"))
+        key = select.options[0].value.rsplit(":", 1)[0]
+
+        async def open_one():
+            p = bot.PICK_DETAILS[key]["parlays"][0]
+            return bot.parlay_card([ev for ev, _o in p.legs], (p.book,))
+        embed, pview = asyncio.run(open_one())
+        self.assertTrue(any((getattr(c, "label", "") or "").startswith("Open ") for c in pview.children))
+        self.assertIn("no one-tap slip", embed.fields[0].value)

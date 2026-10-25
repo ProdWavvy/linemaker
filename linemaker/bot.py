@@ -154,6 +154,9 @@ async def route_component(interaction: discord.Interaction) -> bool:
         handler = _show_targets(key)
     elif kind == "mkt":
         handler = _market_rescan(key)
+    elif kind == "pbet":   # lm:pbet:<key>:<i>; the dropdown sends the chosen parlay as key:i
+        values = (interaction.data or {}).get("values") or [f"{key}:{parts[3] if len(parts) > 3 else 0}"]
+        handler = _parlay_bet_card(values[0])
     elif kind == "sboard":
         handler = _show_board(key, parts[4], int(parts[3], 16))
     elif kind in pages:
@@ -453,26 +456,45 @@ class CompactView(discord.ui.View):
                 self.add_item(b)
                 count += 1
                 row, count = (row + 1, 0) if count == 5 else (row, count)
-        many = sum(len(d.get("parlays") or []) for _e, d in parlays) > 6
-        for _embed, detail in [p for p in parlays if "parlays" in p[1]]:
-            key = _remember(detail)
-            # Lots of parlays: the slip links are already in the card text, keep room for Log.
-            for label, url in ([] if many else detail.get("links") or []):
-                if url and len(url) <= 512 and row <= 3:
-                    self.add_item(discord.ui.Button(label=label[:80], url=url, row=row,
-                                                    emoji="🟦" if "FanDuel" in label else "🟩"))
+        auto = [(_remember(d), d) for _e, d in parlays if "parlays" in d]
+        if auto:
+            from .parlay_format import short_label
+            # Every parlay on the card, one dropdown: pick one for its Bet and Log buttons.
+            if count:
+                row, count = row + 1, 0
+            options = []
+            for key, detail in auto:
+                for i, p in enumerate(detail.get("parlays") or []):
+                    kind = getattr(p, "kind", "") or ("Value" if p.style == "value" else "Safest")
+                    leg_text = ", ".join(short_label(ev.best.label) for ev, _o in p.legs)
+                    options.append(discord.SelectOption(
+                        label=f"{p.book} · {len(p.legs)}-leg {kind} · {fmt_odds(p.american)}"[:100],
+                        description=f"{p.prob:.0%} hit · {leg_text}"[:100], value=f"{key}:{i}",
+                        emoji="🟦" if p.book == "FanDuel" else "🟩"))
+            if options and row <= 3:
+                self.add_item(discord.ui.Select(placeholder="🧾 Bet a parlay: pick one for its Bet & Log buttons",
+                                                options=options[:25], row=row,
+                                                custom_id=f"lm:pbet:{options[0].value}"))
+                row += 1
+            # Then one-tap Bet buttons for as many as fit, then Log buttons.
+            for key, detail in auto:
+                for label, url in detail.get("links") or []:
+                    if url and len(url) <= 512 and row <= 3:
+                        self.add_item(discord.ui.Button(label=label[:80], url=url, row=row,
+                                                        emoji="🟦" if "FanDuel" in label else "🟩"))
+                        count += 1
+                        row, count = (row + 1, 0) if count == 5 else (row, count)
+            for key, detail in auto:
+                for i, p in enumerate((detail.get("parlays") or [])[:6]):
+                    if row > 3:
+                        break
+                    tag = f" {p.kind}" if getattr(p, "kind", "") else ""
+                    b = discord.ui.Button(label=f"Log {len(p.legs)}-leg{tag} {p.book}", emoji="📝", row=row,
+                                          style=discord.ButtonStyle.success,
+                                          custom_id=f"lm:betp:{key}:{i}")
+                    self.add_item(b)
                     count += 1
                     row, count = (row + 1, 0) if count == 5 else (row, count)
-            for i, p in enumerate((detail.get("parlays") or [])[:6]):
-                if row > 3:
-                    break
-                tag = f" {p.kind}" if getattr(p, "kind", "") else ""
-                b = discord.ui.Button(label=f"Log {len(p.legs)}-leg{tag} {p.book}", emoji="📝", row=row,
-                                      style=discord.ButtonStyle.success,
-                                      custom_id=f"lm:betp:{key}:{i}")
-                self.add_item(b)
-                count += 1
-                row, count = (row + 1, 0) if count == 5 else (row, count)
         pool = [d for _e, d in picks[:25]] or list(legs or [])[:25]
         if len(pool) >= 2:
             pkey = _remember({"picks": pool, "books": books})
@@ -578,6 +600,14 @@ def parlay_card(legs: list, books: Optional[tuple] = None, boost: float = 0.0) -
                                             emoji="🟦" if p.book == "FanDuel" else "🟩"))
         elif url:   # too long for a button (Discord caps those at 512): a link in the text
             value += f"\n🧾 [Open this {len(p.legs)}-leg slip on {p.book}]({url})"
+        else:       # a leg came without the book's slip ids: open the book, add the legs by hand
+            from .betlinks import book_home
+            live = any(getattr(ev, "phase", "pre") == "live" for ev, _o in p.legs)
+            view.add_item(discord.ui.Button(label=f"Open {p.book}" + (" live" if live else ""),
+                                            url=book_home(p.book, live),
+                                            emoji="🟦" if p.book == "FanDuel" else "🟩"))
+            value += (f"\n🧾 {p.book} didn't send slip ids for every leg, so there's no one-tap slip: "
+                      "open the book and add the legs above.")
         embed.add_field(name=header(p), value=value[:1024], inline=False)
         key = _remember({"parlays": [p]})
         b = discord.ui.Button(label=f"Log {p.book} parlay", emoji="📝", style=discord.ButtonStyle.success,
@@ -689,6 +719,27 @@ def targets_card(picks: list, books, found: Optional[dict] = None) -> tuple:
     embeds[-1].set_footer(text="Hit chances are calibrated to past results and count legs from one "
                                "game moving together. Rolling over: every step has to hit.")
     return embeds[:10], view
+
+
+def _parlay_bet_card(value: str):
+    """One auto-parlay from a card, privately: its price at the book, a one-tap Bet button
+    (the slip opens with every leg) and Log."""
+    async def callback(interaction: discord.Interaction):
+        key, _, i = value.rpartition(":")
+        detail = PICK_DETAILS.get(key)
+        if detail is None or not detail.get("parlays"):
+            await interaction.response.send_message("This card is too old. Ask again for fresh parlays.",
+                                                    ephemeral=True)
+            return
+        try:
+            p = detail["parlays"][int(i)]
+            embed, view = parlay_card([ev for ev, _o in p.legs], (p.book,))
+            kind = getattr(p, "kind", "") or ("Value" if p.style == "value" else "Safest")
+            embed.title = f"🎰 {len(p.legs)}-Leg {kind} Parlay · {p.book}"
+            await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
+        except Exception as e:
+            await _report_error(interaction, e)
+    return callback
 
 
 def _market_rescan(key: str):

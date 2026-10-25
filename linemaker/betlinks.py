@@ -118,9 +118,19 @@ def combine(book: str, legs: list, event: str = "") -> Optional[str]:
     return None if len(legs) > 1 else (fill_state(legs[0]["link"]) if legs[0].get("link") else None)
 
 
+def book_home(book: str, live: bool = False) -> str:
+    """The book's sportsbook page (live section for in-game bets), for when no slip can be built."""
+    if _key(book) == "draftkings":
+        return "https://sportsbook.draftkings.com/live" if live else "https://sportsbook.draftkings.com/"
+    return "https://sportsbook.fanduel.com/live" if live else "https://sportsbook.fanduel.com/"
+
+
 def parlay_link(parlay) -> Optional[str]:
     legs = [leg(ev.market, ev.best.side, parlay.book) for ev, _odds in parlay.legs]
     if any(e is None for e in legs):
+        import logging
+        missing = [getattr(ev.best, "label", "?") for (ev, _o), e in zip(parlay.legs, legs) if e is None]
+        logging.getLogger("linemaker.betlinks").info("no %s slip ids for: %s", parlay.book, "; ".join(missing))
         return None
     return combine(parlay.book, legs, parlay.legs[0][0].market.game_id)
 
