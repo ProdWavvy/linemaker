@@ -201,9 +201,9 @@ def live_parlay_gates(cfg: ProConfig) -> ProConfig:
     """Live parlays: no heavy favourites. Past -450 a leg adds little payout but still loses
     to foul trouble / an injury / a pulled starter the live model can't see coming."""
     from .pro import _env_num
-    cfg.min_odds = _env_num("LINEMAKER_LIVE_ODDS_MIN", int) or -150
+    cfg.min_odds = _env_num("LINEMAKER_LIVE_ODDS_MIN", int) or -130
     cfg.max_odds = _env_num("LINEMAKER_LIVE_ODDS_MAX", int) or -450
-    cfg.min_prob = _env_num("LINEMAKER_LIVE_MIN_PROB", float) or 0.72
+    cfg.min_prob = _env_num("LINEMAKER_LIVE_MIN_PROB", float) or 0.66
     cfg.max_parlay_legs = _env_num("LINEMAKER_LIVE_PARLAY_LEGS", int) or 3
     return cfg
 

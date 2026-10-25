@@ -10,7 +10,7 @@ class LiveParlayGatesTest(unittest.TestCase):
     def test_defaults(self):
         cfg, _t = live_settings(volume_config(track=False), "2026-10-25")
         self.assertEqual((cfg.min_odds, cfg.max_odds, cfg.min_prob, cfg.max_parlay_legs),
-                         (-150, -450, 0.72, 3))
+                         (-130, -450, 0.66, 3))
 
     def test_env_and_non_volume(self):
         with mock.patch.dict(os.environ, {"LINEMAKER_LIVE_ODDS_MAX": "-300",
