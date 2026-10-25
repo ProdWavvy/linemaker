@@ -360,8 +360,8 @@ def auto_results(api: OddsAPI, snapshot_path: str) -> list:
     """Final scores from /scores (2 credits per sport) -> results rows for frozen game lines.
     Scores cover games from the last 3 days only; props still need a results CSV."""
     import json
-    with open(snapshot_path) as f:
-        records = json.load(f)
+    from .jsonio import load_json
+    records = load_json(snapshot_path)
     sports = sorted({r["sport"] for r in records.values()
                      if r.get("sport") and r["inputs"].get("bet_type") != "prop"} - {"UFC"})   # UFC: ESPN
     rows = []

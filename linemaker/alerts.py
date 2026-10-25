@@ -83,9 +83,8 @@ def load_state(name: str, default):
 def save_state(name: str, data):
     path = _state_path(name)
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
-    with open(path + ".tmp", "w") as f:
-        json.dump(data, f)
-    os.replace(path + ".tmp", path)
+    from .jsonio import save_json
+    save_json(path, data)
 
 
 def _start(event: dict) -> dt.datetime:

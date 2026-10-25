@@ -354,8 +354,8 @@ def fetch_event_props(api: "OddsAPI", sport: str, event_id: str, keys: str) -> d
         log.warning("%s: the API doesn't support %s; skipping them from now on", sport, ", ".join(sorted(bad)))
         try:
             os.makedirs(os.path.dirname(_bad_path(sport)) or ".", exist_ok=True)
-            with open(_bad_path(sport), "w") as f:
-                json.dump(sorted(_bad_markets(sport) | bad), f)
+            from .jsonio import save_json
+            save_json(_bad_path(sport), sorted(_bad_markets(sport) | bad))
         except OSError:
             pass
     good = ",".join(k for k in keys.split(",") if k not in bad)
@@ -387,9 +387,8 @@ def record_spend(cost: int):
     try:
         os.makedirs(os.path.dirname(_spend_path(day)) or ".", exist_ok=True)
         total = credits_today(day) + int(cost)
-        with open(_spend_path(day) + ".tmp", "w") as f:
-            json.dump(total, f)
-        os.replace(_spend_path(day) + ".tmp", _spend_path(day))
+        from .jsonio import save_json
+        save_json(_spend_path(day), total)
     except OSError:
         pass
 

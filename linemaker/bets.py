@@ -32,9 +32,8 @@ def load_bets() -> list:
 def save_bets(bets: list):
     path = bets_path()
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
-    with open(path + ".tmp", "w") as f:
-        json.dump(bets, f, indent=1)
-    os.replace(path + ".tmp", path)
+    from .jsonio import save_json
+    save_json(path, bets, indent=1)
 
 
 def leg_from_eval(ev, live: bool = False, odds: Optional[int] = None, book: str = "") -> dict:

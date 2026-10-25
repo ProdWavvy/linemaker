@@ -31,8 +31,8 @@ def grade_day(date: str, rows: list, auto: bool):
             live_rows = auto_results(api, live_track)
             import json as _json
             from .boxscores import prop_results
-            with open(live_track) as f:
-                live_rows += prop_results(_json.load(f), date)   # live player props: box scores
+            from .jsonio import load_json
+            live_rows += prop_results(load_json(live_track), date)   # live player props: box scores
             if live_rows:
                 n_live = apply_results(live_track, live_rows)
                 if n_live:
@@ -45,8 +45,8 @@ def grade_day(date: str, rows: list, auto: bool):
         have = {(r["game_id"], r["subject"], r["market"]) for r in rows}
         for path in (track, snap):
             if os.path.exists(path):
-                with open(path) as f:
-                    recs = _json.load(f)
+                from .jsonio import load_json
+                recs = load_json(path)
                 rows += [r for r in prop_results(recs, date)
                          if (r["game_id"], r["subject"], r["market"]) not in have]
                 have = {(r["game_id"], r["subject"], r["market"]) for r in rows}
@@ -55,8 +55,8 @@ def grade_day(date: str, rows: list, auto: bool):
         import json as _json
         from .boxscores import prop_results
         from .tracking import apply_results
-        with open(pp_track) as f:
-            pp_rows = prop_results(_json.load(f), date)
+        from .jsonio import load_json
+        pp_rows = prop_results(load_json(pp_track), date)
         if pp_rows:
             n_pp = apply_results(pp_track, pp_rows)
             if n_pp:
@@ -64,8 +64,8 @@ def grade_day(date: str, rows: list, auto: bool):
     if auto and os.path.exists(track):   # UFC fights: winners from ESPN (free)
         import json as _json
         from .ufc_model import ufc_results
-        with open(track) as f:
-            recs = _json.load(f)
+        from .jsonio import load_json
+        recs = load_json(track)
         have = {(r["game_id"], r["subject"], r["market"]) for r in rows}
         rows += [r for r in ufc_results(recs, date) if (r["game_id"], r["subject"], r["market"]) not in have]
     summary = []

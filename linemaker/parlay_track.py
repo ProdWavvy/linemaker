@@ -31,9 +31,8 @@ def _load(date: str) -> dict:
 def _save(date: str, data: dict):
     path = _path(date)
     os.makedirs(os.path.dirname(path), exist_ok=True)
-    with open(path + ".tmp", "w") as f:
-        json.dump(data, f)
-    os.replace(path + ".tmp", path)
+    from .jsonio import save_json
+    save_json(path, data)
 
 
 def log_parlays(parlays: list, date: str):

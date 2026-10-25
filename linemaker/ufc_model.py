@@ -75,9 +75,8 @@ def _get(url: str, max_age: Optional[float] = 20 * 3600) -> dict:
             time.sleep(1 + attempt)
     try:
         os.makedirs(_cache_dir(), exist_ok=True)
-        with open(path + ".tmp", "w") as f:
-            json.dump(data, f)
-        os.replace(path + ".tmp", path)
+        from .jsonio import save_json
+        save_json(path, data)
     except OSError:
         pass
     return data

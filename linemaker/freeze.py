@@ -9,6 +9,7 @@ import json
 import os
 from dataclasses import asdict
 
+from .jsonio import load_or_quarantine, path_lock, save_json
 from .devig import no_vig
 from .odds import fmt_odds, implied_probability, net_profit, parse_odds
 from .sim import SimResult
@@ -22,8 +23,7 @@ class Freezer:
         os.makedirs(directory, exist_ok=True)
         self.records = {}
         if os.path.exists(self.path):
-            with open(self.path) as f:
-                self.records = json.load(f)
+            self.records = load_or_quarantine(self.path)
         self._new = set()
 
     def projection(self, m, cfg):
@@ -60,8 +60,14 @@ class Freezer:
                 self.records[ev.market.key]["picked"] = True
 
     def save(self):
-        with open(self.path, "w") as f:
-            json.dump(self.records, f, indent=2)
+        with path_lock(self.path):
+            disk = load_or_quarantine(self.path) if os.path.exists(self.path) else {}
+            for k in self._new:          # first write wins: never overwrite a frozen record
+                disk.setdefault(k, self.records[k])
+                if self.records[k].get("picked"):
+                    disk[k]["picked"] = True
+            self.records = disk
+            save_json(self.path, disk)
 
 
 def grade(snapshot_path: str, results) -> str:

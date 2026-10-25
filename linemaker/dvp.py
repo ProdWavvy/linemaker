@@ -42,8 +42,8 @@ def _summary(sport: str, event_id: str) -> Optional[dict]:
     slim = {"boxscore": data.get("boxscore", {})}
     try:
         os.makedirs(_cache_dir(), exist_ok=True)
-        with open(path, "w") as f:
-            json.dump(slim, f)
+        from .jsonio import save_json
+        save_json(path, slim)
     except OSError:
         pass
     return slim
@@ -166,8 +166,8 @@ def position_factors(sport: str, date: str, teams: set) -> dict:
                          for m, v in st.items()} for p, st in table.items()}
     try:
         os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
-        with open(path, "w") as f:
-            json.dump(out, f)
+        from .jsonio import save_json
+        save_json(path, out)
     except OSError:
         pass
     log.info("dvp %s: %d teams", sport, len(out))

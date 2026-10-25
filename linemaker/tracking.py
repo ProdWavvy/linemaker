@@ -11,13 +11,13 @@ The best w is what LINEMAKER_MODEL_WEIGHT should be.
 """
 import datetime as dt
 import glob
-import json
 import math
 import os
 import re
 from dataclasses import asdict
 from typing import Optional
 
+from .jsonio import load_json, load_or_quarantine, path_lock, save_json
 from .odds import fmt_odds, net_profit
 from .oddsapi import norm
 
@@ -43,8 +43,7 @@ class Tracker:
         self.path = os.path.join(directory, f"{date}.json")
         self.records = {}
         if os.path.exists(self.path):
-            with open(self.path) as f:
-                self.records = json.load(f)
+            self.records = load_or_quarantine(self.path)
         self._touched = set()
 
     def record(self, ev, now: Optional[dt.datetime] = None):
@@ -106,11 +105,21 @@ class Tracker:
                                pick_book=ev.best.best_book, pick_market_prob=ev.best.market_prob)
 
     def save(self):
-        os.makedirs(os.path.dirname(self.path) or ".", exist_ok=True)
-        tmp = self.path + ".tmp"
-        with open(tmp, "w") as f:
-            json.dump(self.records, f)
-        os.replace(tmp, self.path)
+        """Merge into what's on disk now: other scans and live grading may have saved since
+        this tracker loaded, and their records / results must survive."""
+        with path_lock(self.path):
+            disk = load_or_quarantine(self.path) if os.path.exists(self.path) else {}
+            for key in self._touched:
+                mine, theirs = self.records[key], disk.get(key)
+                if theirs:
+                    if theirs.get("result") and not mine.get("result"):
+                        mine["result"] = theirs["result"]
+                    for k in PICK_FIELDS + ("market_pick", "volume_pick", "picked", "pick_side"):
+                        if k in theirs and not mine.get(k):
+                            mine[k] = theirs[k]
+                disk[key] = mine
+            self.records = disk
+            save_json(self.path, disk)
 
 
 def _winner(rec: dict, actual: float) -> Optional[str]:
@@ -124,8 +133,12 @@ def _winner(rec: dict, actual: float) -> Optional[str]:
 
 def apply_results(path: str, results: list) -> int:
     """Attach results rows (game_id, subject, market, line, actual) to tracked records."""
-    with open(path) as f:
-        records = json.load(f)
+    with path_lock(path):
+        return _apply_results(path, results)
+
+
+def _apply_results(path: str, results: list) -> int:
+    records = load_json(path)
     index = {(r["game_id"], norm(r["subject"]), r["market"].strip().lower(), float(r["line"])): r
              for r in results if (r.get("actual") or "").strip()}
     n = 0
@@ -137,8 +150,7 @@ def apply_results(path: str, results: list) -> int:
         actual = float(r["actual"])
         rec["result"] = {"actual": actual, "winner": _winner(rec, actual)}
         n += 1
-    with open(path, "w") as f:
-        json.dump(records, f)
+    save_json(path, records)
     return n
 
 
@@ -152,8 +164,8 @@ def load_records(directory: str, days: Optional[int] = None, today: Optional[str
                  if start <= dt.date.fromisoformat(os.path.basename(p)[:10]) <= end]
     out = []
     for p in paths:
-        with open(p) as f:
-            for key, rec in json.load(f).items():
+        if True:
+            for key, rec in load_json(p).items():
                 rec["key"] = key
                 out.append(rec)
     return out
@@ -256,8 +268,7 @@ def price_history(directory: str, date: str, key: str) -> list:
     path = os.path.join(directory, f"{date}.json")
     if not os.path.exists(path):
         return []
-    with open(path) as f:
-        rec = json.load(f).get(key)
+    rec = load_json(path).get(key)
     if not rec:
         return []
     return [(h["t"], {k: v for k, v in h.items() if k != "t"}) for h in rec.get("history", [])]

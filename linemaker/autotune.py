@@ -423,10 +423,8 @@ def run_autotune(tracking_dir: str, today: str) -> list:
     new["updated"] = dt.datetime.now().isoformat(timespec="seconds")
     path = weights_path()
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
-    tmp = path + ".tmp"
-    with open(tmp, "w") as f:
-        json.dump(new, f, indent=2)
-    os.replace(tmp, path)
+    from .jsonio import save_json
+    save_json(path, new, indent=2)
     return changes or [f"Weights checked against {new.get('graded', 0)} graded outcomes: no change "
                        "needed (current weights already fit best, or the difference is noise)."]
 

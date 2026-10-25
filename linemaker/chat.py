@@ -791,11 +791,9 @@ def _cache_path(sport: str, date: str, kind: str = "props") -> str:
 
 def save_slate_cache(sport: str, date: str, entry: tuple, kind: str = "props"):
     """Keep the bought odds on disk so a restart inside the reuse window costs no credits."""
-    import json as _json
     try:
-        os.makedirs(os.path.dirname(_cache_path(sport, date, kind)), exist_ok=True)
-        with open(_cache_path(sport, date, kind), "w") as f:
-            _json.dump(list(entry), f)
+        from .jsonio import save_json
+        save_json(_cache_path(sport, date, kind), list(entry))
     except OSError as e:
         log.warning("couldn't save slate cache: %s", e)
 
