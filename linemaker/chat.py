@@ -385,6 +385,8 @@ class LinemakerChat:
             res.projection_source = source
             res.kind = "live" if kind == "live_props" else kind
             res.odds_age = slate_age_minutes(sport, date, kind)
+            res.scan_args = {"sport": sport, "kind": kind, "teams": focus, "book": book, "mode": mode,
+                             "date": date}
             extras = enrich(res, sport, date, cfg.min_prob if mode == "volume" else None)
             extras["mode"] = mode
             from .scan_format import pass_counts

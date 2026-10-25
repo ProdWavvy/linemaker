@@ -59,6 +59,24 @@ class CompactCardTest(unittest.TestCase):
             asyncio.run(go())
             self.assertGreater(len(sent), 3)
 
+    def test_market_edges_button(self):
+        from linemaker import bot
+        from linemaker.scan_format import scan_messages
+        messages = scan_messages([("NBA", self.res, {})], "2026-10-21", ProConfig(track=False))
+        sent = []
+
+        async def send(**kw):
+            sent.append(kw)
+        key = bot._remember({"market_scans": [{"sport": "NBA", "kind": "props", "teams": ["Knicks"],
+                                                "book": None, "mode": "smart", "date": "2026-10-21"}]})
+        asyncio.run(bot._send_card(send, messages, market_key=key))
+        ids = [getattr(c, "custom_id", "") for c in sent[0]["view"].children]
+        self.assertIn(f"lm:mkt:{key}", ids)
+        sent.clear()
+        asyncio.run(bot._send_card(send, messages))                # no key: no button
+        self.assertFalse(any(str(getattr(c, "custom_id", "")).startswith("lm:mkt:")
+                             for c in sent[0]["view"].children))
+
     def test_volume_card_keeps_parlays_and_buttons(self):
         from linemaker import bot
         from linemaker.pro import volume_config

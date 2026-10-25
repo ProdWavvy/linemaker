@@ -152,6 +152,8 @@ async def route_component(interaction: discord.Interaction) -> bool:
         handler = _show_board(key, parts[3])
     elif kind == "targets":
         handler = _show_targets(key)
+    elif kind == "mkt":
+        handler = _market_rescan(key)
     elif kind == "sboard":
         handler = _show_board(key, parts[4], int(parts[3], 16))
     elif kind in pages:
@@ -660,6 +662,39 @@ def targets_card(picks: list, books, found: Optional[dict] = None) -> tuple:
     return embeds[:10], view
 
 
+def _market_rescan(key: str):
+    """⚡ Market edges: the same scan (league, team, book, live or not) in market-edge mode,
+    on the odds already bought (no extra credits inside the reuse window)."""
+    async def callback(interaction: discord.Interaction):
+        detail = PICK_DETAILS.get(key)
+        if detail is None or "market_scans" not in detail:
+            await interaction.response.send_message("This card is too old. Ask again for fresh picks.",
+                                                    ephemeral=True)
+            return
+        await interaction.response.defer(thinking=True)
+        try:
+            from .chat import LinemakerChat
+            helper = bot.chat or _TOOL_HELPER.setdefault("chat", LinemakerChat.__new__(LinemakerChat))
+            if not hasattr(helper, "_feed_cache"):
+                helper._feed_cache = {}
+            ctx = {"files": [], "attached_rows": []}
+            for args in detail["market_scans"]:
+                await asyncio.to_thread(LinemakerChat.run_tool, helper, "find_plays",
+                                        dict(args, mode="market", teams=args.get("teams") or None), ctx)
+            results = ctx.get("results") or []
+            if not results:
+                await interaction.followup.send("No market edges found on this slate right now.")
+                return
+            from .pro import market_config
+            messages = scan_messages(results, today(), market_config())
+            embeds, view = compact_card(messages)
+            await interaction.followup.send(embeds=embeds, view=view)
+            await asyncio.to_thread(save_details)
+        except Exception as e:
+            await _report_error(interaction, e)
+    return callback
+
+
 def _show_targets(key: str):
     async def callback(interaction: discord.Interaction):
         detail = PICK_DETAILS.get(key)
@@ -831,7 +866,8 @@ def _slip_tap(key: str, mask: str, page: str, action: str, boost: str = "0"):
     return callback
 
 
-async def _send_card(send, messages: list, markdown=None, filename=None, text: str = ""):
+async def _send_card(send, messages: list, markdown=None, filename=None, text: str = "",
+                     market_key: Optional[str] = None):
     """Post a value scan. Compact (default): one message with a pick dropdown. Full: header
     and board, then one message per pick with its buttons, then the notes. Plain embed
     lists are posted as-is."""
@@ -839,6 +875,10 @@ async def _send_card(send, messages: list, markdown=None, filename=None, text: s
         messages = [(messages, None)]
     if card_style() == "compact" and any(d is not None for _e, d in messages):
         embeds, view = compact_card(messages)
+        if market_key and len(view.children) < 25:
+            view.add_item(discord.ui.Button(label="Market edges", emoji="⚡", row=4 if sum(
+                1 for c in view.children if c.row == 4) < 5 else None, style=discord.ButtonStyle.secondary,
+                custom_id=f"lm:mkt:{market_key}"))
         await send(content=text[:2000] or None, embeds=embeds, view=view)
         await asyncio.to_thread(save_details)
         return
@@ -1132,7 +1172,11 @@ class LinemakerBot(discord.Client):
                 fn = message.reply if first else message.channel.send
                 first = False
                 return await fn(allowed_mentions=none, **kw)
-            await _send_card(send_cards, cards, text=chunks[0] if inline and chunks else "")
+            scans = [r.scan_args for _s, r, _ex in turn.results
+                     if getattr(r, "scan_args", None) and r.scan_args["mode"] != "market"
+                     and r.scan_args["kind"] != "pp"]
+            mkey = _remember({"market_scans": scans}) if scans else None
+            await _send_card(send_cards, cards, text=chunks[0] if inline and chunks else "", market_key=mkey)
 
 
 bot = LinemakerBot()
