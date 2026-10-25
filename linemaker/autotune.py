@@ -158,11 +158,12 @@ def tune(records: list, current: dict) -> tuple:
     from .pro import _start_weight
     g = new["model_weight"]
     by_sport, by_market = {}, {}
-    for r in graded:
-        by_sport.setdefault(r["sport"], []).append(r)
+    from .pro import weight_group
+    for r in graded:   # props and game lines apart ("NFL" / "NFL games"): different models
+        by_sport.setdefault(weight_group(r["sport"], r.get("inputs", {}).get("bet_type", "prop")), []).append(r)
         by_market.setdefault(f"{r['sport']} {r['market']}", []).append(r)
     for sport, recs in sorted(by_sport.items()):
-        prior = _start_weight(sport, g)
+        prior = _start_weight(sport.split(" ")[0], g)
         n = _outcomes(recs)
         old_s = new["sports"].get(sport, prior)
         if n < MIN_GROUP:
@@ -170,7 +171,7 @@ def tune(records: list, current: dict) -> tuple:
         (sb, _l, _b), _ = best_weight(_rows(recs))
         target = prior + n / (n + SHRINK) * (sb - prior)
         moved = _step(old_s, target, recs, max_step)
-        if abs(moved - g) < 0.025 and sport not in START_PRIORS:
+        if abs(moved - g) < 0.025 and sport.split(" ")[0] not in START_PRIORS:
             new["sports"].pop(sport, None)       # same as overall: no special case needed
         else:
             new["sports"][sport] = moved
@@ -181,7 +182,8 @@ def tune(records: list, current: dict) -> tuple:
         if n < MIN_GROUP:
             continue
         sport = name.split(" ", 1)[0]
-        parent = new["sports"].get(sport, _start_weight(sport, g))
+        bet_type = recs[0].get("inputs", {}).get("bet_type", "prop")
+        parent = new["sports"].get(weight_group(sport, bet_type), _start_weight(sport, g))
         (gb, _l, _b), _ = best_weight(_rows(recs))
         target = parent + n / (n + SHRINK) * (gb - parent)
         old_m = new["markets"].get(name, parent)
@@ -337,7 +339,8 @@ def tune_calibration(records: list) -> tuple:
         a = next((s for s in r.get("sides", []) if s.get("side") == "A"), None)
         if not a or res.get("winner") not in ("A", "B") or len(r.get("sides", [])) != 2:
             continue
-        by_sport.setdefault(r.get("sport"), []).append(
+        from .pro import weight_group
+        by_sport.setdefault(weight_group(r.get("sport"), r.get("inputs", {}).get("bet_type", "prop")), []).append(
             (r.get("game_id"), (r.get("game_id"), r.get("subject"), r.get("market")),
              _logit(a["blended"]), 1.0 if res["winner"] == "A" else 0.0))
     out, notes = {}, []
@@ -371,8 +374,11 @@ def calibrate_p(p: float, a: float, b: float) -> float:
     return 1 / (1 + math.exp(-(a + b * _logit(p))))
 
 
-def calibrated(p: float, sport: str) -> float:
-    c = load_weights().get("calibration", {}).get(sport)
+def calibrated(p: float, sport: str, bet_type: str = "prop") -> float:
+    """Calibrated hit chance: props by the sport's prop fit ("NBA"), game lines by its game
+    fit ("NBA games"); a group with no fit yet is left raw."""
+    from .pro import weight_group
+    c = load_weights().get("calibration", {}).get(weight_group(sport, bet_type))
     return calibrate_p(p, c[0], c[1]) if c else p
 
 

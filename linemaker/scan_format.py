@@ -732,8 +732,11 @@ def volume_messages(sections: list, date: str, cfg, title: str = "") -> list:
     name = "Cross-Sport" if len(sections) > 1 else SPORT_NAMES.get(sections[0][0], sections[0][0])
     focus = next((getattr(res, "focus", "") for _s, res, _e in sections if getattr(res, "focus", "")), "")
     ml = all(getattr(res, "ml_only", False) for _s, res, _e in sections)
+    types = set(getattr(sections[0][1], "game_types", None) or ("moneyline",))
+    what = ("Moneyline & Spread" if types == {"moneyline", "spread"} else
+            "Spread" if types == {"spread"} else "Moneyline")
     title = title or (f"{books[0]} " if len(books) == 1 else "") + (f"{focus} · " if focus else "") + (
-        f"{name} Moneyline Parlays" if ml else f"{name} Volume Mode")
+        f"{name} {what} Parlays" if ml else f"{name} Volume Mode")
 
     def _scope(sp, res):
         n = len(res.slate) or res.games
@@ -749,7 +752,11 @@ def volume_messages(sections: list, date: str, cfg, title: str = "") -> list:
              f"{cfg.min_prob:.0%}+ where there's a sample, and isn't priced more than "
              f"{abs(cfg.min_gap) * 100:.0f} points above our estimate."]
     if ml:
-        intro = [f"Moneyline parlays: each game's **likelier winner**, likeliest first. Scanned "
+        which = {"Moneyline": "each game's **likelier winner**",
+                 "Spread": "each game's **best-value spread** (main or alternate line)",
+                 "Moneyline & Spread": "each game's **likelier winner** and its **best-value spread** "
+                                       "(main or alternate; a parlay takes one leg per game)"}[what]
+        intro = [f"{what} parlays: {which}, likeliest first. Scanned "
                  + ", ".join(_scope(sp, res) for sp, res, _e in sections) + ".",
                  f"Each leg is priced {fmt_odds(cfg.min_odds)} to {fmt_odds(cfg.max_odds)}, has a "
                  f"{cfg.min_prob:.0%}+ win chance, and isn't priced more than "

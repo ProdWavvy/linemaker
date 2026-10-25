@@ -190,10 +190,12 @@ TOOLS = [
                                         "player props (box score so far + projection for the rest); "
                                         "pp = PrizePicks "
                                         "lines with Power/Flex entries"},
-                "ml_only": {"type": "boolean",
-                            "description": "true for moneyline parlays (\"ml parlay\", \"moneyline "
-                                           "parlay\"): with mode volume and kind games/live, the "
-                                           "legs are each game's likelier winner"},
+                "game_parlay_types": {"type": "array", "items": {"type": "string",
+                                                                 "enum": ["moneyline", "spread"]},
+                                      "description": "game-line parlays with mode volume and kind "
+                                                     "games/live: [\"moneyline\"] for \"ml parlay\", "
+                                                     "[\"moneyline\", \"spread\"] for \"ml and "
+                                                     "spread parlay\", [\"spread\"] for \"spread parlay\""},
                 "mode": {"type": "string", "enum": ["smart", "volume", "market"],
                          "description": "smart = best edges (default); volume = likeliest legs "
                                         "for parlays, ranked by hit chance, with parlays built; "
@@ -359,6 +361,10 @@ class LinemakerChat:
             from .pro import market_config
             cfg = (volume_config() if mode == "volume" else market_config() if mode == "market"
                    else ProConfig())
+            game_types = [t for t in (args.get("game_parlay_types") or []) if t in ("moneyline", "spread")]
+            if game_types and mode == "volume" and kind in ("games", "live"):
+                from .pro import ml_parlay_config
+                cfg = ml_parlay_config(game_types)   # live: live_settings below adds the live gates
             freezer, tracker = (None if mode == "market" else Freezer(snaps, date)), None
             if kind == "pp":
                 from .pp import pp_config
@@ -382,13 +388,6 @@ class LinemakerChat:
                 book = None
             res = run_pro(rows_to_markets(rows), date, cfg, freezer, tracker)
             res.books = (book,) if book else ("FanDuel", "DraftKings")
-            if args.get("ml_only") and mode == "volume" and kind in ("games", "live"):
-                from .pro import ml_parlay_config, ml_parlay_legs
-                mcfg = ml_parlay_config(bet_books=cfg.bet_books)
-                if kind == "live":
-                    from .live import live_parlay_gates
-                    live_parlay_gates(mcfg)
-                res.picks, res.ml_only = ml_parlay_legs(res, mcfg), True
             if book:
                 for ev in res.evaluated:
                     ev.shown_books = res.books   # write-ups and odds views: that book only
@@ -530,7 +529,7 @@ class LinemakerChat:
                                             {"sport": sport, "mode": mode,
                                              "kind": "games" if sport == "UFC" else kind,   # fights: winners only
                                              "refresh": refresh, "book": book,
-                                             "ml_only": bool(ML_ONLY.search(text)) and not OTHER_LINES.search(text),
+                                             "game_parlay_types": game_parlay_types(text),
                                              "teams": [t for s, t in teams if s == sport]}, ctx)
                 except Exception as e:
                     errors.append(friendly_error(sport, e))
@@ -883,7 +882,15 @@ TIPS_WORDS = re.compile(r"[!/]?(betting )?tips[?!.]*|how (should|do) i think abo
 GAME_LINE_WORDS = re.compile(r"\b(money ?lines?|ml|spreads?|totals?|over/unders?|o/u|"
                              r"winners?|who wins|game lines?)\b", re.I)
 ML_ONLY = re.compile(r"\b(money ?lines?|ml|winners?|who wins)\b", re.I)
-OTHER_LINES = re.compile(r"\b(spreads?|totals?|over/unders?|o/u|props?)\b", re.I)
+SPREAD_WORDS = re.compile(r"\b(spreads?|ats|against the spread|alt(ernate)? spreads?)\b", re.I)
+OTHER_LINES = re.compile(r"\b(totals?|over/unders?|o/u|props?)\b", re.I)
+
+
+def game_parlay_types(text: str) -> list:
+    """["moneyline"] / ["moneyline", "spread"] / ["spread"] for game-line parlay asks, else []."""
+    if OTHER_LINES.search(text):
+        return []
+    return (["moneyline"] if ML_ONLY.search(text) else []) + (["spread"] if SPREAD_WORDS.search(text) else [])
 REFRESH_WORDS = re.compile(r"\b(fresh|refresh|updated?|latest|new odds|re-?pull)\b", re.I)
 PP_WORDS = re.compile(r"\b(prize ?picks?|pp|pick ?em)\b", re.I)
 BOOK_WORDS = {"FanDuel": re.compile(r"\b(fan ?duel|fd)\b", re.I),

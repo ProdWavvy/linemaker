@@ -1156,7 +1156,7 @@ class LinemakerBot(discord.Client):
                 vcfg = volume_config()
                 if all(getattr(r, "ml_only", False) for _s, r, _e in turn.results):
                     from .pro import ml_parlay_config
-                    vcfg = ml_parlay_config()
+                    vcfg = ml_parlay_config(turn.results[0][1].game_types)
                 if all(getattr(r, "kind", "") == "live" for _s, r, _e in turn.results):
                     from .live import live_parlay_gates
                     live_parlay_gates(vcfg)

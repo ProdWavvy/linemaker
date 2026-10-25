@@ -95,13 +95,23 @@ def _start_weight(sport: str, default: float) -> float:
         return START_WEIGHTS.get(sport.upper(), default)
 
 
-def model_weight_for(sport: str, market: str, cfg) -> float:
-    """Most specific tuned weight wins: market ("NBA points"), then sport ("NBA"), then the
-    sport's start weight / the overall weight. Each tuned level was already blended with the
-    level above it by sample size (see autotune), so a thin one never strays far."""
+GAME_LINE_TYPES = ("moneyline", "spread", "total", "team_total", "1x2")
+
+
+def weight_group(sport: str, bet_type: str = "prop") -> str:
+    """Props and game lines come from different models, so they're tuned and calibrated
+    apart: "NFL" is NFL props, "NFL games" its moneylines, spreads and totals."""
+    return f"{sport} games" if bet_type in GAME_LINE_TYPES else sport
+
+
+def model_weight_for(sport: str, market: str, cfg, bet_type: str = "prop") -> float:
+    """Most specific tuned weight wins: market ("NBA points"), then the sport's group ("NBA"
+    for props, "NBA games" for game lines), then the sport's start weight / the overall
+    weight. Each tuned level was already blended with the level above it by sample size (see
+    autotune), so a thin one never strays far."""
     w = cfg.market_weights.get(f"{sport} {market}")
     if w is None:
-        w = cfg.sport_weights.get(sport)
+        w = cfg.sport_weights.get(weight_group(sport, bet_type))
     return w if w is not None else _start_weight(sport, cfg.model_weight)
 
 
@@ -149,6 +159,7 @@ class ProConfig:
     pick_tag: str = "model"            # what a pick is logged as in tracking ("model" / "market")
     calibrate: bool = False            # use calibrated hit chances (volume, PrizePicks: see autotune)
     max_parlay_legs: Optional[int] = None   # cap on auto-parlay size (live parlays: 3)
+    game_parlay_types: tuple = ()      # game-line parlay legs (ml_parlay_config): bet types used
     one_per_player: bool = False       # at most one leg per player (volume: his legs move together)
     # Log every priced market (not just picks) to tracking/<date>.json for calibration.
     track: bool = field(default_factory=lambda: os.environ.get(
@@ -212,7 +223,7 @@ def apply_calibration(ev):
     ev.calibrated = True
     for s in ev.sides:
         p_a = s.blended if s.side == "A" else 1 - s.blended
-        p_a = calibrated(p_a, ev.market.sport)
+        p_a = calibrated(p_a, ev.market.sport, ev.market.bet_type)
         s.blended = p_a if s.side == "A" else 1 - p_a
         s.gap = s.blended - s.best_implied
         s.ev = expected_value(s.blended, s.best_odds, 100, push)
@@ -234,42 +245,58 @@ def consensus_books(m: "ProMarket") -> int:
     return sum(1 for _b, p in m.books if len(p) >= n and all(x is not None for x in p[:n]))
 
 
-def ml_parlay_config(**overrides) -> "ProConfig":
-    """Moneyline parlays ("nfl ml parlay"): each game's likelier winner. A favourite's price
-    carries the book's margin (3-4 points at -300), so a leg may sit up to
-    LINEMAKER_ML_PARLAY_MAX_VIG (5 points) under fair; the volume gap gate (2 points) would
-    turn away nearly every moneyline."""
+def ml_parlay_config(types=("moneyline",), **overrides) -> "ProConfig":
+    """Game-line parlays ("nfl ml parlay", "ml and spread parlay"): per game, the likelier
+    moneyline winner and/or the best-value spread side. A favourite's price carries the
+    book's margin (3-4 points at -300), so a leg may sit up to LINEMAKER_ML_PARLAY_MAX_VIG
+    (5 points) under fair; the volume gap gate (2 points) would turn away nearly every one.
+    Legs are logged as parlay legs (volume_pick), never as model picks."""
     cfg = volume_config(
         min_prob=_env_num("LINEMAKER_ML_PARLAY_MIN_PROB", float) or 0.60,
         min_odds=_env_num("LINEMAKER_ML_PARLAY_ODDS_MIN", int) or -130,
         max_odds=_env_num("LINEMAKER_ML_PARLAY_ODDS_MAX", int) or -1000,
         min_gap=-(_env_num("LINEMAKER_ML_PARLAY_MAX_VIG", float) or 0.05))
+    cfg.game_parlay_types = tuple(types)
     for k, v in overrides.items():
         setattr(cfg, k, v)
     return cfg
 
 
-def ml_parlay_legs(res: "ProResult", cfg: "ProConfig") -> list:
-    """Every game's likelier moneyline side that clears the ML parlay gates, likeliest first."""
-    import copy
+def _leg_ok(s, cfg) -> bool:
     from .odds import implied_probability
-    seen, out = set(), []
-    evs = [ev for ev in res.evaluated if ev.market.bet_type == "moneyline" and len(ev.sides) == 2]
-    for ev in sorted(evs, key=lambda e: -max(s.blended for s in e.sides)):
-        if ev.market.game_id in seen:
+    return (s.best_odds is not None and s.blended >= cfg.min_prob
+            and cfg.max_odds <= s.best_odds <= cfg.min_odds
+            and s.blended - implied_probability(s.best_odds) >= cfg.min_gap)
+
+
+def ml_parlay_legs(res: "ProResult", cfg: "ProConfig") -> list:
+    """Per game: the likelier moneyline side, and (with spreads asked for) the spread side,
+    main or alternate, that pays best for its hit chance, each only if it clears the gates.
+    Likeliest first."""
+    import copy
+    from .odds import american_to_decimal
+    types = getattr(cfg, "game_parlay_types", None) or ("moneyline",)
+    best = {}
+    for ev in res.evaluated:
+        m = ev.market
+        if m.bet_type not in types or len(ev.sides) != 2:
             continue
-        seen.add(ev.market.game_id)
+        sides = [s for s in ev.sides if _leg_ok(s, cfg)]
+        if m.bet_type == "moneyline":
+            s = max(ev.sides, key=lambda x: x.blended)   # the likelier winner, or nothing
+            sides = [s] if s in sides else []
+        for s in sides:
+            value = s.blended * american_to_decimal(s.best_odds)
+            score = s.blended if m.bet_type == "moneyline" else value
+            k = (m.game_id, m.bet_type)
+            if k not in best or score > best[k][0]:
+                best[k] = (score, ev, s.side)
+    out = []
+    for _score, ev, side in best.values():
         leg = copy.copy(ev)
-        leg.chosen = max(ev.sides, key=lambda s: s.blended).side
-        s = leg.best
-        if s.best_odds is None or s.blended < cfg.min_prob:
-            continue
-        if not (cfg.max_odds <= s.best_odds <= cfg.min_odds):
-            continue
-        if s.blended - implied_probability(s.best_odds) < cfg.min_gap:
-            continue
+        leg.chosen = side
         out.append(leg)
-    return out
+    return sorted(out, key=lambda e: -e.best.blended)
 
 
 def volume_config(**overrides) -> "ProConfig":
@@ -599,7 +626,7 @@ def evaluate(m: ProMarket, cfg: ProConfig, sim: Optional[SimResult] = None) -> O
     model, push = model_probs(m, sim)
     w = (cfg.force_model_weight if cfg.force_model_weight is not None
          else cfg.model_weight_fresh if m.news_fresh
-         else model_weight_for(m.sport, m.market, cfg))
+         else model_weight_for(m.sport, m.market, cfg, m.bet_type))
 
     sides = []
     for side, (odds, book) in side_prices(m, cfg.bet_books).items():
@@ -784,6 +811,9 @@ def run_pro(markets: list, slate_date: str, cfg: ProConfig, freezer=None,
     for ev in quals[limit:]:
         res.passes.append((ev.best.label, f"qualified (gap {ev.best.gap:+.1%}) but below cutoff"))
     res.picks = quals[:limit]
+    if cfg.game_parlay_types:   # moneyline / spread parlays: their own leg picker (see ml_parlay_legs)
+        res.picks = ml_parlay_legs(res, cfg)[:cfg.max_picks]
+        res.ml_only, res.game_types = True, cfg.game_parlay_types
     if freezer is not None:
         freezer.mark_picks(res.picks)
         freezer.save()
