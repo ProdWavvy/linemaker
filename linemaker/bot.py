@@ -1169,6 +1169,7 @@ class LinemakerBot(discord.Client):
     async def on_message(self, message: discord.Message):
         if message.author.bot:
             return
+        _spend_as("chat asks")
         from .busy import busy
         with busy():   # the auto-updater waits while a reply is in progress
             await self._on_message(message)
@@ -1729,8 +1730,15 @@ async def quota_cmd(interaction: discord.Interaction):
         await _report_error(interaction, e)
 
 
+def _spend_as(source: str):
+    """Credits spent from here on in this task (and its threads) count toward `source`."""
+    from .oddsapi import SPEND_SOURCE
+    SPEND_SOURCE.set(source)
+
+
 async def _warm_up():
     """Rosters and defense-vs-position for today, in the background (first scan is faster)."""
+    _spend_as("startup warm-up")
     from .espn_projections import warm_up
     for sport in _alert_sports():
         try:
@@ -1755,6 +1763,7 @@ def _todays_events(sport: str, date: str) -> list:
 @tasks.loop(minutes=5)
 async def pretip_loop():
     """Props for each game LINEMAKER_PRETIP_MINUTES before it tips; posts only real plays."""
+    _spend_as("pre-tip scans & closing reads")
     from .alerts import load_state, pretip_due, pretip_minutes, save_state
     from .chat import scan_events
     date = today()
@@ -1812,6 +1821,7 @@ async def pretip_loop():
 async def news_loop():
     """Re-price a game when a rotation player is newly ruled Out (basketball, NFL) or an NHL
     team's starting goalie changes."""
+    _spend_as("injury/lineup news re-checks")
     from .alerts import NEWS_SPORTS, load_state, news_events, save_state
     from .chat import drop_slate, scan_events
     from .espn_projections import injuries
@@ -2004,6 +2014,7 @@ async def weekly_post():
 
 @tasks.loop(time=dt.time(9, 30, tzinfo=TZ))
 async def daily_grade():
+    _spend_as("nightly grading")
     day = (dt.datetime.now(TZ).date() - dt.timedelta(days=1)).isoformat()
     from .grade_report import day_records, grade_report, graded_keys
     try:
@@ -2037,6 +2048,7 @@ async def daily_grade():
 
 @tasks.loop(time=dt.time(11, 0, tzinfo=TZ))
 async def daily_post():
+    _spend_as("daily post")
     date = today()
     channel = bot.get_channel(int(os.environ.get("LINEMAKER_CHANNEL_ID") or bot.home))
     if channel is None:

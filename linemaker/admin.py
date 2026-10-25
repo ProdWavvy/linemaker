@@ -148,10 +148,17 @@ def status_lines() -> list:
     import time
     fresh = os.path.exists(busy) and time.time() - os.path.getmtime(busy) < 600
     out.append("• Busy right now (scan or answer running)" if fresh else "• Idle")
-    from .oddsapi import credits_today, daily_budget
+    from .oddsapi import credits_today, daily_budget, local_today, spend_breakdown
     budget = daily_budget()
-    out.append(f"• Odds API credits spent today: {credits_today():,}" + (
+    tz = os.environ.get("LINEMAKER_TZ", "America/New_York").split("/")[-1].replace("_", " ")
+    out.append(f"• Odds API credits spent today ({tz} time, since midnight): {credits_today():,}" + (
         f" of a {budget:,} daily budget (extra markets and closing reads pause past it)" if budget else ""))
+    by = spend_breakdown()
+    if by:
+        out.append("  ↳ " + " · ".join(f"{k} {v:,}" for k, v in by.items()))
+    yday = (dt.date.fromisoformat(local_today()) - dt.timedelta(days=1)).isoformat()
+    if credits_today(yday):
+        out.append(f"  ↳ yesterday: {credits_today(yday):,}")
     if os.path.exists(os.path.join(root, ".git", "linemaker-bad-commit")):
         out.append("• ⚠️ The last update failed to load and was rolled back")
     errors = [l for l in list(_LOG)[-500:] if " ERROR " in l]

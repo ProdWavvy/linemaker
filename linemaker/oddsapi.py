@@ -11,6 +11,7 @@ one region. /sports and /events are free. /scores costs 1, or 2 with daysFrom. R
 credits are read from the x-requests-remaining header after every call. 429 = rate limited:
 retried after a few seconds.
 """
+import contextvars
 import datetime as dt
 import json
 import logging
@@ -371,24 +372,50 @@ def _spend_path(day: str) -> str:
     return os.path.join(os.environ.get("LINEMAKER_CACHE_DIR", "cache"), f"credits_{day}.json")
 
 
-def credits_today(day: Optional[str] = None) -> int:
-    day = day or dt.date.today().isoformat()
+# Who spent the credits: set by the bot around each job (chat asks, pre-tip reads, news
+# re-checks, grading ...); threads started with asyncio.to_thread inherit it.
+SPEND_SOURCE = contextvars.ContextVar("linemaker_spend_source", default="buttons & commands")
+
+
+def local_today() -> str:
+    """Today in LINEMAKER_TZ (your day, not the server's UTC day)."""
+    from zoneinfo import ZoneInfo
+    return dt.datetime.now(ZoneInfo(os.environ.get("LINEMAKER_TZ", "America/New_York"))).date().isoformat()
+
+
+def _spend(day: str) -> dict:
     try:
         with open(_spend_path(day)) as f:
-            return int(json.load(f))
+            v = json.load(f)
     except (OSError, ValueError):
-        return 0
+        return {"total": 0, "by": {}}
+    return v if isinstance(v, dict) else {"total": int(v), "by": {"earlier (not broken down)": int(v)}}
+
+
+def credits_today(day: Optional[str] = None) -> int:
+    return int(_spend(day or local_today()).get("total", 0))
+
+
+def spend_breakdown(day: Optional[str] = None) -> dict:
+    """{source: credits} for the day, biggest first."""
+    by = _spend(day or local_today()).get("by", {})
+    return dict(sorted(by.items(), key=lambda kv: -kv[1]))
 
 
 def record_spend(cost: int):
     if not cost:
         return
-    day = dt.date.today().isoformat()
+    day = local_today()
+    path = _spend_path(day)
     try:
-        os.makedirs(os.path.dirname(_spend_path(day)) or ".", exist_ok=True)
-        total = credits_today(day) + int(cost)
-        from .jsonio import save_json
-        save_json(_spend_path(day), total)
+        os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+        from .jsonio import path_lock, save_json
+        with path_lock(path):
+            v = _spend(day)
+            v["total"] = int(v.get("total", 0)) + int(cost)
+            src = SPEND_SOURCE.get()
+            v.setdefault("by", {})[src] = v["by"].get(src, 0) + int(cost)
+            save_json(path, v)
     except OSError:
         pass
 
