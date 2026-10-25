@@ -356,9 +356,21 @@ def _clip_embed(e: discord.Embed, chars: int) -> discord.Embed:
     return e
 
 
-def compact_card(messages: list) -> tuple:
+def _view_text(view) -> int:
+    """Characters of text a view adds to the message (labels, menu options): Discord counts
+    them with the embeds toward one message's size."""
+    n = 0
+    for c in view.children:
+        n += len(getattr(c, "label", None) or "") + len(getattr(c, "placeholder", None) or "")
+        for o in getattr(c, "options", None) or []:
+            n += len(o.label or "") + len(o.description or "")
+    return n
+
+
+def compact_card(messages: list, budget: Optional[int] = None, max_boxes: Optional[int] = None) -> tuple:
     """(embeds, view) for one message: summary + board (+ parlays); every pick's full
-    write-up behind a dropdown, the scoping notes behind a button."""
+    write-up behind a dropdown, the scoping notes behind a button. The boxes are trimmed
+    to fit Discord's size limit together with the buttons' and menus' text."""
     header, boards, parlays, notes, picks, legs, mls = None, [], [], [], [], [], []
     books = None
     for embeds, detail in messages:
@@ -394,28 +406,31 @@ def compact_card(messages: list) -> tuple:
             n += len(d["parlays"])
             if len(d["parlays"]) == 1 and e.title and not e.title.startswith("#"):
                 e.title = f"#{d['numbers'][0]} · {e.title}"[:256]
+    max_boxes = MAX_PARLAY_BOXES if max_boxes is None else max_boxes
+    if budget is None:   # what's left of the message once the buttons and menus are counted
+        budget = EMBED_BUDGET - _view_text(CompactView(picks, parlays, notes or [discord.Embed(title="notes")], legs, mls, books)) - 200
     parlay_boxes = [p[0] for p in parlays if "parlays" in p[1]]
-    shown = parlay_boxes[:MAX_PARLAY_BOXES] + [p[0] for p in parlays if "parlays" not in p[1]]
-    hidden = len(parlay_boxes) - min(len(parlay_boxes), MAX_PARLAY_BOXES)
+    shown = parlay_boxes[:max_boxes] + [p[0] for p in parlays if "parlays" not in p[1]]
+    hidden = len(parlay_boxes) - min(len(parlay_boxes), max_boxes)
     embeds = [e for e in [header] + boards + shown if e is not None][:10]
     if not picks and not parlays:        # nothing cleared: the notes are the answer
         embeds += notes[:10 - len(embeds)]
         notes = []
     if header is not None:
-        over = sum(_embed_len(e) for e in embeds) - EMBED_BUDGET
+        over = sum(_embed_len(e) for e in embeds) - budget
         if over > 0:
             _clip_embed(header, max(len(header.description or "") - over, 300))
     boxes = {id(e) for e in parlay_boxes}
-    while len(embeds) > 1 and sum(_embed_len(e) for e in embeds) > EMBED_BUDGET:
+    while len(embeds) > 1 and sum(_embed_len(e) for e in embeds) > budget:
         last = embeds.pop()                  # still too long: parlays to the menu, the rest behind Notes
         if id(last) in boxes:
             hidden += 1
         else:
             notes.insert(0, last)
-    if hidden and header is not None:
+    if hidden and header is not None and "more parlay" not in (header.description or ""):
         header.description = (header.description or "") + (
             f"\n\n🧾 **{hidden} more parlay{'s' if hidden != 1 else ''}** in the **Bet a parlay** menu below.")
-        over = sum(_embed_len(e) for e in embeds) - EMBED_BUDGET
+        over = sum(_embed_len(e) for e in embeds) - budget
         if over > 0:
             _clip_embed(header, max(len(header.description or "") - over, 300))
     view = CompactView(picks, parlays, notes, legs, mls, books)
@@ -497,7 +512,7 @@ class CompactView(discord.ui.View):
                     num = f"#{nums[i]} · " if i < len(nums) else ""
                     options.append(discord.SelectOption(
                         label=f"{num}{p.book} · {len(p.legs)}-leg {kind} · {fmt_odds(p.american)}"[:100],
-                        description=f"{p.prob:.0%} hit · {leg_text}"[:100], value=f"{key}:{i}",
+                        description=f"{p.prob:.0%} hit · {leg_text}"[:70], value=f"{key}:{i}",
                         emoji="🟦" if p.book == "FanDuel" else "🟩"))
             if options:
                 self.add_item(discord.ui.Select(placeholder="🧾 Bet a parlay: pick #1, #2 ... for its Bet & Log buttons",
@@ -998,20 +1013,27 @@ async def _send_card(send, messages: list, markdown=None, filename=None, text: s
     if messages and not isinstance(messages[0], tuple):
         messages = [(messages, None)]
     if card_style() == "compact" and any(d is not None for _e, d in messages):
-        embeds, view = compact_card(messages)
-        if market_key and sum(1 for c in view.children if c.row == 4) < 5:
-            view.add_item(discord.ui.Button(label="Market edges", emoji="⚡", row=4,
-                                            style=discord.ButtonStyle.secondary,
-                                            custom_id=f"lm:mkt:{market_key}"))
+        def build(**kw):
+            embeds, view = compact_card(messages, **kw)
+            if market_key and sum(1 for c in view.children if c.row == 4) < 5:
+                view.add_item(discord.ui.Button(label="Market edges", emoji="⚡", row=4,
+                                                style=discord.ButtonStyle.secondary,
+                                                custom_id=f"lm:mkt:{market_key}"))
+            return embeds, view
+        embeds, view = build()
         try:
             await send(content=text[:2000] or None, embeds=embeds, view=view)
         except discord.HTTPException as e:
-            # Discord refused part of it (a button or menu it won't take): post the card itself
-            # without them rather than nothing, and log what it objected to.
-            log.error("sending the card failed (%s): %s", e.status, str(e)[:500])
-            for i, group in enumerate(chunk_embeds(embeds)):
-                await send(content=(f"⚠️ Discord refused this card's buttons ({str(e)[:150]}), so here it is "
-                                    "without them. Tell Claude." if i == 0 else None), embeds=group)
+            log.error("sending the card failed (%s): %s; retrying a slimmer card", e.status, str(e)[:500])
+            try:   # too big together with the buttons: fewer boxes (the rest are in the menus)
+                embeds, view = build(budget=3000, max_boxes=3)
+                await send(content=text[:2000] or None, embeds=embeds, view=view)
+            except discord.HTTPException as e2:
+                # Still refused: the card itself without the buttons rather than nothing.
+                log.error("slim card refused too (%s): %s", e2.status, str(e2)[:500])
+                for i, group in enumerate(chunk_embeds(embeds)):
+                    await send(content=(f"⚠️ Discord refused this card's buttons ({str(e2)[:150]}), so here "
+                                        "it is without them. Tell Claude." if i == 0 else None), embeds=group)
         await asyncio.to_thread(save_details)
         return
     if text:

@@ -626,3 +626,45 @@ class NeverSilentTest(unittest.TestCase):
         asyncio.run(bot._send_card(send, messages))
         self.assertTrue(sent and "refused" in (sent[0]["content"] or ""))
         self.assertTrue(sent[0]["embeds"])
+
+
+class CardSizeTest(unittest.TestCase):
+    def _messages(self):
+        from linemaker.pro import rows_to_markets, run_pro, volume_config
+        from linemaker.scan_format import volume_messages
+        rows = [{"date": "2026-10-21", "sport": "NBA", "game_id": f"g{i}", "game": f"A{i} @ H{i}",
+                 "bet_type": "prop", "subject": f"A Fairly Long Player Name {i}", "market": "pts + reb + ast",
+                 "line": "15.5", "mean": str(24 - i * 0.2), "stdev": "4",
+                 "books": "FanDuel:-400/+300|DraftKings:-380/+290"} for i in range(25)]
+        cfg = volume_config()
+        cfg.min_prob, cfg.min_odds, cfg.max_odds, cfg.min_gap, cfg.track = 0.5, -100, -10000, -1.0, False
+        res = run_pro(rows_to_markets(rows), "2026-10-21", cfg)
+        return volume_messages([("NBA", res, {"profiles": {}, "context": {}, "history": {}})], "2026-10-21", cfg)
+
+    def test_boxes_and_buttons_fit_together(self):
+        from linemaker import bot
+
+        async def build():
+            return bot.compact_card(self._messages())
+        embeds, view = asyncio.run(build())
+        self.assertLessEqual(total(embeds) + bot._view_text(view), 5800)
+
+    def test_too_large_retries_slimmer_with_buttons(self):
+        import discord
+        from linemaker import bot
+        sent, calls = [], [0]
+
+        class TooLarge(discord.HTTPException):
+            def __init__(self):
+                Exception.__init__(self, "413 Payload Too Large (error code: 40005)")
+                self.status, self.text = 413, "too large"
+
+        async def send(**kw):
+            calls[0] += 1
+            if calls[0] == 1:
+                raise TooLarge()
+            sent.append(kw)
+        asyncio.run(bot._send_card(send, self._messages()))
+        self.assertEqual(len(sent), 1)
+        self.assertIsNotNone(sent[0].get("view"))                     # buttons kept on the retry
+        self.assertLessEqual(sum(1 for e in sent[0]["embeds"] if (e.title or "").startswith("#")), 3)
