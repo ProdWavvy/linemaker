@@ -598,10 +598,24 @@ def parlay_card(legs: list, books: Optional[tuple] = None, boost: float = 0.0) -
 
 
 def target_parlays(picks: list, books) -> dict:
-    """{(target, book): Parlay or None}: the search (slow for one game: run it in a thread)."""
-    from .parlay import TARGETS, best_for_target
+    """{(target, book): Parlay or None}: the search (slow for one game: run it in a thread).
+    Per book, the payouts are built smallest first and each one steers clear of the legs the
+    smaller ones already use (see parlay._search), so placing the whole ladder doesn't ride
+    on one chalk leg."""
+    from .parlay import TARGETS, best_for_target, exposure
     legs = [d["ev"] for d in picks]
-    return {(t, b): best_for_target(legs, b, t) for t in TARGETS for b in tuple(books or PARLAY_BOOKS)}
+    out = {}
+    for b in tuple(books or PARLAY_BOOKS):
+        used = {}
+        for t in TARGETS:
+            p = out[(t, b)] = best_for_target(legs, b, t, used=used)
+            if p is None:   # not enough separate legs left: the best one anyway, flagged on the card
+                p = out[(t, b)] = best_for_target(legs, b, t)
+                if p is not None:
+                    p.reuses = True
+            for ev, _o in (p.legs if p else []):
+                used[exposure(ev)] = used.get(exposure(ev), 0) + 1
+    return out
 
 
 def targets_card(picks: list, books, found: Optional[dict] = None) -> tuple:
@@ -613,9 +627,15 @@ def targets_card(picks: list, books, found: Optional[dict] = None) -> tuple:
     from .parlay_format import block
     books = tuple(books or PARLAY_BOOKS)
     found = found if found is not None else target_parlays(picks, books)
+    from .parlay import _ladder_limits, exposure
+    max_shared, max_uses, _floor = _ladder_limits()
     intro = discord.Embed(title="🎯 Safest Parlay for Each Payout", color=0x1ABC9C, description=(
         "Highest real hit chance for each payout · one leg per game (or per player for one game) · "
-        "every leg priced fair or better. Fewer, better-priced legs beat stacking favorites."))
+        "every leg priced fair or better. Fewer, better-priced legs beat stacking favorites.\n"
+        f"🧩 **Spread out:** each payout uses different legs where it can (at most {max_shared} "
+        f"shared, and no player or game in more than {max_uses} of them), so if you place the "
+        "whole ladder, one bad leg can't sink every ticket."))
+    first_seen = {}   # (book, exposure) -> the payout that used it first
     view = discord.ui.View(timeout=None)
     shown, boxes = {}, []    # signature -> box index; boxes: [target, [(book, parlay)], [covers]]
     for target in TARGETS:
@@ -645,7 +665,16 @@ def targets_card(picks: list, books, found: Optional[dict] = None) -> tuple:
             e.description += "\nNo combination of fair-priced legs reaches this payout."
         for book, p in parlays:
             roll = f"🔁 Roll it over: 2x {p.prob ** 2:.0%} · 3x {p.prob ** 3:.0%}"
-            name, value = block(p, [roll])
+            shared = []
+            for ev, _o in p.legs:
+                was = first_seen.setdefault((book, exposure(ev)), target)
+                if was != target:
+                    shared.append(f"{ev.best.label} (also in +{(was - 1) * 100:.0f})")
+            extra = [roll] + ([f"🔗 Shares: {', '.join(shared)}"] if shared else [])
+            if getattr(p, "reuses", False):
+                extra.append("⚠️ Not enough separate legs left for this payout, so it reuses legs "
+                             "from the smaller ones.")
+            name, value = block(p, extra)
             e.add_field(name=name, value=value, inline=False)
             k = _remember({"parlays": [p]})
             if len(view.children) < 24:

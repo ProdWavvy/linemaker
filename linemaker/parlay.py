@@ -7,6 +7,7 @@ the payout multiplies the legs' decimal odds; the book's actual parlay price can
 little from that product.
 """
 from dataclasses import dataclass, field
+from typing import Optional
 
 from .odds import american_to_decimal, decimal_to_american
 from .pro import book_prices
@@ -237,17 +238,70 @@ def build_sgps(legs: list, books=PARLAY_BOOKS, sgp_size: int = 3, sgpx_size: int
 TARGETS = (2.0, 3.0, 4.0, 6.0)   # decimal payouts: +100, +200, +300, +500
 
 
-def best_for_target(legs: list, book: str, target: float, max_legs: int = 6, pool: int = 12) -> "Parlay | None":
+def exposure(ev) -> tuple:
+    """What a leg puts at risk: a player (all his props rise and fall together) or a game's
+    result (a team's moneyline, spread and the total lose together)."""
+    m = ev.market
+    return (m.game_id, m.subject) if m.bet_type == "prop" else (m.game_id, "game line")
+
+
+def _ladder_limits() -> tuple:
+    """(legs a parlay may share with the other payouts, payouts one leg may appear in,
+    how close a fully fresh parlay must come to the best one to be chosen instead)."""
+    import os
+
+    def num(name, default, cast):
+        try:
+            return cast(os.environ.get(name, "") or default)
+        except ValueError:
+            return default
+    return (num("LINEMAKER_TARGET_MAX_SHARED", 1, int), num("LINEMAKER_TARGET_MAX_USES", 2, int),
+            num("LINEMAKER_TARGET_FRESH_FLOOR", 0.8, float))
+
+
+def _search(cands: list, target: float, max_legs: int, prob, allowed, used: dict):
+    """The combo of cands ([(ev, odds)]) paying at least target with the best hit chance,
+    keeping the payout ladder spread out (used: exposure -> parlays it's already in):
+    no leg past its use limit, at most MAX_SHARED reused legs, and a parlay with no reused
+    leg wins unless it hits less than FRESH_FLOOR as often as the best one that shares."""
+    import itertools
+    import math
+    max_shared, max_uses, floor = _ladder_limits()
+    best = {}   # shares a leg? -> ((p, p x payout), combo)
+    for k in range(1, min(max_legs, len(cands)) + 1):
+        for combo in itertools.combinations(cands, k):
+            d = math.prod(american_to_decimal(o) for _e, o in combo)
+            if d < target:
+                continue
+            exps = [exposure(e) for e, _o in combo]
+            if any(used.get(x, 0) >= max_uses for x in exps):
+                continue
+            shared = sum(1 for x in exps if used.get(x))
+            if shared > max_shared or not allowed(combo):
+                continue
+            p = prob(combo, d)
+            key = (p, p * d)
+            bucket = shared > 0
+            if bucket not in best or key > best[bucket][0]:
+                best[bucket] = (key, combo)
+    fresh, mixed = best.get(False), best.get(True)
+    if fresh and (mixed is None or fresh[0][0] >= floor * mixed[0][0]):
+        return fresh[1]
+    return (mixed or fresh or (None, None))[1]
+
+
+def best_for_target(legs: list, book: str, target: float, max_legs: int = 6, pool: int = 12,
+                    used: Optional[dict] = None) -> "Parlay | None":
     """The parlay with the highest hit chance that pays at least `target` (decimal) at this
     book: one leg per game (so legs don't move together), each at least fair-ish (hit chance
     x odds >= 0.97), searched exhaustively over the best-value legs. At a fixed payout the hit
     chance is (1 / payout) x the product of the legs' values, so this mostly picks the legs
-    priced furthest above fair, and as few of them as the payout allows."""
-    import itertools
+    priced furthest above fair, and as few of them as the payout allows. used: the legs
+    already in the other payouts' parlays (see _search), so one chalk leg can't sink them all."""
     import math
-    from .parlay_math import hit_chance, joint_prob, leg_value
+    from .parlay_math import hit_chance, leg_value
     if len({ev.market.game_id for ev in legs}) == 1:
-        return _best_same_game(legs, book, target, max_legs, pool)
+        return _best_same_game(legs, book, target, max_legs, pool, used or {})
     best_per_game = {}
     for ev in legs:
         o = leg_price(ev, book)
@@ -257,29 +311,17 @@ def best_for_target(legs: list, book: str, target: float, max_legs: int = 6, poo
         if g not in best_per_game or leg_value(ev, o) > leg_value(*best_per_game[g]):
             best_per_game[g] = (ev, o)
     cands = sorted(best_per_game.values(), key=lambda x: leg_value(*x), reverse=True)[:pool]
-    dec = [american_to_decimal(o) for _e, o in cands]
-    hit = [hit_chance(e) for e, _o in cands]
-    best, best_key = None, None
-    for k in range(1, min(max_legs, len(cands)) + 1):
-        for combo in itertools.combinations(range(len(cands)), k):
-            d = math.prod(dec[i] for i in combo)
-            if d < target:
-                continue
-            p = math.prod(hit[i] for i in combo)
-            key = (p, p * d)
-            if best_key is None or key > best_key:
-                best, best_key = combo, key
+    best = _search(cands, target, max_legs, lambda combo, _d: math.prod(hit_chance(e) for e, _o in combo),
+                   lambda combo: True, used or {})
     if best is None:
         return None
-    return price(book, [cands[i] for i in best], style="target")
+    return price(book, list(best), style="target")
 
 
-def _best_same_game(legs: list, book: str, target: float, max_legs: int, pool: int):
+def _best_same_game(legs: list, book: str, target: float, max_legs: int, pool: int, used: dict):
     """One game only (you asked about one team or matchup): the same search, but legs share
     the game, so one leg per player, combos the book refuses are skipped, and the hit chance
     is the correlated joint chance."""
-    import itertools
-    import math
     from .parlay_math import joint_prob, leg_value
     best_per_player = {}
     for ev in legs:
@@ -290,15 +332,11 @@ def _best_same_game(legs: list, book: str, target: float, max_legs: int, pool: i
         if k not in best_per_player or leg_value(ev, o) > leg_value(*best_per_player[k]):
             best_per_player[k] = (ev, o)
     cands = sorted(best_per_player.values(), key=lambda x: leg_value(*x), reverse=True)[:min(pool, 10)]
-    best, best_key = None, None
-    for k in range(1, min(max_legs, len(cands)) + 1):
-        for combo in itertools.combinations(cands, k):
-            d = math.prod(american_to_decimal(o) for _e, o in combo)
-            if d < target or (k > 1 and sgp_check([e for e, _o in combo], book)["blocked"]):
-                continue
-            p = joint_prob([e for e, _o in combo], draws=3000) if k > 1 else leg_value(*combo[0]) / d
-            if best_key is None or (p, p * d) > best_key:
-                best, best_key = combo, (p, p * d)
+    best = _search(cands, target, max_legs,
+                   lambda combo, d: joint_prob([e for e, _o in combo], draws=3000) if len(combo) > 1
+                   else leg_value(*combo[0]) / d,
+                   lambda combo: len(combo) == 1 or not sgp_check([e for e, _o in combo], book)["blocked"],
+                   used)
     if best is None:
         return None
     one, _multi = SGP_NAMES.get(book, ("SGP", "SGP+"))

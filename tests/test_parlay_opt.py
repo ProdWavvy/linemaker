@@ -149,3 +149,51 @@ class SameGameTargetTest(unittest.TestCase):
         self.assertGreaterEqual(p.decimal, 3.0)
         self.assertEqual(p.kind, "SGP")
         self.assertEqual(len({ev.market.subject for ev, _o in p.legs}), len(p.legs))   # one per player
+
+
+class LadderSpreadTest(unittest.TestCase):
+    def _legs(self):
+        legs = [leg("chalk", "Chalk", "points", p=0.80, odds=-250)]                     # the standout leg
+        legs += [leg(f"g{i}", f"P{i}", "points", p=0.60 - i * 0.005, odds=-115) for i in range(10)]
+        return legs
+
+    def test_payouts_dont_all_ride_one_leg(self):
+        from linemaker import bot
+        legs = self._legs()
+        with mock.patch.object(parlay, "leg_price", side_effect=lambda ev, b: ev.best.best_odds):
+            found = bot.target_parlays([{"rank": i, "ev": ev} for i, ev in enumerate(legs, 1)], ("FanDuel",))
+        tickets = [p for p in found.values() if p]
+        self.assertEqual(len(tickets), len(parlay.TARGETS))
+        uses = {}
+        for p in tickets:
+            for ev, _o in p.legs:
+                uses[ev.market.subject] = uses.get(ev.market.subject, 0) + 1
+        self.assertLessEqual(max(uses.values()), 2)                    # no leg in more than 2 payouts
+        self.assertLessEqual(uses.get("Chalk", 0), 2)
+        seen = set()
+        for t in parlay.TARGETS:                                       # at most 1 shared leg each
+            p = found[(t, "FanDuel")]
+            subs = {ev.market.subject for ev, _o in p.legs}
+            self.assertLessEqual(len(subs & seen), 1)
+            seen |= subs
+
+    def test_card_flags_shared_legs(self):
+        import asyncio
+        from linemaker import bot
+        legs = [leg(f"g{i}", f"P{i}", "points", p=0.62, odds=-120) for i in range(6)]    # small pool
+        with mock.patch.object(parlay, "leg_price", side_effect=lambda ev, b: ev.best.best_odds):
+            async def build():
+                return bot.targets_card([{"rank": i, "ev": ev} for i, ev in enumerate(legs, 1)], ("FanDuel",))
+            embeds, _v = asyncio.run(build())
+        self.assertIn("Spread out", embeds[0].description)
+        text = "\n".join(f.value for e in embeds[1:] for f in e.fields)
+        self.assertIn("🔗 Shares", text)
+        self.assertNotIn("No combination", "\n".join(e.description or "" for e in embeds[1:]))
+
+    def test_tiny_pool_falls_back_and_says_so(self):
+        from linemaker import bot
+        legs = [leg(f"g{i}", f"P{i}", "points", p=0.62, odds=-120) for i in range(3)]
+        with mock.patch.object(parlay, "leg_price", side_effect=lambda ev, b: ev.best.best_odds):
+            found = bot.target_parlays([{"rank": i, "ev": ev} for i, ev in enumerate(legs, 1)], ("FanDuel",))
+        flagged = [p for p in found.values() if p and getattr(p, "reuses", False)]
+        self.assertTrue(flagged)
