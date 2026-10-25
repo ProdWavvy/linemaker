@@ -603,3 +603,26 @@ class OneLegVolumeTest(unittest.TestCase):
         pv = asyncio.run(open_leg())
         self.assertTrue(any(getattr(c, "url", None) for c in pv.children))            # Bet on DraftKings
         self.assertTrue(any(getattr(c, "label", "") == "I bet this" for c in pv.children))
+
+
+class NeverSilentTest(unittest.TestCase):
+    def test_card_refused_still_posts(self):
+        import discord
+        from linemaker import bot
+        from linemaker.scan_format import scan_messages
+        res = PicksCardTest._result(None)
+        messages = scan_messages([("NBA", res, {})], "2026-10-21", ProConfig(track=False))
+        sent = []
+
+        class Refused(discord.HTTPException):
+            def __init__(self):
+                Exception.__init__(self, "400 Bad Request: invalid component")
+                self.status, self.text = 400, "invalid component"
+
+        async def send(**kw):
+            if kw.get("view") is not None:
+                raise Refused()
+            sent.append(kw)
+        asyncio.run(bot._send_card(send, messages))
+        self.assertTrue(sent and "refused" in (sent[0]["content"] or ""))
+        self.assertTrue(sent[0]["embeds"])

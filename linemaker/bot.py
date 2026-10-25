@@ -1003,7 +1003,15 @@ async def _send_card(send, messages: list, markdown=None, filename=None, text: s
             view.add_item(discord.ui.Button(label="Market edges", emoji="⚡", row=4,
                                             style=discord.ButtonStyle.secondary,
                                             custom_id=f"lm:mkt:{market_key}"))
-        await send(content=text[:2000] or None, embeds=embeds, view=view)
+        try:
+            await send(content=text[:2000] or None, embeds=embeds, view=view)
+        except discord.HTTPException as e:
+            # Discord refused part of it (a button or menu it won't take): post the card itself
+            # without them rather than nothing, and log what it objected to.
+            log.error("sending the card failed (%s): %s", e.status, str(e)[:500])
+            for i, group in enumerate(chunk_embeds(embeds)):
+                await send(content=(f"⚠️ Discord refused this card's buttons ({str(e)[:150]}), so here it is "
+                                    "without them. Tell Claude." if i == 0 else None), embeds=group)
         await asyncio.to_thread(save_details)
         return
     if text:
@@ -1268,6 +1276,20 @@ class LinemakerBot(discord.Client):
             log.exception("chat failed")
             await message.reply(f"⚠️ Something went wrong: {type(e).__name__}: {e}")
             return
+        try:
+            await self._send_turn(message, turn)
+        except Exception as e:
+            # Never type and go silent: say what broke (the full trace is in /logs).
+            log.exception("sending the answer failed")
+            try:
+                await message.reply(f"⚠️ I found the plays but couldn't post the card "
+                                    f"({type(e).__name__}: {str(e)[:300]}). Tell Claude; "
+                                    "`/logs search:sending` has the details.")
+            except Exception:
+                pass
+
+    async def _send_turn(self, message: discord.Message, turn):
+        from .chat import split_for_discord
         chunks = split_for_discord(turn.text)
         files = [discord.File(io.BytesIO(md.encode()), filename=name) for name, md in turn.files]
         cards = []

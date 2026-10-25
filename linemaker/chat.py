@@ -522,8 +522,9 @@ class LinemakerChat:
             refresh = bool(REFRESH_WORDS.search(text))
             log.info("quick path: %s %s %s%s, no AI model", ",".join(quick), mode, kind,
                      f" ({book} only)" if book else "")
-            errors = []
-            for sport in quick:
+            errors = {}
+
+            async def scan(sport):
                 try:
                     await asyncio.to_thread(self.run_tool, "find_plays",
                                             {"sport": sport, "mode": mode,
@@ -532,8 +533,12 @@ class LinemakerChat:
                                              "game_parlay_types": game_parlay_types(text),
                                              "teams": [t for s, t in teams if s == sport]}, ctx)
                 except Exception as e:
-                    errors.append(friendly_error(sport, e))
-            reply = "\n".join(errors)   # the pick cards carry the answer
+                    errors[sport] = friendly_error(sport, e)
+            await asyncio.gather(*(scan(s) for s in quick))   # leagues at once: 4 leagues ~ the time of 1
+            order = {s: i for i, s in enumerate(quick)}
+            if ctx.get("results"):
+                ctx["results"].sort(key=lambda r: order.get(r[0], 99))
+            reply = "\n".join(errors[s] for s in quick if s in errors)   # the pick cards carry the answer
 
         elif self.provider == "gemini":
             reply = await self._gemini_reply(list(history), f"{author}: {text}", system, ctx)
