@@ -190,6 +190,10 @@ TOOLS = [
                                         "player props (box score so far + projection for the rest); "
                                         "pp = PrizePicks "
                                         "lines with Power/Flex entries"},
+                "ml_only": {"type": "boolean",
+                            "description": "true for moneyline parlays (\"ml parlay\", \"moneyline "
+                                           "parlay\"): with mode volume and kind games/live, the "
+                                           "legs are each game's likelier winner"},
                 "mode": {"type": "string", "enum": ["smart", "volume", "market"],
                          "description": "smart = best edges (default); volume = likeliest legs "
                                         "for parlays, ranked by hit chance, with parlays built; "
@@ -378,6 +382,13 @@ class LinemakerChat:
                 book = None
             res = run_pro(rows_to_markets(rows), date, cfg, freezer, tracker)
             res.books = (book,) if book else ("FanDuel", "DraftKings")
+            if args.get("ml_only") and mode == "volume" and kind in ("games", "live"):
+                from .pro import ml_parlay_config, ml_parlay_legs
+                mcfg = ml_parlay_config(bet_books=cfg.bet_books)
+                if kind == "live":
+                    from .live import live_parlay_gates
+                    live_parlay_gates(mcfg)
+                res.picks, res.ml_only = ml_parlay_legs(res, mcfg), True
             if book:
                 for ev in res.evaluated:
                     ev.shown_books = res.books   # write-ups and odds views: that book only
@@ -519,6 +530,7 @@ class LinemakerChat:
                                             {"sport": sport, "mode": mode,
                                              "kind": "games" if sport == "UFC" else kind,   # fights: winners only
                                              "refresh": refresh, "book": book,
+                                             "ml_only": bool(ML_ONLY.search(text)) and not OTHER_LINES.search(text),
                                              "teams": [t for s, t in teams if s == sport]}, ctx)
                 except Exception as e:
                     errors.append(friendly_error(sport, e))
@@ -870,6 +882,8 @@ TIPS_WORDS = re.compile(r"[!/]?(betting )?tips[?!.]*|how (should|do) i think abo
                         re.I)
 GAME_LINE_WORDS = re.compile(r"\b(money ?lines?|ml|spreads?|totals?|over/unders?|o/u|"
                              r"winners?|who wins|game lines?)\b", re.I)
+ML_ONLY = re.compile(r"\b(money ?lines?|ml|winners?|who wins)\b", re.I)
+OTHER_LINES = re.compile(r"\b(spreads?|totals?|over/unders?|o/u|props?)\b", re.I)
 REFRESH_WORDS = re.compile(r"\b(fresh|refresh|updated?|latest|new odds|re-?pull)\b", re.I)
 PP_WORDS = re.compile(r"\b(prize ?picks?|pp|pick ?em)\b", re.I)
 BOOK_WORDS = {"FanDuel": re.compile(r"\b(fan ?duel|fd)\b", re.I),

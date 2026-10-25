@@ -234,6 +234,44 @@ def consensus_books(m: "ProMarket") -> int:
     return sum(1 for _b, p in m.books if len(p) >= n and all(x is not None for x in p[:n]))
 
 
+def ml_parlay_config(**overrides) -> "ProConfig":
+    """Moneyline parlays ("nfl ml parlay"): each game's likelier winner. A favourite's price
+    carries the book's margin (3-4 points at -300), so a leg may sit up to
+    LINEMAKER_ML_PARLAY_MAX_VIG (5 points) under fair; the volume gap gate (2 points) would
+    turn away nearly every moneyline."""
+    cfg = volume_config(
+        min_prob=_env_num("LINEMAKER_ML_PARLAY_MIN_PROB", float) or 0.60,
+        min_odds=_env_num("LINEMAKER_ML_PARLAY_ODDS_MIN", int) or -130,
+        max_odds=_env_num("LINEMAKER_ML_PARLAY_ODDS_MAX", int) or -1000,
+        min_gap=-(_env_num("LINEMAKER_ML_PARLAY_MAX_VIG", float) or 0.05))
+    for k, v in overrides.items():
+        setattr(cfg, k, v)
+    return cfg
+
+
+def ml_parlay_legs(res: "ProResult", cfg: "ProConfig") -> list:
+    """Every game's likelier moneyline side that clears the ML parlay gates, likeliest first."""
+    import copy
+    from .odds import implied_probability
+    seen, out = set(), []
+    evs = [ev for ev in res.evaluated if ev.market.bet_type == "moneyline" and len(ev.sides) == 2]
+    for ev in sorted(evs, key=lambda e: -max(s.blended for s in e.sides)):
+        if ev.market.game_id in seen:
+            continue
+        seen.add(ev.market.game_id)
+        leg = copy.copy(ev)
+        leg.chosen = max(ev.sides, key=lambda s: s.blended).side
+        s = leg.best
+        if s.best_odds is None or s.blended < cfg.min_prob:
+            continue
+        if not (cfg.max_odds <= s.best_odds <= cfg.min_odds):
+            continue
+        if s.blended - implied_probability(s.best_odds) < cfg.min_gap:
+            continue
+        out.append(leg)
+    return out
+
+
 def volume_config(**overrides) -> "ProConfig":
     """Parlay/volume settings: high hit chance over edge. All tunable in .env."""
     cfg = ProConfig(

@@ -731,7 +731,9 @@ def volume_messages(sections: list, date: str, cfg, title: str = "") -> list:
     books = books_of([res for _s, res, _e in sections])
     name = "Cross-Sport" if len(sections) > 1 else SPORT_NAMES.get(sections[0][0], sections[0][0])
     focus = next((getattr(res, "focus", "") for _s, res, _e in sections if getattr(res, "focus", "")), "")
-    title = title or (f"{books[0]} " if len(books) == 1 else "") + (f"{focus} · " if focus else "") + f"{name} Volume Mode"
+    ml = all(getattr(res, "ml_only", False) for _s, res, _e in sections)
+    title = title or (f"{books[0]} " if len(books) == 1 else "") + (f"{focus} · " if focus else "") + (
+        f"{name} Moneyline Parlays" if ml else f"{name} Volume Mode")
 
     def _scope(sp, res):
         n = len(res.slate) or res.games
@@ -746,8 +748,18 @@ def volume_messages(sections: list, date: str, cfg, title: str = "") -> list:
              f"estimated hit chance of {cfg.min_prob:.0%}+, a season hit rate of "
              f"{cfg.min_prob:.0%}+ where there's a sample, and isn't priced more than "
              f"{abs(cfg.min_gap) * 100:.0f} points above our estimate."]
+    if ml:
+        intro = [f"Moneyline parlays: each game's **likelier winner**, likeliest first. Scanned "
+                 + ", ".join(_scope(sp, res) for sp, res, _e in sections) + ".",
+                 f"Each leg is priced {fmt_odds(cfg.min_odds)} to {fmt_odds(cfg.max_odds)}, has a "
+                 f"{cfg.min_prob:.0%}+ win chance, and isn't priced more than "
+                 f"{abs(cfg.min_gap) * 100:.0f} points above fair (a favourite always carries the "
+                 "book's margin, so most of these legs are slightly -EV on their own: the edge, "
+                 "when there is one, shows as a value parlay)."]
     if not legs:
-        intro.append("**No legs cleared those bars today.** Try again closer to game time.")
+        intro.append("**No legs cleared those bars.** Games already under way are left out: "
+                     "ask for a live ML parlay for those." if ml else
+                     "**No legs cleared those bars today.** Try again closer to game time.")
     header = discord.Embed(title=f"🎰 {title} · Today's Board ({_day(date)})", color=GOLD if legs else GREY,
                            description="\n\n".join(intro))
     header.set_footer(text=odds_age_note(sections))
