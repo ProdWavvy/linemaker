@@ -9,7 +9,9 @@ For every game in progress (ESPN scoreboard) with player props up at FanDuel/Dra
   final      so far + rest; spread = pre-game spread x sqrt(share left)
 
 Skipped: games in their last few minutes, MLB pitcher props (he can be pulled any inning),
-and a player missing from the box score once a third of the game is gone (likely out).
+a player missing from the box score once a third of the game is gone (likely out), and lines
+already decided (he's past the line: the over has cashed, the under has lost). Books leave
+those prices up for a while, but they can't be bet; graded, they looked like sure wins.
 Live books move within seconds, so prices older than LINEMAKER_LIVE_MAX_ODDS_AGE seconds are
 dropped, the market gets most of the weight (LINEMAKER_LIVE_MODEL_WEIGHT), and every read is
 logged to <tracking>/live, apart from the pre-game calibration.
@@ -17,6 +19,7 @@ logged to <tracking>/live, apart from the pre-game calibration.
 import datetime as dt
 import logging
 import math
+import re
 from typing import Optional
 from zoneinfo import ZoneInfo
 
@@ -68,6 +71,20 @@ def _match(game: dict, events: list) -> Optional[dict]:
                  and last(norm(ev["away_team"])) == last(a)), None)
 
 
+SO_FAR = re.compile(r"LIVE · (-?\d+(?:\.\d+)?) so far")
+
+
+def decided(so_far: float, line: float) -> bool:
+    return so_far > line
+
+
+def decided_record(rec: dict) -> bool:
+    """A tracked live prop read taken after the line was already settled."""
+    m = SO_FAR.search(rec.get("source") or "")
+    return bool(m) and rec.get("inputs", {}).get("bet_type") == "prop" and decided(
+        float(m.group(1)), float(rec.get("threshold", rec["inputs"].get("line", 0))))
+
+
 def live_prop_rows(sport: str, date: str, game: dict, feed: list) -> list:
     """Projection rows (final value) for the props in `feed` from one game in progress."""
     from .boxscores import market_value
@@ -116,6 +133,7 @@ def live_prop_rows(sport: str, date: str, game: dict, feed: list) -> list:
                 note = f", rest cut {cut:.0%} for a {abs(game['lead'])}-point game"
             sd = max(float(p.get("stdev") or 1.0) * math.sqrt(left), 0.35)
             rows.append({"sport": sport, "subject": player, "market": market, "mean": f"{so_far + rest:.3f}",
+                         "_so_far": so_far,
                          "stdev": f"{sd:.3f}", "dist": "normal", "lineup_confirmed": "true",
                          "notes": f"LIVE · {so_far:g} so far, {rest:.1f} more expected "
                                   f"({game['detail']}){note}"})
@@ -160,10 +178,14 @@ def run_live_props(api, sports: list, date: str, tz: ZoneInfo):
                     log.warning("live props %s %s: %s", s, ev["id"], e)
                     continue
                 game_feed = drop_stale_books(parse_event_props(payload, s, tz))
+                game_rows = live_prop_rows(s, d, g, game_feed)
+                done = {(norm(r["subject"]), r["market"].lower()): r.pop("_so_far") for r in game_rows}
+                game_feed = [fm for fm in game_feed if not decided(
+                    done.get((norm(fm.subject), fm.market.lower()), -1.0), fm.line)]
                 for fm in game_feed:
                     fm.date = date      # in progress now: this live scan's slate
                 feed += game_feed
-                rows += live_prop_rows(s, d, g, game_feed)
+                rows += game_rows
                 slate.append((f"{g['away']} @ {g['home']}", ev["commence_time"]))
     from .oddsapi import merge
     merged, missing = merge(feed, rows)

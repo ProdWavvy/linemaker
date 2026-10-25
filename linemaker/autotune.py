@@ -381,8 +381,10 @@ def bias_for(sport: str, market: str) -> float:
 
 
 def tune_live(records: list, current: dict) -> tuple:
-    """(live weight, [changes]): the in-game blend, fit on graded live reads only."""
-    graded = _graded(records)
+    """(live weight, [changes]): the in-game blend, fit on graded live reads only (not reads
+    taken after the line was already decided: those can't be bet and always "hit")."""
+    from .live_props import decided_record
+    graded = _graded([r for r in records if not decided_record(r)])
     old = current.get("live_weight", _env("LINEMAKER_LIVE_MODEL_WEIGHT", 0.35))
     min_total = int(_env("LINEMAKER_AUTOTUNE_MIN", 200))
     n = _outcomes(graded)

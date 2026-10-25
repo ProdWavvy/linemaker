@@ -32,9 +32,12 @@ def _load(path: str) -> dict:
 
 def day_records(date: str) -> dict:
     """{"main": {...}, "live": {...}, "pp": {...}} tracking records for the date."""
+    from .live_props import decided_record
     t = _tdir()
+    live = _load(os.path.join(t, "live", f"{date}.json"))
     return {"main": _load(os.path.join(t, f"{date}.json")),
-            "live": _load(os.path.join(t, "live", f"{date}.json")),
+            # live props read after the line was already decided can't be bet: left out
+            "live": {k: r for k, r in live.items() if not decided_record(r)},
             "pp": _load(os.path.join(t, "pp", f"{date}.json"))}
 
 

@@ -46,7 +46,13 @@ class Tracker:
             self.records = load_or_quarantine(self.path)
         self._touched = set()
 
-    def record(self, ev, now: Optional[dt.datetime] = None):
+    # What a model-free (market-edge) scan must not overwrite on a record a model scan made.
+    MODEL_FIELDS = ("inputs", "sim", "projection_steps", "model_prob_a", "model_weight", "sides",
+                    "best_side", "source", "news_fresh", "injury_status")
+
+    def record(self, ev, now: Optional[dt.datetime] = None, keep_model: bool = False):
+        """keep_model: a market-edge scan (no model) only adds prices and history, so the
+        model's numbers that grading and calibration read stay the model's."""
         m = ev.market
         now = now or _now()
         old = self.records.get(m.key)
@@ -83,6 +89,10 @@ class Tracker:
             "updated": now.isoformat(timespec="seconds"),
             "result": old.get("result") if old else None,
         }
+        if keep_model and old and old.get("model_weight"):
+            for k in self.MODEL_FIELDS:
+                if k in old:
+                    self.records[m.key][k] = old[k]
         for k in PICK_FIELDS + ("market_pick", "volume_pick"):   # the price we picked at, kept for closing-line value
             if old and k in old:
                 self.records[m.key][k] = old[k]

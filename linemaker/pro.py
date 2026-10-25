@@ -654,21 +654,21 @@ def run_pro(markets: list, slate_date: str, cfg: ProConfig, freezer=None,
                 # calibration: price it against every book and log it, marked unbettable.
                 other = evaluate(m, replace(cfg, bet_books=None), sim)
                 if other is not None:
-                    tracker.record(other)
+                    tracker.record(other, keep_model=cfg.force_model_weight == 0)
                     tracker.records[m.key]["bettable"] = False
             continue
         if cfg.min_books and (ev.vig_assumed or consensus_books(m) < cfg.min_books):
             res.passes.append((ev.best.label, f"only {consensus_books(m)} books with both sides "
                                               f"(market edges need {cfg.min_books})"))
             if tracker is not None:
-                tracker.record(ev)
+                tracker.record(ev, keep_model=cfg.force_model_weight == 0)
             continue
         ev.frozen_at = frozen_at
         res.evaluated.append(ev)
         if freezer is not None:
             freezer.record(ev)
         if tracker is not None:
-            tracker.record(ev)
+            tracker.record(ev, keep_model=cfg.force_model_weight == 0)
         if cfg.calibrate:   # after tracking: the record keeps the raw hit chances for the next fit
             apply_calibration(ev)
         c = sport_cfg(cfg, m.sport, per_sport)   # this sport's own gates, if any

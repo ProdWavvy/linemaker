@@ -34,3 +34,21 @@ class JsonIOTest(unittest.TestCase):
             self.assertEqual(disk["k1"]["result"], {"winner": "A"})
             self.assertTrue(disk["k1"]["new"])
             self.assertIn("k3", disk)
+
+
+class KeepModelTest(unittest.TestCase):
+    def test_market_scan_keeps_model_numbers(self):
+        from linemaker.pro import ProConfig, market_config, rows_to_markets, run_pro
+        from linemaker.tracking import Tracker
+        rows = [{"date": "2026-10-25", "sport": "NBA", "game_id": "g1", "game": "A @ H", "bet_type": "prop",
+                 "subject": "P", "market": "points", "line": "20.5", "mean": "26", "stdev": "5",
+                 "books": "FanDuel:-110/-110|DraftKings:-112/-108|BetMGM:-110/-110|Caesars:-115/-105|Pinnacle:-108/-112"}]
+        with tempfile.TemporaryDirectory() as d:
+            run_pro(rows_to_markets(rows), "2026-10-25", ProConfig(), None, Tracker(d, "2026-10-25"))
+            before = load_json(os.path.join(d, "2026-10-25.json"))
+            run_pro(rows_to_markets(rows), "2026-10-25", market_config(), None, Tracker(d, "2026-10-25"))
+            after = load_json(os.path.join(d, "2026-10-25.json"))
+        k = next(iter(before))
+        self.assertGreater(before[k]["model_weight"], 0)
+        self.assertEqual(after[k]["model_weight"], before[k]["model_weight"])
+        self.assertEqual(after[k]["sides"], before[k]["sides"])

@@ -43,3 +43,15 @@ class LivePropsTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class DecidedTest(unittest.TestCase):
+    def test_decided_reads(self):
+        from linemaker.live_props import decided_record
+        rec = {"source": "LIVE · 1 so far, 0.4 more expected (2nd 08:12)", "threshold": 0.5,
+               "inputs": {"bet_type": "prop", "line": 0.5}}
+        self.assertTrue(decided_record(rec))                     # already has the point
+        rec["threshold"] = 1.5
+        self.assertFalse(decided_record(rec))
+        self.assertFalse(decided_record({"source": "pre-game", "threshold": 0.5,
+                                         "inputs": {"bet_type": "prop"}}))
