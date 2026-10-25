@@ -773,6 +773,8 @@ def volume_messages(sections: list, date: str, cfg, title: str = "") -> list:
                               "books": books}))
         from .betlinks import parlay_link
         parlays = build_parlays(legs, books=books) + build_sgps(legs, books=books)
+        if cfg.max_parlay_legs:
+            parlays = [p for p in parlays if len(p.legs) <= cfg.max_parlay_legs]
         from .parlay_math import leg_value
         try:
             from .parlay_track import log_parlays

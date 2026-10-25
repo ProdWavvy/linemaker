@@ -1153,7 +1153,11 @@ class LinemakerBot(discord.Client):
             elif all((ex or {}).get("mode") == "volume" for _s, _r, ex in turn.results):
                 from .pro import volume_config
                 from .scan_format import volume_messages
-                cards = volume_messages(turn.results, today(), volume_config())
+                vcfg = volume_config()
+                if all(getattr(r, "kind", "") == "live" for _s, r, _e in turn.results):
+                    from .live import live_parlay_gates
+                    live_parlay_gates(vcfg)
+                cards = volume_messages(turn.results, today(), vcfg)
             else:
                 cards = scan_messages(turn.results, today(), ProConfig())
         none = discord.AllowedMentions.none()

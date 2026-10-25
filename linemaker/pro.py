@@ -148,6 +148,7 @@ class ProConfig:
     min_books: int = 0                 # complete two-sided books needed in the consensus
     pick_tag: str = "model"            # what a pick is logged as in tracking ("model" / "market")
     calibrate: bool = False            # use calibrated hit chances (volume, PrizePicks: see autotune)
+    max_parlay_legs: Optional[int] = None   # cap on auto-parlay size (live parlays: 3)
     one_per_player: bool = False       # at most one leg per player (volume: his legs move together)
     # Log every priced market (not just picks) to tracking/<date>.json for calibration.
     track: bool = field(default_factory=lambda: os.environ.get(

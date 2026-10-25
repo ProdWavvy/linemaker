@@ -196,6 +196,17 @@ def run_games(odds: OddsAPI, sports: list, date: str, tz: ZoneInfo, cfg: ProConf
     return lr
 
 
+def live_parlay_gates(cfg: ProConfig) -> ProConfig:
+    """Live parlays: no heavy favourites. Past -450 a leg adds little payout but still loses
+    to foul trouble / an injury / a pulled starter the live model can't see coming."""
+    from .pro import _env_num
+    cfg.min_odds = _env_num("LINEMAKER_LIVE_ODDS_MIN", int) or -150
+    cfg.max_odds = _env_num("LINEMAKER_LIVE_ODDS_MAX", int) or -450
+    cfg.min_prob = _env_num("LINEMAKER_LIVE_MIN_PROB", float) or 0.72
+    cfg.max_parlay_legs = _env_num("LINEMAKER_LIVE_PARLAY_LEGS", int) or 3
+    return cfg
+
+
 def live_settings(cfg: ProConfig, date: str) -> tuple:
     """(cfg, tracker) for in-game pricing: the market counts for more, and every live read is
     logged to <tracking>/live, apart from the pre-game calibration."""
@@ -203,6 +214,8 @@ def live_settings(cfg: ProConfig, date: str) -> tuple:
     from .tracking import Tracker
     cfg.model_weight = cfg.model_weight_fresh = live_weight()
     cfg.market_weights = {}   # pre-game tuning doesn't carry over to in-game prices
+    if cfg.pick_tag == "volume":
+        live_parlay_gates(cfg)
     tracker = None
     if cfg.track:
         tracker = Tracker(os.path.join(os.environ.get("LINEMAKER_TRACKING_DIR", "tracking"), "live"), date)
