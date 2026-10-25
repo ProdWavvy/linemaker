@@ -145,7 +145,7 @@ def run_live_props(api, sports: list, date: str, tz: ZoneInfo):
     caller prices the rows, as with the other slates). About one prop call per live game."""
     from .live import LiveRun, live_dates
     from .live_model import drop_stale_books
-    from .oddsapi import (EXTRA_MARKETS, PROP_MARKETS, credits_ok, extra_markets_on, fetch_event_props,
+    from .oddsapi import (EXTRA_MARKETS, PROP_MARKETS, alt_lines_ok, extra_markets_on, fetch_event_props,
                           parse_event_props, sport_key)
     from .pro import ProResult
     feed, rows, slate = [], [], []
@@ -154,7 +154,7 @@ def run_live_props(api, sports: list, date: str, tz: ZoneInfo):
         s = sport.upper()
         family = sport_key(s).split("_")[0]
         keys = list(PROP_MARKETS.get(family, {}))
-        if extra_markets_on() and credits_ok():
+        if extra_markets_on() and alt_lines_ok():
             keys += [k for k in EXTRA_MARKETS.get(family, {}) if not k.endswith("_alternate")]
         for d in live_dates(date, tz):
             try:

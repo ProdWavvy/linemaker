@@ -148,8 +148,8 @@ def game_extras(odds: OddsAPI, sports: list, feed: list, tz: ZoneInfo, markets: 
     one event call per game (~3 credits each; markets= narrows it, e.g. live alt spreads only,
     ~1 credit). Skipped with LINEMAKER_EXTRA_MARKETS=off, for UFC, and once today's credit
     budget is used."""
-    from .oddsapi import GAME_EXTRAS, GAME_MARKETS, credits_ok, extra_markets_on, fetch_event_props, parse_game_odds
-    if not extra_markets_on() or not credits_ok():
+    from .oddsapi import GAME_EXTRAS, GAME_MARKETS, alt_lines_ok, extra_markets_on, fetch_event_props, parse_game_odds
+    if not extra_markets_on() or not alt_lines_ok():
         return []
     have = {(fm.game_id, fm.bet_type, fm.subject, fm.line) for fm in feed}
     out = []

@@ -31,3 +31,16 @@ class CreditDayTest(unittest.TestCase):
                 mock.patch.object(oddsapi.dt, "datetime", wraps=dt.datetime) as fake:
             fake.now.side_effect = lambda tz=None: late.astimezone(tz) if tz else late
             self.assertEqual(oddsapi.local_today(), "2026-10-25")
+
+
+class AltLinesUntilTest(unittest.TestCase):
+    def test_override_until_time(self):
+        with mock.patch.object(oddsapi, "credits_ok", return_value=False):
+            with mock.patch.dict(os.environ, {"LINEMAKER_ALT_LINES_UNTIL": ""}):
+                self.assertFalse(oddsapi.alt_lines_ok())
+            with mock.patch.dict(os.environ, {"LINEMAKER_ALT_LINES_UNTIL": "2999-01-01 23:59"}):
+                self.assertTrue(oddsapi.alt_lines_ok())
+            with mock.patch.dict(os.environ, {"LINEMAKER_ALT_LINES_UNTIL": "2001-01-01 23:59"}):
+                self.assertFalse(oddsapi.alt_lines_ok())
+            with mock.patch.dict(os.environ, {"LINEMAKER_ALT_LINES_UNTIL": "tonight"}):
+                self.assertFalse(oddsapi.alt_lines_ok())

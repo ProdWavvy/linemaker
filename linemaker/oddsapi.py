@@ -314,7 +314,7 @@ def default_prop_markets(sport: str) -> list:
     keys = list(PROP_MARKETS.get(family, {}))
     if alt_lines_on():
         keys += list(ALT_MARKETS.get(family, {}))
-    if extra_markets_on() and credits_ok():
+    if extra_markets_on() and alt_lines_ok():
         keys += [k for k in EXTRA_MARKETS.get(family, {})
                  if alt_lines_on() or not k.endswith("_alternate")]
     if favorites_only():
@@ -426,6 +426,24 @@ def daily_budget() -> Optional[int]:
         return int(raw) if raw else None
     except ValueError:
         return 700
+
+
+def alt_lines_ok() -> bool:
+    """Alt lines and the other extra markets: inside today's budget, or past it while
+    LINEMAKER_ALT_LINES_UNTIL (local time, e.g. "2026-10-25 23:59") hasn't passed."""
+    if credits_ok():
+        return True
+    raw = os.environ.get("LINEMAKER_ALT_LINES_UNTIL", "").strip()
+    if not raw:
+        return False
+    from zoneinfo import ZoneInfo
+    tz = ZoneInfo(os.environ.get("LINEMAKER_TZ", "America/New_York"))
+    try:
+        until = dt.datetime.fromisoformat(raw.replace("T", " ")).replace(tzinfo=tz)
+    except ValueError:
+        log.warning("LINEMAKER_ALT_LINES_UNTIL=%r isn't a date and time (e.g. 2026-10-25 23:59)", raw)
+        return False
+    return dt.datetime.now(tz) <= until
 
 
 def credits_ok() -> bool:
