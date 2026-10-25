@@ -40,6 +40,19 @@ def weekly_lines(today: str) -> list:
     lr = pick_record(live)
     if lr["won"] + lr["lost"]:
         out.append(f"**Live picks:** {lr['won']}-{lr['lost']} · {lr['units']:+.2f} units")
+    per = []
+    for phase, rs in (("Pre-game", recs), ("Live", live)):
+        segs = {}
+        for r in rs:
+            segs.setdefault(r.get("segment", "?"), []).append(r)
+        for seg, srs in sorted(segs.items()):
+            sr = pick_record(srs)
+            if sr["won"] + sr["lost"]:
+                sport, kind = (seg.rsplit("-", 1) + [""])[:2]
+                per.append(f"{phase} {sport} {'ML/spreads/totals' if kind == 'games' else 'props'} "
+                           f"{sr['won']}-{sr['lost']} ({sr['units']:+.2f}u)")
+    if len(per) > 1:
+        out.append("**By segment:** " + " · ".join(per))
     c = clv_summary(recs)
     if c["n"]:
         out.append(f"**Closing-line value:** beat the close {c['beat']:.0%} of the time, "

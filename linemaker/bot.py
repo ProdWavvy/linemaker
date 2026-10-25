@@ -206,7 +206,7 @@ class PickView(discord.ui.View):
             from .bets import leg_from_eval
             from .staking import suggested_dollars
             ev = detail["ev"]
-            leg = leg_from_eval(ev, live=ev.market.notes.startswith("LIVE"))
+            leg = leg_from_eval(ev)
             await interaction.response.send_modal(BetModal(
                 [leg], ev.best.best_odds, ev.best.best_book,
                 suggested_dollars(ev.best.blended, ev.best.best_odds), ev.best.label))

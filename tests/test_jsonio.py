@@ -22,14 +22,17 @@ class JsonIOTest(unittest.TestCase):
     def test_tracker_save_keeps_results_written_meanwhile(self):
         from linemaker.tracking import Tracker
         with tempfile.TemporaryDirectory() as d:
-            save_json(os.path.join(d, "2026-10-25.json"), {"k1": {"result": None}, "k2": {"x": 1}})
+            seg = os.path.join(d, "NBA-props", "2026-10-25.json")
+            nba = {"sport": "NBA", "inputs": {"bet_type": "prop"}}
+            save_json(seg, {"k1": dict(nba, result=None), "k2": dict(nba, x=1)})
             t = Tracker(d, "2026-10-25")
+            t._ensure("NBA-props")
             # live grading saves a result while the scan runs
-            save_json(t.path, {"k1": {"result": {"winner": "A"}}, "k2": {"x": 1}, "k3": {"y": 2}})
-            t.records["k1"] = {"result": None, "new": True}
+            save_json(seg, {"k1": dict(nba, result={"winner": "A"}), "k2": dict(nba, x=1), "k3": dict(nba, y=2)})
+            t.records["k1"] = dict(nba, result=None, new=True)
             t._touched.add("k1")
             t.save()
-            with open(t.path) as f:
+            with open(seg) as f:
                 disk = json.load(f)
             self.assertEqual(disk["k1"]["result"], {"winner": "A"})
             self.assertTrue(disk["k1"]["new"])
@@ -45,9 +48,10 @@ class KeepModelTest(unittest.TestCase):
                  "books": "FanDuel:-110/-110|DraftKings:-112/-108|BetMGM:-110/-110|Caesars:-115/-105|Pinnacle:-108/-112"}]
         with tempfile.TemporaryDirectory() as d:
             run_pro(rows_to_markets(rows), "2026-10-25", ProConfig(), None, Tracker(d, "2026-10-25"))
-            before = load_json(os.path.join(d, "2026-10-25.json"))
+            from linemaker.tracking import load_day
+            before = load_day(d, "2026-10-25")
             run_pro(rows_to_markets(rows), "2026-10-25", market_config(), None, Tracker(d, "2026-10-25"))
-            after = load_json(os.path.join(d, "2026-10-25.json"))
+            after = load_day(d, "2026-10-25")
         k = next(iter(before))
         self.assertGreater(before[k]["model_weight"], 0)
         self.assertEqual(after[k]["model_weight"], before[k]["model_weight"])

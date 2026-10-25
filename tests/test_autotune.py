@@ -67,12 +67,13 @@ class TuneTest(unittest.TestCase):
             with open(path, "w") as f:
                 json.dump({"model_weight": 0.62, "fresh_weight": 0.7, "markets": {"NBA threes": 0.3}}, f)
             with mock.patch.dict(os.environ, {"LINEMAKER_WEIGHTS_FILE": path, "LINEMAKER_MODEL_WEIGHT": "0.5"}):
+                from linemaker.pro import model_weight_for
                 cfg = ProConfig()
                 self.assertEqual((cfg.model_weight, cfg.model_weight_fresh), (0.62, 0.7))
-                self.assertEqual(cfg.market_weights, {"NBA threes": 0.3})
+                self.assertEqual(model_weight_for("NBA", "threes", cfg), 0.3)    # old file: pre-game props
                 from linemaker.live import live_settings
                 live, _t = live_settings(ProConfig(), "2026-10-21")
-                self.assertEqual(live.market_weights, {})
+                self.assertEqual(model_weight_for("NBA", "threes", live), 0.35)  # pre-game tuning stays pre-game
                 with mock.patch.dict(os.environ, {"LINEMAKER_AUTOTUNE": "off"}):
                     self.assertEqual(ProConfig().model_weight, 0.5)
 
@@ -117,7 +118,8 @@ class WeightLookupTest(unittest.TestCase):
     def test_most_specific_wins(self):
         from linemaker.pro import model_weight_for
         cfg = ProConfig(track=False)
-        cfg.model_weight, cfg.sport_weights, cfg.market_weights = 0.5, {"NBA": 0.4}, {"NBA points": 0.3}
+        cfg.model_weight = 0.5
+        cfg.segment_weights = {"pre props": {"sports": {"NBA": 0.4}, "markets": {"NBA points": 0.3}}}
         self.assertEqual(model_weight_for("NBA", "points", cfg), 0.3)
         self.assertEqual(model_weight_for("NBA", "assists", cfg), 0.4)
         self.assertEqual(model_weight_for("NHL", "shots on goal", cfg), 0.5)

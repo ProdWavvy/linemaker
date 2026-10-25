@@ -55,8 +55,9 @@ class TrackEverythingTest(unittest.TestCase):
             res = run_pro(rows_to_markets(rows), "2026-10-21",
                           ProConfig(min_gap=0.0, bet_books=("FanDuel", "DraftKings")),
                           tracker=Tracker(d, "2026-10-21"))
-            with open(os.path.join(d, "2026-10-21.json")) as f:
-                recs = {r["subject"]: r for r in json.load(f).values()}
+            if True:
+                from linemaker.tracking import load_day
+                recs = {r["subject"]: r for r in load_day(d, "2026-10-21").values()}
         self.assertEqual(set(recs), {"Bettable Guy", "Other Books Only"})
         self.assertFalse(recs["Other Books Only"]["bettable"])
         self.assertIsNotNone(recs["Other Books Only"]["market_prob_a"])   # usable for calibration
@@ -79,8 +80,9 @@ class TrackGameLinesTest(unittest.TestCase):
                 mock.patch.object(game_model, "standings", lambda s, y: tables[y]), \
                 mock.patch.object(game_model, "played_yesterday", lambda s, d: set()):
             n = chat.track_game_lines("NBA", "2026-10-21")
-            with open(os.path.join(d, "2026-10-21.json")) as f:
-                recs = json.load(f).values()
+            if True:
+                from linemaker.tracking import load_day
+                recs = load_day(d, "2026-10-21").values()
         self.assertGreater(n, 0)
         self.assertEqual({r["inputs"]["bet_type"] for r in recs}, {"moneyline", "spread", "total"})
         self.assertFalse(any(r["picked"] for r in recs))      # logged, never counted as picks

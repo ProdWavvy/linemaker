@@ -85,9 +85,20 @@ doubling prop credits). Hit rates, Kalshi and team context come from free, unoff
 
 ## Tracking and calibration
 
-Every market the engine prices (all game lines and props, not just picks) is logged to
-`tracking/<date>.json` with the projection and how it was built, the simulation, model and
-no-vig market probabilities, blend weight, and every book's price. Records update until the
+Every market the engine prices (all game lines and props, not just picks) is logged with the
+projection and how it was built, the simulation, model and no-vig market probabilities, blend
+weight, and every book's price, in completely separate files per phase, league and kind:
+
+| File | What |
+|---|---|
+| `tracking/<SPORT>-props/<date>.json` | pre-game player props (NBA-props, NFL-props, ...) |
+| `tracking/<SPORT>-games/<date>.json` | pre-game moneylines, spreads, totals |
+| `tracking/live/<SPORT>-props/<date>.json` | in-game player props |
+| `tracking/live/<SPORT>-games/<date>.json` | in-game game lines |
+| `tracking/pp/<SPORT>-props/<date>.json` | PrizePicks lines |
+| `tracking/parlays/<pre|live>-<SPORT>-<props|games>/<date>.json` | auto-parlays |
+
+Older single `<date>.json` files are split into these automatically (kept as `.migrated`). Records update until the
 game starts, then lock. `/grade` (or `python -m linemaker grade ... --auto`) attaches final
 scores for game lines and any results CSV for props. `/calibrate` (or
 `python -m linemaker calibrate`) scores blend weights 0.00–1.00 by log loss and Brier score,
@@ -118,7 +129,10 @@ plays, pitcher changes, in-game injuries. No live player props.
 ## Automatic weight tuning
 
 Every morning (`LINEMAKER_AUTOGRADE_TIME`, default 09:30) the bot grades yesterday and re-fits
-the model-vs-market blend on the last 60 days of graded markets; `/grade` does the same. The
+the model-vs-market blend on the last 60 days of graded markets; `/grade` does the same. Four
+segments are fit completely apart, each with its own base weight, per-league and per-market
+weights, hit-chance calibration and paused markets: pre-game props, pre-game ML/spreads/totals,
+live props, live ML/spreads/totals. The
 result goes to `tracking/weights.json`, which new cards read immediately. Guardrails: nothing
 moves before 200 graded outcomes (alt lines on one stat count once), a market gets its own weight only at 75+ (pulled toward the
 overall weight), a weight moves only when it clearly fits better and by at most 0.10 per run,

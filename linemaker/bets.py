@@ -36,8 +36,11 @@ def save_bets(bets: list):
     save_json(path, bets, indent=1)
 
 
-def leg_from_eval(ev, live: bool = False, odds: Optional[int] = None, book: str = "") -> dict:
+def leg_from_eval(ev, live: Optional[bool] = None, odds: Optional[int] = None, book: str = "") -> dict:
+    """A bet leg pointing at the tracked market; live legs settle from the live files."""
     m, s = ev.market, ev.best
+    if live is None:
+        live = getattr(ev, "phase", "pre") == "live"
     return {"key": m.key, "side": s.side, "label": s.label, "sport": m.sport, "date": m.date,
             "game": m.game, "odds": odds if odds is not None else s.best_odds,
             "book": book or s.best_book, "live": live, "model_prob": round(s.blended, 4)}
@@ -57,14 +60,14 @@ def add_bet(legs: list, odds: int, stake: float, book: str, user: str = "", **ex
 def _record(leg: dict, cache: dict) -> Optional[dict]:
     folder = os.path.join(_dir(), "live") if leg.get("live") else (
         os.path.join(_dir(), leg["folder"]) if leg.get("folder") else _dir())
-    path = os.path.join(folder, f"{leg['date']}.json")
-    if path not in cache:
+    from .tracking import load_day
+    k = (folder, leg["date"])
+    if k not in cache:
         try:
-            with open(path) as f:
-                cache[path] = json.load(f)
+            cache[k] = load_day(folder, leg["date"])
         except (OSError, ValueError):
-            cache[path] = {}
-    return cache[path].get(leg["key"])
+            cache[k] = {}
+    return cache[k].get(leg["key"])
 
 
 def leg_outcome(leg: dict, cache: dict) -> Optional[str]:

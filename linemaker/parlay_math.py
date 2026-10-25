@@ -147,7 +147,8 @@ def hit_chance(ev) -> float:
     if len(ev.market.side_keys) != 2:
         return p
     from .autotune import calibrated
-    p_a = calibrated(p if ev.best.side == "A" else 1 - p, ev.market.sport, ev.market.bet_type)
+    p_a = calibrated(p if ev.best.side == "A" else 1 - p, ev.market.sport, ev.market.bet_type,
+                     getattr(ev, "phase", "pre"))
     return p_a if ev.best.side == "A" else 1 - p_a
 
 

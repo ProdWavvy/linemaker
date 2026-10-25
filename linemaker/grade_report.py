@@ -33,12 +33,13 @@ def _load(path: str) -> dict:
 def day_records(date: str) -> dict:
     """{"main": {...}, "live": {...}, "pp": {...}} tracking records for the date."""
     from .live_props import decided_record
+    from .tracking import load_day
     t = _tdir()
-    live = _load(os.path.join(t, "live", f"{date}.json"))
-    return {"main": _load(os.path.join(t, f"{date}.json")),
+    live = load_day(os.path.join(t, "live"), date)
+    return {"main": load_day(t, date),
             # live props read after the line was already decided can't be bet: left out
             "live": {k: r for k, r in live.items() if not decided_record(r)},
-            "pp": _load(os.path.join(t, "pp", f"{date}.json"))}
+            "pp": load_day(os.path.join(t, "pp"), date)}
 
 
 def graded_keys(records: dict) -> set:
@@ -280,6 +281,44 @@ def bets_embed(date: str, settled_now: int) -> Optional[discord.Embed]:
                          color=GREEN if profit >= 0 else RED)
 
 
+def segments_embed(records: dict) -> Optional[discord.Embed]:
+    """One line per tracked segment (phase x league x props/game lines): each is tracked,
+    weighed and calibrated on its own."""
+    from .tracking import record_segment
+    phases = (("main", "Pre-game"), ("live", "Live"), ("pp", "PrizePicks"))
+    lines = []
+    for kind, phase in phases:
+        groups = {}
+        for r in records[kind].values():
+            if r.get("result"):
+                groups.setdefault(record_segment(r), []).append(r)
+        for seg, recs in sorted(groups.items()):
+            sport, what = seg.rsplit("-", 1)
+            what = "ML/spreads/totals" if what == "games" else "props"
+            fav = [(_favored(r), r) for r in recs]
+            fav = [(s, r) for s, r in fav if s and r["result"].get("winner") in ("A", "B")]
+            hit = sum(r["result"]["winner"] == s["side"] for s, r in fav)
+            line = f"• **{phase} {sport} {what}:** {len(recs)} graded · likelier side {_pct(hit / len(fav) if fav else None)}"
+            two = [r for r in recs if r["result"].get("winner") in ("A", "B")
+                   and r.get("model_prob_a") is not None and r.get("market_prob_a") is not None]
+            if len(two) >= 20:
+                bm = sum((r["model_prob_a"] - (r["result"]["winner"] == "A")) ** 2 for r in two)
+                bk = sum((r["market_prob_a"] - (r["result"]["winner"] == "A")) ** 2 for r in two)
+                line += " · model " + ("✅ beat" if bm < bk else "📉 trailed") + " market"
+            for tag, name in (("picked", "picks"), ("volume_pick", "parlay legs"), ("market_pick", "edges")):
+                mine = [r for r in recs if r.get(tag)]
+                if mine:
+                    side = (lambda r: r.get("pick_side") or r.get("best_side")) if tag == "picked" else (lambda r: r[tag]["side"])
+                    odds = (lambda r: r.get("pick_odds")) if tag == "picked" else (lambda r: r[tag].get("odds"))
+                    rec, units, _roi = _record_line([(_outcome(r, side(r)), odds(r)) for r in mine])
+                    line += f" · {name} {rec} ({units:+.1f}u)"
+            lines.append(line)
+    if not lines:
+        return None
+    return discord.Embed(title="📂 By Segment (each tracked and tuned on its own)",
+                         description="\n".join(lines)[:4000], color=GREY)
+
+
 def notes_embed(date: str, records: dict, summary: list, newly: int, remaining) -> discord.Embed:
     main = records["main"]
     lines = []
@@ -364,7 +403,8 @@ def overview_embed(date: str, records: dict, newly: int) -> discord.Embed:
 def graded_csv(records: dict) -> str:
     out = io.StringIO()
     w = csv.writer(out)
-    w.writerow(["source", "sport", "game", "subject", "market", "line", "likelier_side",
+    from .tracking import record_segment
+    w.writerow(["source", "segment", "sport", "game", "subject", "market", "line", "likelier_side",
                 "likelier_prob", "model_prob", "market_prob", "value_side", "value_gap",
                 "best_odds", "best_book", "actual", "result", "picked", "pick_odds"])
     for kind, recs in records.items():
@@ -374,7 +414,7 @@ def graded_csv(records: dict) -> str:
             fav = _favored(r) or {}
             val = _side(r, r.get("pick_side") or r.get("best_side")) or {}
             pick_side = r.get("pick_side") or r.get("best_side")
-            w.writerow([kind, r.get("sport"), r.get("game"), r.get("subject"), r.get("market"),
+            w.writerow([kind, record_segment(r), r.get("sport"), r.get("game"), r.get("subject"), r.get("market"),
                         _line(r), fav.get("label"), round(fav.get("blended", 0), 4),
                         round(fav.get("model_prob", 0), 4), round(fav.get("market_prob", 0), 4),
                         val.get("label"), round(val.get("gap", 0), 4), val.get("best_odds"),
@@ -393,7 +433,7 @@ def grade_report(date: str, summary: list, before: set, remaining) -> tuple:
     newly = len(graded_keys(records) - before)
     embeds = [overview_embed(date, records, newly)]
     for e in (picks_embed(records["main"]), market_picks_embed(records["main"]), parlays_embed(date),
-              model_embed(records["main"]), side_book_embed(records),
+              model_embed(records["main"]), segments_embed(records), side_book_embed(records),
               bets_embed(date, settled_now)):
         if e is not None:
             embeds.append(e)

@@ -5,7 +5,7 @@ from unittest import mock
 
 from linemaker.chat import game_parlay_types, quick_kind, quick_mode
 from linemaker.pro import (ProConfig, ml_parlay_config, ml_parlay_legs, model_weight_for, rows_to_markets,
-                           run_pro, volume_config, weight_group)
+                           run_pro, volume_config)
 
 BOOKS = "FanDuel:{a}/{b}|DraftKings:{a2}/{b2}|BetMGM:{a}/{b}"
 
@@ -68,33 +68,131 @@ class MlParlayTest(unittest.TestCase):
                 self.assertEqual(rec["volume_pick"]["side"], ev.best.side)
 
 
-class GameLineWeightsTest(unittest.TestCase):
-    def test_props_and_game_lines_tuned_apart(self):
-        self.assertEqual(weight_group("NFL", "receiving yards"), "NFL")
-        self.assertEqual(weight_group("NFL", "moneyline"), "NFL games")
+class SegmentWeightsTest(unittest.TestCase):
+    def test_each_segment_uses_only_its_own_weights(self):
         cfg = ProConfig()
-        cfg.market_weights, cfg.sport_weights, cfg.model_weight = {}, {"NFL": 0.2, "NFL games": 0.6}, 0.5
+        cfg.model_weight = 0.5
+        cfg.segment_weights = {"pre props": {"weight": 0.45, "sports": {"NFL": 0.2}},
+                               "pre games": {"weight": 0.55, "sports": {"NFL": 0.6}},
+                               "live props": {"weight": 0.3, "sports": {"NBA": 0.25}},
+                               "live games": {"weight": 0.4}}
         self.assertEqual(model_weight_for("NFL", "receiving yards", cfg, "prop"), 0.2)
         self.assertEqual(model_weight_for("NFL", "moneyline", cfg, "moneyline"), 0.6)
-        cfg.sport_weights = {"NFL": 0.2}                    # no game fit yet: not the props weight
-        self.assertEqual(model_weight_for("NFL", "spread", cfg, "spread"), 0.5)
+        self.assertEqual(model_weight_for("NHL", "spread", cfg, "spread"), 0.55)   # games base, not props
+        cfg.phase = "live"
+        self.assertEqual(model_weight_for("NBA", "points", cfg, "prop"), 0.25)
+        self.assertEqual(model_weight_for("NFL", "receiving yards", cfg, "prop"), 0.3)
+        self.assertEqual(model_weight_for("NBA", "moneyline", cfg, "moneyline"), 0.4)
 
-    def test_calibration_split(self):
+    def test_calibration_per_segment(self):
         from linemaker import autotune
-        with mock.patch.object(autotune, "load_weights", return_value={"calibration": {"NFL": [0.0, 0.5]}}):
-            self.assertNotAlmostEqual(autotune.calibrated(0.9, "NFL", "prop"), 0.9)
-            self.assertAlmostEqual(autotune.calibrated(0.9, "NFL", "moneyline"), 0.9)
+        segs = {"segments": {"pre props": {"calibration": {"NFL": [0.0, 0.5]}},
+                             "live games": {"calibration": {"NFL": [0.0, 2.0]}}}}
+        with mock.patch.object(autotune, "load_weights", return_value=segs):
+            self.assertLess(autotune.calibrated(0.9, "NFL", "prop"), 0.9)
+            self.assertAlmostEqual(autotune.calibrated(0.9, "NFL", "moneyline"), 0.9)          # pre games: none
+            self.assertGreater(autotune.calibrated(0.9, "NFL", "moneyline", "live"), 0.9)
+            self.assertAlmostEqual(autotune.calibrated(0.9, "NFL", "prop", "live"), 0.9)
 
-    def test_tune_groups(self):
-        from linemaker.autotune import tune_calibration
-        import random
-        rng, recs = random.Random(1), []
-        for i in range(600):
-            for bt, mk in (("prop", "receiving yards"), ("moneyline", "moneyline")):
-                p = rng.uniform(0.55, 0.95)                 # overconfident: truth is halfway to 50%
-                won = rng.random() < 0.5 + (p - 0.5) / 2
-                recs.append({"sport": "NFL", "game_id": f"g{i % 60}", "subject": f"s{i}", "market": mk,
-                             "inputs": {"bet_type": bt}, "result": {"winner": "A" if won else "B"},
-                             "sides": [{"side": "A", "blended": p}, {"side": "B", "blended": 1 - p}]})
-        out, _notes = tune_calibration(recs)
-        self.assertEqual(set(out), {"NFL", "NFL games"})   # one fit each, never mixed
+    def test_legacy_file_maps_into_segments(self):
+        from linemaker import autotune
+        old = {"model_weight": 0.6, "live_weight": 0.3, "sports": {"NBA": 0.4, "NFL games": 0.7},
+               "markets": {"NBA points": 0.45, "NFL moneyline": 0.65}, "calibration": {"NBA": [0, 1], "NFL games": [0, 1]}}
+        segs = autotune._legacy_segments(old)
+        self.assertEqual(segs["pre props"]["sports"], {"NBA": 0.4})
+        self.assertEqual(segs["pre games"]["sports"], {"NFL": 0.7})
+        self.assertEqual(segs["pre games"]["markets"], {"NFL moneyline": 0.65})
+        self.assertEqual(segs["live games"]["weight"], 0.3)
+
+    def test_autotune_fits_segments_apart(self):
+        import json
+        from linemaker import autotune
+        from tests.test_autotune import records
+        with tempfile.TemporaryDirectory() as d, \
+                mock.patch.dict(os.environ, {"LINEMAKER_WEIGHTS_FILE": "", "LINEMAKER_TRACKING_DIR": d,
+                                             "LINEMAKER_AUTOTUNE_STEP": "1.0"}):
+            props = records(3000, sport="NFL", market="receiving yards", model_skill=0.95, seed=11)
+            games = records(3000, sport="NFL", market="moneyline", model_skill=0.05, seed=12)
+            for r in games:
+                r["inputs"] = {"bet_type": "moneyline"}
+            for seg, recs in (("NFL-props", props), ("NFL-games", games)):
+                os.makedirs(os.path.join(d, seg))
+                with open(os.path.join(d, seg, "2026-10-20.json"), "w") as f:
+                    json.dump({f"{seg}{i}": r for i, r in enumerate(recs)}, f)
+            autotune.run_autotune(d, "2026-10-21")
+            segs = autotune.segment_weights()
+        self.assertGreater(segs["pre props"]["weight"], 0.7)    # the model reads NFL props well
+        self.assertLess(segs["pre games"]["weight"], 0.3)       # the market reads NFL lines better
+        self.assertEqual(segs["live props"]["graded"], 0)
+
+
+class SegmentTrackingTest(unittest.TestCase):
+    def test_files_split_by_phase_league_and_kind(self):
+        from linemaker.live import live_settings
+        from linemaker.tracking import Tracker, load_day, load_records
+        rows = []
+        for sport in ("NBA", "NFL"):
+            rows.append({"date": "2026-10-25", "sport": sport, "game_id": f"{sport}1", "game": "A @ H",
+                         "bet_type": "prop", "subject": f"{sport} Guy", "market": "points", "line": "20.5",
+                         "mean": "24", "stdev": "5", "books": _b(-110, -110)})
+            rows.append({"date": "2026-10-25", "sport": sport, "game_id": f"{sport}1", "game": "A @ H",
+                         "bet_type": "moneyline", "subject": "H", "opponent": "A", "market": "moneyline",
+                         "line": "0", "mean": "3", "stdev": "13", "books": _b(-150, 130)})
+        with tempfile.TemporaryDirectory() as d:
+            run_pro(rows_to_markets(rows), "2026-10-25", ProConfig(), None, Tracker(d, "2026-10-25"))
+            live_dir = os.path.join(d, "live")
+            cfg, _t = live_settings(ProConfig(), "2026-10-25")
+            res = run_pro(rows_to_markets(rows), "2026-10-25", cfg, None, Tracker(live_dir, "2026-10-25"))
+            self.assertTrue(all(ev.phase == "live" for ev in res.evaluated))
+            self.assertEqual(sorted(os.listdir(d)), ["NBA-games", "NBA-props", "NFL-games", "NFL-props", "live"])
+            self.assertEqual(sorted(os.listdir(live_dir)), ["NBA-games", "NBA-props", "NFL-games", "NFL-props"])
+            self.assertEqual(len(load_day(d, "2026-10-25")), 4)
+            self.assertEqual({r["segment"] for r in load_records(d)}, {"NBA-games", "NBA-props", "NFL-games", "NFL-props"})
+            self.assertEqual(len(load_records(d, segments={"NFL-games"})), 1)
+
+    def test_old_mixed_file_is_split(self):
+        import json
+        from linemaker.tracking import load_day
+        with tempfile.TemporaryDirectory() as d:
+            with open(os.path.join(d, "2026-10-24.json"), "w") as f:
+                json.dump({"a": {"sport": "NHL", "inputs": {"bet_type": "prop"}},
+                           "b": {"sport": "NHL", "inputs": {"bet_type": "spread"}}}, f)
+            self.assertEqual(set(load_day(d, "2026-10-24")), {"a", "b"})
+            self.assertTrue(os.path.exists(os.path.join(d, "NHL-props", "2026-10-24.json")))
+            self.assertTrue(os.path.exists(os.path.join(d, "NHL-games", "2026-10-24.json")))
+            self.assertTrue(os.path.exists(os.path.join(d, "2026-10-24.json.migrated")))
+
+    def test_live_bet_leg_settles_from_live_file(self):
+        from linemaker.bets import leg_from_eval
+        from linemaker.live import live_settings
+        cfg, _t = live_settings(ProConfig(track=False), "2026-10-25")
+        res = run_pro(slate([-300]), "2026-10-25", cfg)
+        self.assertTrue(leg_from_eval(res.evaluated[0])["live"])
+        res = run_pro(slate([-300]), "2026-10-25", ProConfig(track=False))
+        self.assertFalse(leg_from_eval(res.evaluated[0])["live"])
+
+
+class LiveGameParlayTest(unittest.TestCase):
+    def test_routing(self):
+        for t, kind, types in (("live ml parlay nba", "live", ["moneyline"]),
+                               ("live ml and spread parlay nfl", "live", ["moneyline", "spread"]),
+                               ("nhl live puck line parlay", "live", ["spread"]),
+                               ("mlb ml and run line parlay", "games", ["moneyline", "spread"]),
+                               ("nfl ats parlay", "games", ["spread"])):
+            self.assertEqual((quick_kind(t), game_parlay_types(t)), (kind, types), t)
+
+    def test_live_gates_and_live_tracking(self):
+        from linemaker.live import live_settings
+        from linemaker.tracking import Tracker, load_day
+        with tempfile.TemporaryDirectory() as d:
+            cfg, _t = live_settings(ml_parlay_config(("moneyline", "spread")), "2026-10-25")
+            self.assertEqual((cfg.phase, cfg.min_odds, cfg.max_odds, cfg.max_parlay_legs), ("live", -150, -450, 3))
+            live = os.path.join(d, "live")
+            res = run_pro(slate([-150, -200, -250, -300, -380, -600], spreads=True), "2026-10-25", cfg, None,
+                          Tracker(live, "2026-10-25"))
+            self.assertTrue(res.picks)
+            self.assertTrue(all(-450 <= ev.best.best_odds <= -150 for ev in res.picks))
+            self.assertTrue(all(ev.best.blended >= 0.72 for ev in res.picks))
+            recs = load_day(live, "2026-10-25")
+            self.assertTrue(all(recs[ev.market.key].get("volume_pick") for ev in res.picks))
+            self.assertFalse(os.path.exists(os.path.join(d, "NFL-games")))     # nothing pre-game

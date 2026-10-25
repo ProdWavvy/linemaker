@@ -25,12 +25,20 @@ class ReportTest(unittest.TestCase):
         self.assertIn("no changes this week", text)
 
     def test_live_weight_tunes_on_live_reads_only(self):
+        import json
         from tests.test_autotune import records
         recs = records(3000, model_skill=0.05, seed=3)      # live model barely helps
-        w, changes = autotune.tune_live(recs, {"live_weight": 0.35})
-        self.assertAlmostEqual(w, 0.25)
-        self.assertIn("Live weight 0.35 → 0.25", changes[0])
-        self.assertEqual(autotune.tune_live(recs[:50], {}), (0.35, []))
+        with tempfile.TemporaryDirectory() as d, \
+                mock.patch.dict(os.environ, {"LINEMAKER_WEIGHTS_FILE": "", "LINEMAKER_TRACKING_DIR": d}):
+            os.makedirs(os.path.join(d, "live", "NBA-props"))
+            with open(os.path.join(d, "live", "NBA-props", "2026-10-20.json"), "w") as f:
+                json.dump({f"k{i}": r for i, r in enumerate(recs)}, f)
+            lines = autotune.run_autotune(d, "2026-10-21")
+            segs = autotune.segment_weights()
+        self.assertAlmostEqual(segs["live props"]["weight"], 0.25)
+        self.assertTrue(any(l.startswith("Live props: Overall weight 0.35 → 0.25") for l in lines))
+        self.assertEqual(segs["pre props"]["weight"], 0.5)          # pre-game untouched by live reads
+        self.assertEqual(segs["live games"]["weight"], 0.35)
 
 
 if __name__ == "__main__":

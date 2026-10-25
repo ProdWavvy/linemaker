@@ -27,14 +27,9 @@ def _weight(name: str, env: str, default: str) -> float:
     return v if v is not None else float(os.environ.get(env, default))
 
 
-def _market_weights() -> dict:
-    from .autotune import load_weights
-    return dict(load_weights().get("markets", {}))
-
-
-def _sport_weights() -> dict:
-    from .autotune import load_weights
-    return dict(load_weights().get("sports", {}))
+def _segment_weights() -> dict:
+    from .autotune import segment_weights
+    return {k: dict(v) for k, v in segment_weights().items()}
 
 
 # Per-sport versions of the gates: LINEMAKER_<SPORT>_<NAME> (e.g. LINEMAKER_NBA_MIN_GAP=0.04,
@@ -95,24 +90,21 @@ def _start_weight(sport: str, default: float) -> float:
         return START_WEIGHTS.get(sport.upper(), default)
 
 
-GAME_LINE_TYPES = ("moneyline", "spread", "total", "team_total", "1x2")
-
-
-def weight_group(sport: str, bet_type: str = "prop") -> str:
-    """Props and game lines come from different models, so they're tuned and calibrated
-    apart: "NFL" is NFL props, "NFL games" its moneylines, spreads and totals."""
-    return f"{sport} games" if bet_type in GAME_LINE_TYPES else sport
-
-
 def model_weight_for(sport: str, market: str, cfg, bet_type: str = "prop") -> float:
-    """Most specific tuned weight wins: market ("NBA points"), then the sport's group ("NBA"
-    for props, "NBA games" for game lines), then the sport's start weight / the overall
-    weight. Each tuned level was already blended with the level above it by sample size (see
-    autotune), so a thin one never strays far."""
-    w = cfg.market_weights.get(f"{sport} {market}")
+    """The scan's own segment only (pre-game or live x props or game lines; see autotune):
+    its market weight ("NBA points"), else its league weight ("NBA"), else the segment's base
+    weight (pre-game: the league's start weight first, e.g. UFC 0.35), else cfg.model_weight.
+    Each tuned level was already blended with the level above it by sample size, so a thin
+    one never strays far."""
+    from .tracking import kind_of
+    seg = cfg.segment_weights.get(f"{cfg.phase} {kind_of(bet_type)}") or {}
+    w = seg.get("markets", {}).get(f"{sport} {market}")
     if w is None:
-        w = cfg.sport_weights.get(weight_group(sport, bet_type))
-    return w if w is not None else _start_weight(sport, cfg.model_weight)
+        w = seg.get("sports", {}).get(sport)
+    if w is not None:
+        return w
+    base = seg.get("weight", cfg.model_weight)
+    return _start_weight(sport, base) if cfg.phase == "pre" else base
 
 
 def _over_min_gap() -> Optional[float]:
@@ -150,14 +142,14 @@ class ProConfig:
                                                                 "LINEMAKER_MODEL_WEIGHT", "0.5"))
     model_weight_fresh: float = field(default_factory=lambda: _weight("fresh_weight",
                                                                       "LINEMAKER_FRESH_WEIGHT", "0.8"))
-    # Per-market overrides ("NBA points": 0.62), only for markets with a big enough sample.
-    market_weights: dict = field(default_factory=lambda: _market_weights())
-    sport_weights: dict = field(default_factory=lambda: _sport_weights())
+    # Tuned weights per segment (pre/live x props/games), league and market (see autotune).
+    segment_weights: dict = field(default_factory=lambda: _segment_weights())
     sport_settings: bool = True        # apply LINEMAKER_<SPORT>_* gates (off for volume / PrizePicks)
     force_model_weight: Optional[float] = None   # market-edge mode: 0 = the sharp consensus alone
     min_books: int = 0                 # complete two-sided books needed in the consensus
     pick_tag: str = "model"            # what a pick is logged as in tracking ("model" / "market")
     calibrate: bool = False            # use calibrated hit chances (volume, PrizePicks: see autotune)
+    phase: str = "pre"                 # pre-game or live: separate weights, calibration, tracking
     max_parlay_legs: Optional[int] = None   # cap on auto-parlay size (live parlays: 3)
     game_parlay_types: tuple = ()      # game-line parlay legs (ml_parlay_config): bet types used
     one_per_player: bool = False       # at most one leg per player (volume: his legs move together)
@@ -223,7 +215,7 @@ def apply_calibration(ev):
     ev.calibrated = True
     for s in ev.sides:
         p_a = s.blended if s.side == "A" else 1 - s.blended
-        p_a = calibrated(p_a, ev.market.sport, ev.market.bet_type)
+        p_a = calibrated(p_a, ev.market.sport, ev.market.bet_type, getattr(ev, "phase", "pre"))
         s.blended = p_a if s.side == "A" else 1 - p_a
         s.gap = s.blended - s.best_implied
         s.ev = expected_value(s.blended, s.best_odds, 100, push)
@@ -625,7 +617,7 @@ def evaluate(m: ProMarket, cfg: ProConfig, sim: Optional[SimResult] = None) -> O
     market, mkt_hold, mkt_over, assumed = mp
     model, push = model_probs(m, sim)
     w = (cfg.force_model_weight if cfg.force_model_weight is not None
-         else cfg.model_weight_fresh if m.news_fresh
+         else cfg.model_weight_fresh if m.news_fresh and cfg.phase == "pre"
          else model_weight_for(m.sport, m.market, cfg, m.bet_type))
 
     sides = []
@@ -711,6 +703,8 @@ def run_pro(markets: list, slate_date: str, cfg: ProConfig, freezer=None,
             if changed:
                 res.passes.append((label, "inputs changed after freeze — frozen projection kept"))
         ev = evaluate(m, cfg, sim)
+        if ev is not None:
+            ev.phase = cfg.phase       # pre / live: picks where it's tracked, weighed, calibrated
         if ev is None:
             where = f" at {'/'.join(cfg.bet_books)}" if cfg.bet_books else ""
             res.passes.append((label, f"no bettable price{where}"))
@@ -739,7 +733,7 @@ def run_pro(markets: list, slate_date: str, cfg: ProConfig, freezer=None,
         c = sport_cfg(cfg, m.sport, per_sport)   # this sport's own gates, if any
         if cfg.pick_tag == "model" and cfg.sport_settings:
             from .autotune import pruned
-            why = pruned(m.sport, m.market)
+            why = pruned(m.sport, m.market, cfg.phase, m.bet_type)
             if why:
                 res.passes.append((ev.best.label, f"market paused, it keeps losing ({why})"))
                 continue

@@ -235,15 +235,16 @@ class TrackingTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             res = run_pro(load_pro_markets(SLATE), "2026-10-21", ProConfig(n_sims=2000),
                           tracker=Tracker(d, "2026-10-21"))
-            with open(os.path.join(d, "2026-10-21.json")) as f:
-                recs = json.load(f)
+            if True:
+                from linemaker.tracking import load_day
+                recs = load_day(d, "2026-10-21")
             self.assertEqual(len(recs), len(res.evaluated))          # all markets, not just picks
             self.assertGreater(len(recs), len(res.picks))
             self.assertEqual(sum(r["picked"] for r in recs.values()), len(res.picks))
             rb = next(r for r in recs.values() if r["subject"] == "RB Example")
             self.assertTrue(rb["projection_steps"])                  # Step/Value kept in the back end
             self.assertIn("DraftKings", rb["books"]["A"])
-            n = apply_results(os.path.join(d, "2026-10-21.json"), [
+            n = __import__("linemaker.tracking", fromlist=["x"]).apply_results_day(d, "2026-10-21", [
                 {"game_id": "NFL1", "subject": "RB Example", "market": "rushing yards",
                  "line": "60.5", "actual": "74"}])
             self.assertEqual(n, 1)

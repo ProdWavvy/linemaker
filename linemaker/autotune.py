@@ -2,7 +2,16 @@
 
 After every grading run the bot re-fits the model-vs-market blend weight on the last
 LINEMAKER_AUTOTUNE_DAYS (default 60) days of graded markets and saves it to
-<tracking>/weights.json, which every new card reads (no restart). Guardrails:
+<tracking>/weights.json, which every new card reads (no restart).
+
+Four completely separate segments, each fit only on its own records and each with its own
+weights, hit-chance calibration and paused markets:
+    pre props    pre-game player props            (tracking/<SPORT>-props)
+    pre games    pre-game moneylines/spreads/totals (tracking/<SPORT>-games)
+    live props   in-game player props             (tracking/live/<SPORT>-props)
+    live games   in-game game lines               (tracking/live/<SPORT>-games)
+Inside a segment, every league (NBA, NFL, NHL, MLB ...) and market gets its own weight.
+Guardrails:
 
   - Nothing moves until there are LINEMAKER_AUTOTUNE_MIN (default 200) graded outcomes (a player's
     alt lines on one stat count once), and a market (e.g. "NBA points") gets its own weight
@@ -20,8 +29,8 @@ LINEMAKER_AUTOTUNE_DAYS (default 60) days of graded markets and saves it to
     Sports with their own start (UFC 0.35, or LINEMAKER_<SPORT>_MODEL_WEIGHT) start there.
   - Weights stay between 0.05 and 0.95.
 
-LINEMAKER_AUTOTUNE=off freezes everything at the .env values. In-game (live) pricing keeps
-its own LINEMAKER_LIVE_MODEL_WEIGHT.
+LINEMAKER_AUTOTUNE=off freezes everything at the .env values. The live segments start from
+LINEMAKER_LIVE_MODEL_WEIGHT (0.35), the pre-game ones from LINEMAKER_MODEL_WEIGHT (0.5).
 """
 import datetime as dt
 import json
@@ -123,8 +132,10 @@ def _step(current: float, target: float, recs: list, max_step: float) -> float:
     return round(min(HIGH, max(LOW, current + move)), 3)
 
 
-def tune(records: list, current: dict) -> tuple:
-    """(new weights dict, [change descriptions]) from graded records."""
+def tune(records: list, current: dict, priors: bool = True) -> tuple:
+    """(new weights dict, [change descriptions]) from graded records of one segment.
+    priors: sports start from their own start weight (UFC 0.35, LINEMAKER_<SPORT>_MODEL_WEIGHT);
+    off for live, where every league starts from the live weight."""
     graded = _graded(records)
     min_total = int(_env("LINEMAKER_AUTOTUNE_MIN", 200))
     max_step = _env("LINEMAKER_AUTOTUNE_STEP", 0.10)
@@ -158,12 +169,11 @@ def tune(records: list, current: dict) -> tuple:
     from .pro import _start_weight
     g = new["model_weight"]
     by_sport, by_market = {}, {}
-    from .pro import weight_group
-    for r in graded:   # props and game lines apart ("NFL" / "NFL games"): different models
-        by_sport.setdefault(weight_group(r["sport"], r.get("inputs", {}).get("bet_type", "prop")), []).append(r)
+    for r in graded:
+        by_sport.setdefault(r["sport"], []).append(r)
         by_market.setdefault(f"{r['sport']} {r['market']}", []).append(r)
     for sport, recs in sorted(by_sport.items()):
-        prior = _start_weight(sport.split(" ")[0], g)
+        prior = _start_weight(sport, g) if priors else g
         n = _outcomes(recs)
         old_s = new["sports"].get(sport, prior)
         if n < MIN_GROUP:
@@ -171,7 +181,7 @@ def tune(records: list, current: dict) -> tuple:
         (sb, _l, _b), _ = best_weight(_rows(recs))
         target = prior + n / (n + SHRINK) * (sb - prior)
         moved = _step(old_s, target, recs, max_step)
-        if abs(moved - g) < 0.025 and sport.split(" ")[0] not in START_PRIORS:
+        if abs(moved - g) < 0.025 and not (priors and sport in START_PRIORS):
             new["sports"].pop(sport, None)       # same as overall: no special case needed
         else:
             new["sports"][sport] = moved
@@ -182,8 +192,7 @@ def tune(records: list, current: dict) -> tuple:
         if n < MIN_GROUP:
             continue
         sport = name.split(" ", 1)[0]
-        bet_type = recs[0].get("inputs", {}).get("bet_type", "prop")
-        parent = new["sports"].get(weight_group(sport, bet_type), _start_weight(sport, g))
+        parent = new["sports"].get(sport, _start_weight(sport, g) if priors else g)
         (gb, _l, _b), _ = best_weight(_rows(recs))
         target = parent + n / (n + SHRINK) * (gb - parent)
         old_m = new["markets"].get(name, parent)
@@ -288,8 +297,8 @@ def tune_prune(records: list) -> tuple:
     return out, []
 
 
-def pruned(sport: str, market: str) -> Optional[str]:
-    return load_weights().get("pruned", {}).get(f"{sport} {market}")
+def pruned(sport: str, market: str, phase: str = "pre", bet_type: str = "prop") -> Optional[str]:
+    return segment(phase, bet_type).get("pruned", {}).get(f"{sport} {market}")
 
 
 # ---- probability calibration ------------------------------------------------------------
@@ -339,8 +348,7 @@ def tune_calibration(records: list) -> tuple:
         a = next((s for s in r.get("sides", []) if s.get("side") == "A"), None)
         if not a or res.get("winner") not in ("A", "B") or len(r.get("sides", [])) != 2:
             continue
-        from .pro import weight_group
-        by_sport.setdefault(weight_group(r.get("sport"), r.get("inputs", {}).get("bet_type", "prop")), []).append(
+        by_sport.setdefault(r.get("sport"), []).append(
             (r.get("game_id"), (r.get("game_id"), r.get("subject"), r.get("market")),
              _logit(a["blended"]), 1.0 if res["winner"] == "A" else 0.0))
     out, notes = {}, []
@@ -374,11 +382,10 @@ def calibrate_p(p: float, a: float, b: float) -> float:
     return 1 / (1 + math.exp(-(a + b * _logit(p))))
 
 
-def calibrated(p: float, sport: str, bet_type: str = "prop") -> float:
-    """Calibrated hit chance: props by the sport's prop fit ("NBA"), game lines by its game
-    fit ("NBA games"); a group with no fit yet is left raw."""
-    from .pro import weight_group
-    c = load_weights().get("calibration", {}).get(weight_group(sport, bet_type))
+def calibrated(p: float, sport: str, bet_type: str = "prop", phase: str = "pre") -> float:
+    """Calibrated hit chance from the segment's own fit for the league (pre-game NBA props,
+    live NFL game lines ...); one with no fit yet is left raw."""
+    c = segment(phase, bet_type).get("calibration", {}).get(sport)
     return calibrate_p(p, c[0], c[1]) if c else p
 
 
@@ -386,54 +393,112 @@ def bias_for(sport: str, market: str) -> float:
     return float(load_weights().get("bias", {}).get(f"{sport} {market}", 1.0))
 
 
-def tune_live(records: list, current: dict) -> tuple:
-    """(live weight, [changes]): the in-game blend, fit on graded live reads only (not reads
-    taken after the line was already decided: those can't be bet and always "hit")."""
-    from .live_props import decided_record
-    graded = _graded([r for r in records if not decided_record(r)])
-    old = current.get("live_weight", _env("LINEMAKER_LIVE_MODEL_WEIGHT", 0.35))
-    min_total = int(_env("LINEMAKER_AUTOTUNE_MIN", 200))
-    n = _outcomes(graded)
-    if n < min_total:
-        return old, []
-    (best, _ll, _br), _ = best_weight(_rows(graded))
-    new = _step(old, best, graded, _env("LINEMAKER_AUTOTUNE_STEP", 0.10))
-    return new, ([f"Live weight {old:.2f} → {new:.2f} ({n} live outcomes)"] if new != old else [])
+SEGMENTS = ("pre props", "pre games", "live props", "live games")
+SEGMENT_LABELS = {"pre props": "Pre-game props", "pre games": "Pre-game ML/spreads/totals",
+                  "live props": "Live props", "live games": "Live ML/spreads/totals"}
+GAME_MARKETS = {"moneyline", "spread", "game total", "team total", "total", "match result",
+                "total goals", "total rounds", "1x2"}
+
+
+def _game_market(name: str) -> bool:
+    return name.split(" ", 1)[-1].lower() in GAME_MARKETS
+
+
+def _legacy_segments(w: dict) -> dict:
+    """A weights.json from before the split (pre-game props and game lines tuned together,
+    one live weight): its numbers as the starting point of each segment."""
+    sports, markets = w.get("sports", {}), w.get("markets", {})
+    cal, paused = w.get("calibration", {}), w.get("pruned", {})
+    games = lambda k: k.endswith(" games")
+    props = {"sports": {k: v for k, v in sports.items() if not games(k)},
+             "markets": {k: v for k, v in markets.items() if not _game_market(k)},
+             "calibration": {k: v for k, v in cal.items() if not games(k)},
+             "pruned": {k: v for k, v in paused.items() if not _game_market(k)}}
+    lines = {"sports": {k[:-6]: v for k, v in sports.items() if games(k)},
+             "markets": {k: v for k, v in markets.items() if _game_market(k)},
+             "calibration": {k[:-6]: v for k, v in cal.items() if games(k)},
+             "pruned": {k: v for k, v in paused.items() if _game_market(k)}}
+    if w.get("model_weight") is not None:
+        props["weight"] = lines["weight"] = w["model_weight"]
+    live = {"weight": w["live_weight"]} if w.get("live_weight") is not None else {}
+    return {"pre props": props, "pre games": lines, "live props": dict(live), "live games": dict(live)}
+
+
+def segment_weights() -> dict:
+    """{"pre props": {"weight", "sports", "markets", "calibration", "pruned"}, ...}"""
+    w = load_weights()
+    if not w:
+        return {}
+    return w["segments"] if "segments" in w else _legacy_segments(w)
+
+
+def segment(phase: str, bet_type: str = "prop") -> dict:
+    from .tracking import kind_of
+    return segment_weights().get(f"{phase} {kind_of(bet_type)}", {})
 
 
 def run_autotune(tracking_dir: str, today: str) -> list:
-    """Re-fit and save. Returns lines describing what changed (or why nothing did)."""
+    """Re-fit each segment on its own records and save. Returns lines describing what
+    changed (or why nothing did)."""
     if not autotune_on():
         return ["Auto-tuning is off (LINEMAKER_AUTOTUNE=off); weights stay as set in .env."]
+    from .live_props import decided_record
+    from .tracking import kind_of
     days = int(_env("LINEMAKER_AUTOTUNE_DAYS", 60))
-    records = load_records(tracking_dir, days, today)
+    min_total = int(_env("LINEMAKER_AUTOTUNE_MIN", 200))
+    by_phase = {"pre": load_records(tracking_dir, days, today),
+                # live props read after the line was already decided can't be bet: left out
+                "live": [r for r in load_records(os.path.join(tracking_dir, "live"), days, today)
+                         if not decided_record(r)]}
     current = load_weights()
-    new, changes = tune(records, current)
-    new["bias"], bias_changes = tune_bias(records, current)
-    new["pruned"], _ = tune_prune(records)
-    new["calibration"], cal_notes = tune_calibration(records)
-    if new["calibration"] != current.get("calibration", {}):
-        bias_changes += cal_notes
-    before = current.get("pruned", {})
-    bias_changes += [f"⏸️ Paused {k}: {v}" for k, v in new["pruned"].items() if k not in before]
-    bias_changes += [f"▶️ {k} back on (no longer losing on both counts)" for k in before if k not in new["pruned"]]
-    if bias_changes:
-        changes = changes + bias_changes
-        new["history"] = (new.get("history", []) + [{"date": dt.date.today().isoformat(),
-                                                    "changes": bias_changes}])[-30:]
-    live_w, live_changes = tune_live(load_records(os.path.join(tracking_dir, "live"), days, today),
-                                     current)
-    new["live_weight"] = live_w
-    if live_changes:
-        changes = changes + live_changes
-        new["history"] = (new.get("history", []) + [{"date": dt.date.today().isoformat(),
-                                                    "changes": live_changes}])[-30:]
+    old_segs = segment_weights()
+    new = {"segments": {}, "history": list(current.get("history", [])),
+           "fresh_weight": current.get("fresh_weight", _env("LINEMAKER_FRESH_WEIGHT", 0.8))}
+    changes, waiting = [], []
+    for name in SEGMENTS:
+        phase, kind = name.split()
+        label = SEGMENT_LABELS[name]
+        recs = [r for r in by_phase[phase] if kind_of(r.get("inputs", {}).get("bet_type", "prop")) == kind]
+        old = old_segs.get(name, {})
+        root = old.get("weight", _env("LINEMAKER_MODEL_WEIGHT", 0.5) if phase == "pre"
+                       else _env("LINEMAKER_LIVE_MODEL_WEIGHT", 0.35))
+        state = {"model_weight": root, "fresh_weight": new["fresh_weight"],
+                 "sports": dict(old.get("sports", {})), "markets": dict(old.get("markets", {})), "history": []}
+        n = _outcomes(_graded(recs))
+        t, ch = tune(recs, state, priors=(phase == "pre"))
+        if n < min_total:
+            waiting.append(f"{label} {n}/{min_total}")
+        else:
+            changes += [f"{label}: {c}" for c in ch]
+        if name == "pre props":
+            new["fresh_weight"] = t["fresh_weight"]
+        seg = {"weight": t["model_weight"], "sports": t["sports"], "markets": t["markets"], "graded": n}
+        seg["calibration"], cal_notes = tune_calibration(recs)
+        if seg["calibration"] != old.get("calibration", {}):
+            changes += [f"{label}: {c}" for c in cal_notes]
+        seg["pruned"], _ = tune_prune(recs)
+        before = old.get("pruned", {})
+        changes += [f"{label}: ⏸️ paused {k}: {v}" for k, v in seg["pruned"].items() if k not in before]
+        changes += [f"{label}: ▶️ {k} back on (no longer losing on both counts)"
+                    for k in before if k not in seg["pruned"]]
+        new["segments"][name] = seg
+    # Projection bias belongs to the pre-game projections (live props build on them).
+    new["bias"], bias_changes = tune_bias(by_phase["pre"], current)
+    changes += bias_changes
+    if changes:
+        new["history"] = (new["history"] + [{"date": dt.date.today().isoformat(), "changes": changes}])[-30:]
+    if waiting:
+        changes.append("Still collecting graded outcomes before tuning: " + ", ".join(waiting))
+    # Top-level copies for older readers (tuned("model_weight") / tuned("live_weight")).
+    new["model_weight"] = new["segments"]["pre props"]["weight"]
+    new["live_weight"] = new["segments"]["live props"]["weight"]
+    new["graded"] = sum(s["graded"] for s in new["segments"].values())
     new["updated"] = dt.datetime.now().isoformat(timespec="seconds")
     path = weights_path()
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
     from .jsonio import save_json
     save_json(path, new, indent=2)
-    return changes or [f"Weights checked against {new.get('graded', 0)} graded outcomes: no change "
+    return changes or [f"Weights checked against {new['graded']} graded outcomes: no change "
                        "needed (current weights already fit best, or the difference is noise)."]
 
 
@@ -441,20 +506,25 @@ def current_summary() -> str:
     w = load_weights()
     if not w:
         return "Using .env weights (nothing auto-tuned yet)."
-    parts = [f"overall {w.get('model_weight', 0.5):.2f}", f"fresh news {w.get('fresh_weight', 0.8):.2f}"]
-    parts += [f"{k} {v:.2f}" for k, v in sorted(w.get("sports", {}).items())]
-    parts += [f"{k} {v:.2f}" for k, v in sorted(w.get("markets", {}).items())]
-    if w.get("live_weight") is not None:
-        parts.append(f"live {w['live_weight']:.2f}")
-    out = "Auto-tuned weights: " + ", ".join(parts)
-    if w.get("calibration"):
-        out += "\nHit-chance calibration (volume, parlays, PrizePicks): " + ", ".join(
-            f"{k} 90%→{calibrate_p(0.9, v[0], v[1]):.0%}" for k, v in sorted(w["calibration"].items()))
-    if w.get("pruned"):
-        out += "\nPaused markets: " + ", ".join(f"{k} ({v})" for k, v in sorted(w["pruned"].items()))
+    segs = segment_weights()
+    out = ["Auto-tuned weights (model share of the blend), each segment on its own:"]
+    for name in SEGMENTS:
+        s = segs.get(name, {})
+        parts = [f"base {s['weight']:.2f}"] if s.get("weight") is not None else ["base: default"]
+        parts += [f"{k} {v:.2f}" for k, v in sorted(s.get("sports", {}).items())]
+        parts += [f"{k} {v:.2f}" for k, v in sorted(s.get("markets", {}).items())]
+        out.append(f"• {SEGMENT_LABELS[name]}: " + ", ".join(parts))
+    out.append(f"Fresh news (pre-game) {w.get('fresh_weight', 0.8):.2f}")
+    cal = [f"{SEGMENT_LABELS[n]} {k} 90%→{calibrate_p(0.9, v[0], v[1]):.0%}"
+           for n in SEGMENTS for k, v in sorted(segs.get(n, {}).get("calibration", {}).items())]
+    if cal:
+        out.append("Hit-chance calibration (volume, parlays, PrizePicks): " + ", ".join(cal))
+    paused = [f"{SEGMENT_LABELS[n]} {k} ({v})" for n in SEGMENTS for k, v in sorted(segs.get(n, {}).get("pruned", {}).items())]
+    if paused:
+        out.append("Paused markets: " + ", ".join(paused))
     if w.get("bias"):
-        out += "\nProjection corrections: " + ", ".join(f"{k} ×{v:.2f}" for k, v in sorted(w["bias"].items()))
-    return out
+        out.append("Projection corrections: " + ", ".join(f"{k} ×{v:.2f}" for k, v in sorted(w["bias"].items())))
+    return "\n".join(out)
 
 
 def tuned(name: str) -> Optional[float]:

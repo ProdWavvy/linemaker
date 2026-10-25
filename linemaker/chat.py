@@ -850,9 +850,11 @@ def enrich(res, sport: str, date: str, floor: Optional[float] = None) -> dict:
         extras["context"] = game_context(sport, date, sorted({ev.market.game for ev in res.picks}))
     except Exception as e:
         log.warning("game context unavailable: %s", e)
-    from .tracking import price_history
+    from .tracking import price_histories
     tdir = os.environ.get("LINEMAKER_TRACKING_DIR", "tracking")
-    extras["history"] = {ev.market.key: price_history(tdir, date, ev.market.key) for ev in res.picks}
+    kind = getattr(res, "kind", "")
+    base = os.path.join(tdir, "live") if kind == "live" else os.path.join(tdir, "pp") if kind == "pp" else tdir
+    extras["history"] = price_histories(base, date, [ev.market.key for ev in res.picks])
     return extras
 
 
@@ -879,10 +881,10 @@ PLAYS_INTENT = re.compile(r"\b(best|top|good|any|today'?s|tonight'?s)\b.*\b(prop
 SPORT_DISPLAY = {"NCAAF": "college football"}
 TIPS_WORDS = re.compile(r"[!/]?(betting )?tips[?!.]*|how (should|do) i think about (these|this|betting)[?!.]*",
                         re.I)
-GAME_LINE_WORDS = re.compile(r"\b(money ?lines?|ml|spreads?|totals?|over/unders?|o/u|"
-                             r"winners?|who wins|game lines?)\b", re.I)
+GAME_LINE_WORDS = re.compile(r"\b(money ?lines?|ml|spreads?|totals?|over/unders?|o/u|ats|against the spread|"
+                             r"run ?lines?|puck ?lines?|winners?|who wins|game lines?)\b", re.I)
 ML_ONLY = re.compile(r"\b(money ?lines?|ml|winners?|who wins)\b", re.I)
-SPREAD_WORDS = re.compile(r"\b(spreads?|ats|against the spread|alt(ernate)? spreads?)\b", re.I)
+SPREAD_WORDS = re.compile(r"\b(spreads?|ats|against the spread|alt(ernate)? spreads?|run ?lines?|puck ?lines?)\b", re.I)
 OTHER_LINES = re.compile(r"\b(totals?|over/unders?|o/u|props?)\b", re.I)
 
 

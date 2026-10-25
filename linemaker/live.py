@@ -143,10 +143,11 @@ def run_best(odds: OddsAPI, sports: list, date: str, tz: ZoneInfo, cfg: ProConfi
     return lr
 
 
-def game_extras(odds: OddsAPI, sports: list, feed: list, tz: ZoneInfo) -> list:
+def game_extras(odds: OddsAPI, sports: list, feed: list, tz: ZoneInfo, markets: Optional[str] = None) -> list:
     """Alternate spreads / totals and team totals, which the bulk game-odds call doesn't carry:
-    one event call per game (~3 credits each). Skipped with LINEMAKER_EXTRA_MARKETS=off, for
-    UFC, and once today's credit budget is used."""
+    one event call per game (~3 credits each; markets= narrows it, e.g. live alt spreads only,
+    ~1 credit). Skipped with LINEMAKER_EXTRA_MARKETS=off, for UFC, and once today's credit
+    budget is used."""
     from .oddsapi import GAME_EXTRAS, GAME_MARKETS, credits_ok, extra_markets_on, fetch_event_props, parse_game_odds
     if not extra_markets_on() or not credits_ok():
         return []
@@ -158,7 +159,7 @@ def game_extras(odds: OddsAPI, sports: list, feed: list, tz: ZoneInfo) -> list:
         ids = sorted({fm.game_id for fm in feed if fm.sport.upper() == sport.upper()})
         for gid in ids:
             try:
-                payload = fetch_event_props(odds, sport, gid, GAME_EXTRAS)
+                payload = fetch_event_props(odds, sport, gid, markets or GAME_EXTRAS)
             except Exception as e:
                 import logging
                 logging.getLogger("linemaker.live").warning("game extras %s %s: %s", sport, gid, e)
@@ -208,12 +209,13 @@ def live_parlay_gates(cfg: ProConfig) -> ProConfig:
 
 
 def live_settings(cfg: ProConfig, date: str) -> tuple:
-    """(cfg, tracker) for in-game pricing: the market counts for more, and every live read is
-    logged to <tracking>/live, apart from the pre-game calibration."""
+    """(cfg, tracker) for in-game pricing: the live segments' own weights and calibration
+    (live props / live game lines, per league), and every live read logged to
+    <tracking>/live/<SPORT>-<kind>, apart from everything pre-game."""
     from .live_model import live_weight
     from .tracking import Tracker
-    cfg.model_weight = cfg.model_weight_fresh = live_weight()
-    cfg.market_weights = {}   # pre-game tuning doesn't carry over to in-game prices
+    cfg.phase = "live"
+    cfg.model_weight = live_weight()   # base when the live segment has nothing tuned yet
     if cfg.pick_tag == "volume":
         live_parlay_gates(cfg)
     tracker = None
@@ -260,6 +262,13 @@ def run_live_games(odds: OddsAPI, sports: list, date: str, tz: ZoneInfo, cfg: Pr
         projections += live_projections(s, date, states, games, prior_rows or [], prior_saved_at)
     live_now = {(p["sport"], p["subject"]) for p in projections}
     feed = [fm for fm in feed if (fm.sport.upper(), fm.subject) in live_now]
+    if os.environ.get("LINEMAKER_LIVE_ALT_SPREADS", "on").strip().lower() not in ("off", "0", "no", "false"):
+        # Alternate spreads for the games in progress (~1 credit each): the live model prices
+        # any spread from its margin, and they're what fits a safe live ML + spread parlay.
+        extra = drop_stale_books(game_extras(odds, sports, feed, tz, "alternate_spreads"))
+        for fm in extra:
+            fm.date = date
+        feed += extra
     cfg, tracker = live_settings(cfg, date)
     lr = price_feed(odds, feed, sports, projections, date, cfg, None, tracker)
     lr.result.passes = [(l, r) for l, r in lr.result.passes if r != "no odds found in the feed"]
@@ -356,12 +365,12 @@ def board_lines(feed: list) -> list:
     return out
 
 
-def auto_results(api: OddsAPI, snapshot_path: str) -> list:
+def auto_results(api: OddsAPI, snapshot) -> list:
     """Final scores from /scores (2 credits per sport) -> results rows for frozen game lines.
-    Scores cover games from the last 3 days only; props still need a results CSV."""
-    import json
+    snapshot: a records dict or the path of a records file. Scores cover games from the last
+    3 days only; props still need a results CSV."""
     from .jsonio import load_json
-    records = load_json(snapshot_path)
+    records = snapshot if isinstance(snapshot, dict) else load_json(snapshot)
     sports = sorted({r["sport"] for r in records.values()
                      if r.get("sport") and r["inputs"].get("bet_type") != "prop"} - {"UFC"})   # UFC: ESPN
     rows = []

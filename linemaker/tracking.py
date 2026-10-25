@@ -1,8 +1,17 @@
 """Log every priced market, attach results, and calibrate the model/market blend weight.
 
-tracking/<date>.json holds one record per market (every game line and prop the engine
-priced, picks or not). A record keeps updating while its game is upcoming and stops
-changing once the game has started, so it reflects the last pre-game read.
+One record per market (every game line and prop the engine priced, picks or not), kept in
+completely separate files per phase, league and kind:
+
+    tracking/<SPORT>-props/<date>.json        pre-game player props     (e.g. NBA-props)
+    tracking/<SPORT>-games/<date>.json        pre-game moneylines, spreads, totals
+    tracking/live/<SPORT>-props/<date>.json   in-game props
+    tracking/live/<SPORT>-games/<date>.json   in-game game lines
+    tracking/pp/<SPORT>-props/<date>.json     PrizePicks lines
+
+A pre-game record keeps updating while its game is upcoming and stops changing once the game
+has started, so it reflects the last pre-game read. Older single files (<base>/<date>.json,
+everything mixed) are split into these on first read and kept as <date>.json.migrated.
 
 Calibration: for graded records, the blended probability for side A is
     w * model + (1 - w) * no-vig market
@@ -38,13 +47,86 @@ def _started(commence: str, now: dt.datetime) -> bool:
     return dt.datetime.fromisoformat(commence.replace("Z", "+00:00")) <= now
 
 
+SEGMENT_DIR = re.compile(r"^[A-Z0-9_]+-(props|games)$")
+DAY_FILE = re.compile(r"\d{4}-\d{2}-\d{2}\.json")
+
+
+def kind_of(bet_type: Optional[str]) -> str:
+    """props for player props, games for moneylines, spreads, totals (and fights)."""
+    return "props" if (bet_type or "prop") == "prop" else "games"
+
+
+def segment_name(sport: Optional[str], bet_type: Optional[str]) -> str:
+    return f"{re.sub(r'[^A-Z0-9_]', '', (sport or 'OTHER').upper()) or 'OTHER'}-{kind_of(bet_type)}"
+
+
+def record_segment(rec: dict) -> str:
+    return segment_name(rec.get("sport"), (rec.get("inputs") or {}).get("bet_type", "prop"))
+
+
+def migrate_day(base: str, date: str):
+    """Split an old mixed <base>/<date>.json into the per-league, per-kind files."""
+    legacy = os.path.join(base, f"{date}.json")
+    if not os.path.exists(legacy):
+        return
+    with path_lock(legacy):
+        if not os.path.exists(legacy):
+            return
+        parts = {}
+        for key, rec in load_or_quarantine(legacy).items():
+            parts.setdefault(record_segment(rec), {})[key] = rec
+        for seg, recs in parts.items():
+            path = os.path.join(base, seg, f"{date}.json")
+            with path_lock(path):
+                disk = load_or_quarantine(path) if os.path.exists(path) else {}
+                for key, rec in recs.items():
+                    if key not in disk:
+                        disk[key] = rec
+                    elif rec.get("result") and not disk[key].get("result"):
+                        disk[key]["result"] = rec["result"]
+                save_json(path, disk)
+        os.replace(legacy, legacy + ".migrated")
+
+
+def day_files(base: str, date: str) -> list:
+    """Every segment file of one phase (base) for the date."""
+    migrate_day(base, date)
+    return sorted(p for p in glob.glob(os.path.join(base, "*", f"{date}.json"))
+                  if SEGMENT_DIR.match(os.path.basename(os.path.dirname(p))))
+
+
+def load_day(base: str, date: str, segments: Optional[set] = None) -> dict:
+    """{key: record} across a phase's segment files for the date (optionally only some)."""
+    out = {}
+    for p in day_files(base, date):
+        if segments is None or os.path.basename(os.path.dirname(p)) in segments:
+            out.update(load_json(p))
+    return out
+
+
 class Tracker:
+    """Reads and writes one phase's records (base: tracking, tracking/live or tracking/pp).
+    Each record lives in its league + kind file; a segment's file is loaded the first time
+    one of its markets is recorded, so a scan only touches its own files."""
+
     def __init__(self, directory: str, date: str):
-        self.path = os.path.join(directory, f"{date}.json")
+        self.directory, self.date = directory, date
         self.records = {}
-        if os.path.exists(self.path):
-            self.records = load_or_quarantine(self.path)
+        self._loaded = set()
         self._touched = set()
+        migrate_day(directory, date)
+
+    def segment_path(self, seg: str) -> str:
+        return os.path.join(self.directory, seg, f"{self.date}.json")
+
+    def _ensure(self, seg: str):
+        if seg in self._loaded:
+            return
+        path = self.segment_path(seg)
+        if os.path.exists(path):
+            for key, rec in load_or_quarantine(path).items():
+                self.records.setdefault(key, rec)
+        self._loaded.add(seg)
 
     # What a model-free (market-edge) scan must not overwrite on a record a model scan made.
     MODEL_FIELDS = ("inputs", "sim", "projection_steps", "model_prob_a", "model_weight", "sides",
@@ -55,6 +137,7 @@ class Tracker:
         model's numbers that grading and calibration read stay the model's."""
         m = ev.market
         now = now or _now()
+        self._ensure(segment_name(m.sport, m.bet_type))
         old = self.records.get(m.key)
         if old is not None and _started(old.get("commence", ""), now):
             return   # game under way: keep the last pre-game read
@@ -117,19 +200,24 @@ class Tracker:
     def save(self):
         """Merge into what's on disk now: other scans and live grading may have saved since
         this tracker loaded, and their records / results must survive."""
-        with path_lock(self.path):
-            disk = load_or_quarantine(self.path) if os.path.exists(self.path) else {}
-            for key in self._touched:
-                mine, theirs = self.records[key], disk.get(key)
-                if theirs:
-                    if theirs.get("result") and not mine.get("result"):
-                        mine["result"] = theirs["result"]
-                    for k in PICK_FIELDS + ("market_pick", "volume_pick", "picked", "pick_side"):
-                        if k in theirs and not mine.get(k):
-                            mine[k] = theirs[k]
-                disk[key] = mine
-            self.records = disk
-            save_json(self.path, disk)
+        by_seg = {}
+        for key in self._touched:
+            by_seg.setdefault(record_segment(self.records[key]), []).append(key)
+        for seg, keys in by_seg.items():
+            path = self.segment_path(seg)
+            with path_lock(path):
+                disk = load_or_quarantine(path) if os.path.exists(path) else {}
+                for key in keys:
+                    mine, theirs = self.records[key], disk.get(key)
+                    if theirs:
+                        if theirs.get("result") and not mine.get("result"):
+                            mine["result"] = theirs["result"]
+                        for k in PICK_FIELDS + ("market_pick", "volume_pick", "picked", "pick_side"):
+                            if k in theirs and not mine.get(k):
+                                mine[k] = theirs[k]
+                    disk[key] = mine
+                save_json(path, disk)
+                self.records.update(disk)
 
 
 def _winner(rec: dict, actual: float) -> Optional[str]:
@@ -145,6 +233,11 @@ def apply_results(path: str, results: list) -> int:
     """Attach results rows (game_id, subject, market, line, actual) to tracked records."""
     with path_lock(path):
         return _apply_results(path, results)
+
+
+def apply_results_day(base: str, date: str, results: list) -> int:
+    """apply_results on every segment file of one phase for the date."""
+    return sum(apply_results(p, results) for p in day_files(base, date)) if results else 0
 
 
 def _apply_results(path: str, results: list) -> int:
@@ -164,9 +257,17 @@ def _apply_results(path: str, results: list) -> int:
     return n
 
 
-def load_records(directory: str, days: Optional[int] = None, today: Optional[str] = None) -> list:
-    paths = sorted(p for p in glob.glob(os.path.join(directory, "*.json"))
-                   if re.fullmatch(r"\d{4}-\d{2}-\d{2}\.json", os.path.basename(p)))
+def load_records(directory: str, days: Optional[int] = None, today: Optional[str] = None,
+                 segments: Optional[set] = None) -> list:
+    """Every record of one phase (directory: tracking, tracking/live or tracking/pp), each
+    tagged with its "segment" (e.g. NBA-props); segments= keeps only those."""
+    for p in glob.glob(os.path.join(directory, "*.json")):
+        if DAY_FILE.fullmatch(os.path.basename(p)):
+            migrate_day(directory, os.path.basename(p)[:10])
+    paths = sorted(p for p in glob.glob(os.path.join(directory, "*", "*.json"))
+                   if DAY_FILE.fullmatch(os.path.basename(p))
+                   and SEGMENT_DIR.match(os.path.basename(os.path.dirname(p)))
+                   and (segments is None or os.path.basename(os.path.dirname(p)) in segments))
     if days is not None:
         end = dt.date.fromisoformat(today) if today else dt.date.today()
         start = end - dt.timedelta(days=days)
@@ -174,8 +275,10 @@ def load_records(directory: str, days: Optional[int] = None, today: Optional[str
                  if start <= dt.date.fromisoformat(os.path.basename(p)[:10]) <= end]
     out = []
     for p in paths:
+        seg = os.path.basename(os.path.dirname(p))
         if True:
             for key, rec in load_json(p).items():
+                rec["segment"] = seg
                 rec["key"] = key
                 out.append(rec)
     return out
@@ -275,13 +378,17 @@ def calibrate(records: list, min_group: int = 30) -> str:
 
 def price_history(directory: str, date: str, key: str) -> list:
     """[(iso time, {side: {book: odds}})] for one tracked market, oldest first."""
-    path = os.path.join(directory, f"{date}.json")
-    if not os.path.exists(path):
-        return []
-    rec = load_json(path).get(key)
+    rec = load_day(directory, date).get(key)
     if not rec:
         return []
     return [(h["t"], {k: v for k, v in h.items() if k != "t"}) for h in rec.get("history", [])]
+
+
+def price_histories(directory: str, date: str, keys: list) -> dict:
+    """price_history for several markets, reading the day's files once."""
+    day = load_day(directory, date)
+    return {k: [(h["t"], {x: v for x, v in h.items() if x != "t"}) for h in (day.get(k) or {}).get("history", [])]
+            for k in keys}
 
 
 def movement(history: list, side: str, book: str) -> Optional[tuple]:

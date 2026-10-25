@@ -53,8 +53,9 @@ class PickPriceKeptTest(unittest.TestCase):
             with unittest.mock.patch.object(tracking, "_now", lambda: first):
                 run_pro(load_pro_markets(SLATE), "2026-10-21", ProConfig(n_sims=2000), tracker=Tracker(d, "2026-10-21"))
             run_pro(load_pro_markets(SLATE), "2026-10-21", ProConfig(n_sims=2000), tracker=Tracker(d, "2026-10-21"))
-            with open(os.path.join(d, "2026-10-21.json")) as f:
-                picked = [r for r in json.load(f).values() if r["picked"]]
+            if True:
+                from linemaker.tracking import load_day
+                picked = [r for r in load_day(d, "2026-10-21").values() if r["picked"]]
         self.assertTrue(picked)
         self.assertTrue(all(r["pick_time"].startswith("2026-10-21T15:00") for r in picked))
         self.assertTrue(all(r["pick_odds"] for r in picked))
