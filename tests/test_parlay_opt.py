@@ -234,3 +234,31 @@ class ParlayCalibrationTest(unittest.TestCase):
             p = parlay.price("FanDuel", [(a, -200), (b, -200)])
         self.assertAlmostEqual(p.raw_prob, 0.49, places=2)
         self.assertLess(p.prob, p.raw_prob)
+
+
+class ExposureTest(unittest.TestCase):
+    def test_leg_in_open_bets_left_out_of_new_parlays(self):
+        import tempfile
+        from linemaker import bets, bot
+        from linemaker.pro import rows_to_markets, run_pro, volume_config
+        from linemaker.scan_format import volume_messages
+        rows = [{"date": "2026-10-25", "sport": "NFL", "game_id": f"g{i}", "game": f"A{i} @ H{i}",
+                 "bet_type": "prop", "subject": "J.K. Dobbins" if i == 0 else f"P{i}", "market": "rushing yards",
+                 "line": "24.5", "mean": str(60 - i), "stdev": "15",
+                 "books": "FanDuel:-600/+400|DraftKings:-600/+400"} for i in range(6)]
+        cfg = volume_config()
+        cfg.min_prob, cfg.min_odds, cfg.max_odds, cfg.min_gap, cfg.track = 0.5, -100, -10000, -1.0, False
+        res = run_pro(rows_to_markets(rows), "2026-10-25", cfg)
+        dobbins = next(ev for ev in res.picks if ev.market.subject == "J.K. Dobbins")
+        with tempfile.TemporaryDirectory() as d, mock.patch.dict(os.environ, {"LINEMAKER_TRACKING_DIR": d}):
+            for _ in range(2):
+                bets.add_bet([bets.leg_from_eval(dobbins)], -600, 10, "FanDuel")
+            self.assertEqual(bets.open_exposure()[("g0", "J.K. Dobbins")]["n"], 2)
+            msgs = volume_messages([("NFL", res, {"profiles": {}, "context": {}, "history": {}})], "2026-10-25", cfg)
+            parlays = [p for _e, dd in msgs if dd and "parlays" in dd for p in dd["parlays"]]
+            self.assertTrue(parlays)
+            self.assertFalse(any(ev.market.subject == "J.K. Dobbins" for p in parlays for ev, _o in p.legs))
+            self.assertIn("Left out", msgs[0][0][0].description)
+            found = bot.target_parlays([{"rank": i, "ev": ev} for i, ev in enumerate(res.picks, 1)], ("FanDuel",))
+            self.assertFalse(any(ev.market.subject == "J.K. Dobbins" for p in found.values() if p
+                                 and not getattr(p, "reuses", False) for ev, _o in p.legs))

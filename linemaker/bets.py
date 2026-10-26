@@ -42,8 +42,37 @@ def leg_from_eval(ev, live: Optional[bool] = None, odds: Optional[int] = None, b
     if live is None:
         live = getattr(ev, "phase", "pre") == "live"
     return {"key": m.key, "side": s.side, "label": s.label, "sport": m.sport, "date": m.date,
+            "bet_type": m.bet_type,
             "game": m.game, "odds": odds if odds is not None else s.best_odds,
             "book": book or s.best_book, "live": live, "model_prob": round(s.blended, 4)}
+
+
+def leg_exposure(leg: dict) -> tuple:
+    """Same as parlay.exposure for a logged leg: (game, player) for props, (game, "game line")
+    for moneylines / spreads / totals (a team's lines lose together)."""
+    parts = (leg.get("key") or "").split("|")
+    gid, subject = (parts[1], parts[2]) if len(parts) >= 3 else ("", leg.get("label", ""))
+    return (gid, subject) if (leg.get("bet_type") or "prop") == "prop" else (gid, "game line")
+
+
+def open_exposure() -> dict:
+    """exposure -> {"n": open bets it's in, "label"} across your logged, unsettled bets."""
+    out = {}
+    for b in load_bets():
+        if b.get("status") != "open":
+            continue
+        for x in {leg_exposure(l): l for l in b.get("legs", [])}.items():
+            e = out.setdefault(x[0], {"n": 0, "label": x[1].get("label", "")})
+            e["n"] += 1
+    return out
+
+
+def max_exposure() -> int:
+    """Open bets one player / game may be in before new parlays leave it out (0 = off)."""
+    try:
+        return int(os.environ.get("LINEMAKER_MAX_EXPOSURE", "2") or 0)
+    except ValueError:
+        return 2
 
 
 def add_bet(legs: list, odds: int, stake: float, book: str, user: str = "", **extra) -> dict:

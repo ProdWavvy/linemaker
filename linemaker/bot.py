@@ -653,6 +653,13 @@ def parlay_card(legs: list, books: Optional[tuple] = None, boost: float = 0.0) -
             games = ", ".join(f"{g} ({n} legs)" for g, n in sgp["groups"])
             value += (f"\n🔗 **Works as a {p.book} {sgp['kind']}**: {games}"[:400]
                       + ". The book prices same-game legs together, so expect a lower price than shown.")
+        from .bets import open_exposure
+        from .parlay import exposure as _exposure
+        held = open_exposure()
+        repeats = [f"{held[_exposure(ev)]['label']} ({held[_exposure(ev)]['n']})" for ev, _o in p.legs
+                   if held.get(_exposure(ev))]
+        if repeats:
+            value += f"\n🧯 Already in your open bets: {', '.join(repeats)[:300]}"
         url = parlay_link(p)
         if url and len(url) <= 512:
             view.add_item(discord.ui.Button(label=f"Bet on {p.book}", url=url,
@@ -693,9 +700,11 @@ def target_parlays(picks: list, books) -> dict:
     on one chalk leg."""
     from .parlay import TARGETS, best_for_target, exposure
     legs = [d["ev"] for d in picks]
+    from .bets import open_exposure
+    held = {k: v["n"] for k, v in open_exposure().items()}   # what your open tickets already ride on
     out = {}
     for b in tuple(books or PARLAY_BOOKS):
-        used = {}
+        used = dict(held)
         for t in TARGETS:
             p = out[(t, b)] = best_for_target(legs, b, t, used=used)
             if p is None:   # not enough separate legs left: the best one anyway, flagged on the card

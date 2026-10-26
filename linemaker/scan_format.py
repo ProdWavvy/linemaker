@@ -795,7 +795,19 @@ def volume_messages(sections: list, date: str, cfg, title: str = "") -> list:
                               "books": books}))
         from .betlinks import parlay_link
         sizes = tuple(range(2, max(cfg.max_parlay_legs or 4, 2) + 1))
-        parlays = build_parlays(legs, sizes=sizes, books=books) + build_sgps(legs, books=books)
+        # Players / games you already have in open tickets (logged bets): left out of new
+        # parlays at LINEMAKER_MAX_EXPOSURE, so one bad leg can't sink ticket after ticket.
+        from .bets import max_exposure, open_exposure
+        from .parlay import exposure
+        held, cap = open_exposure(), max_exposure()
+        fresh = [ev for ev in legs if not cap or held.get(exposure(ev), {}).get("n", 0) < cap]
+        pool = fresh if len(fresh) >= 2 else legs
+        heavy = [held[exposure(ev)] for ev in legs if cap and held.get(exposure(ev), {}).get("n", 0) >= cap]
+        if heavy and pool is fresh:
+            header.description += ("\n\n🧯 **Left out of these parlays** (already in "
+                                   f"{cap}+ of your open bets): "
+                                   + ", ".join(sorted({h['label'] for h in heavy}))[:500])
+        parlays = build_parlays(pool, sizes=sizes, books=books) + build_sgps(pool, books=books)
         if cfg.max_parlay_legs:
             parlays = [p for p in parlays if len(p.legs) <= cfg.max_parlay_legs]
         if cfg.parlay_min_ev is not None:   # bigger tickets only while they still hold their value
