@@ -54,7 +54,12 @@ def price(book: str, chosen: list, kind: str = "", style: str = "safest", boost:
         p.indep_prob *= hit_chance(ev)
         p.decimal *= american_to_decimal(odds)
     p.decimal = boosted(p.decimal, boost) if boost else p.decimal
-    p.prob = joint_prob([ev for ev, _o in p.legs])
+    p.raw_prob = joint_prob([ev for ev, _o in p.legs])
+    from .autotune import parlay_calibrated
+    from .tracking import kind_of
+    phase = "live" if any(getattr(ev, "phase", "pre") == "live" for ev, _o in p.legs) else "pre"
+    kinds = {kind_of(getattr(ev.market, "bet_type", "prop")) for ev, _o in p.legs}
+    p.prob = parlay_calibrated(p.raw_prob, phase, kinds)   # checked against graded parlays (autotune)
     return p
 
 

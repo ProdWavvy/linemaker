@@ -197,3 +197,40 @@ class LadderSpreadTest(unittest.TestCase):
             found = bot.target_parlays([{"rank": i, "ev": ev} for i, ev in enumerate(legs, 1)], ("FanDuel",))
         flagged = [p for p in found.values() if p and getattr(p, "reuses", False)]
         self.assertTrue(flagged)
+
+
+class ParlayCalibrationTest(unittest.TestCase):
+    def _graded(self, n, days, truth_scale, seed=3):
+        import random
+        rng = random.Random(seed)
+        out = []
+        for i in range(n):
+            p = rng.uniform(0.25, 0.7)                       # what the parlay said
+            won = rng.random() < p * truth_scale             # what happened
+            out.append({"prob": p, "raw_prob": p, "result": "won" if won else "lost",
+                        "logged": f"2026-10-{1 + i % days:02d}T12:00:00",
+                        "legs": [{"kind": "props", "live": False}] * 3})
+        return out
+
+    def test_fits_overconfident_parlays(self):
+        from linemaker import autotune
+        out, notes = autotune.tune_parlay_calibration(self._graded(900, 20, 0.7))
+        self.assertIn("pre props", out)
+        a, b, n = out["pre props"]
+        self.assertLess(autotune.calibrate_p(0.4, a, b), 0.36)          # said 40% -> lower
+        self.assertTrue(notes)
+
+    def test_waits_for_enough_and_ignores_noise(self):
+        from linemaker import autotune
+        self.assertEqual(autotune.tune_parlay_calibration(self._graded(100, 20, 0.7))[0], {})   # too few
+        self.assertEqual(autotune.tune_parlay_calibration(self._graded(900, 2, 0.7))[0], {})    # 2 nights only
+        self.assertEqual(autotune.tune_parlay_calibration(self._graded(900, 20, 1.0))[0], {})   # honest already
+
+    def test_price_uses_it(self):
+        from linemaker import autotune
+        a, b = leg("g1", "A", "points", p=0.7, odds=-200), leg("g2", "B", "points", p=0.7, odds=-200)
+        fit = {"parlay_calibration": {"pre props": [-0.5, 1.0, 500]}}
+        with mock.patch.object(autotune, "load_weights", return_value=fit):
+            p = parlay.price("FanDuel", [(a, -200), (b, -200)])
+        self.assertAlmostEqual(p.raw_prob, 0.49, places=2)
+        self.assertLess(p.prob, p.raw_prob)

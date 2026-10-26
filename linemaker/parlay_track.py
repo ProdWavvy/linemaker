@@ -78,7 +78,8 @@ def log_parlays(parlays: list, date: str):
         seg = segment_of(legs)
         new.setdefault(seg, {})[pid] = {
             "book": p.book, "style": p.style, "kind": p.kind, "legs": legs, "segment": seg,
-            "prob": round(p.prob, 4), "indep_prob": round(p.indep_prob, 4),
+            "prob": round(p.prob, 4), "raw_prob": round(getattr(p, "raw_prob", p.prob), 4),
+            "indep_prob": round(p.indep_prob, 4),
             "decimal": round(p.decimal, 4), "logged": dt.datetime.now().isoformat(timespec="seconds"),
             "result": None}
     for seg, entries in new.items():

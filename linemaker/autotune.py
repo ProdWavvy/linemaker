@@ -408,6 +408,64 @@ def bias_for(sport: str, market: str) -> float:
     return float(load_weights().get("bias", {}).get(f"{sport} {market}", 1.0))
 
 
+# ---- parlay calibration ------------------------------------------------------------------
+# Legs are calibrated one by one; a parlay's hit chance is then their joint chance (same-game
+# legs correlated). This checks that number against how the bot's own auto-parlays landed:
+# per phase and kind ("pre props", "live games", "pre mixed" ...), the raw joint chance is fit
+# like the legs (Platt on the logit), kept only with PARLAY_CAL_MIN+ graded parlays from 5+
+# days, when it beats the raw chances by more than the day-to-day noise (one bad night sinks
+# many parlays together), and pulled toward "no change" by n / (n + 300).
+PARLAY_CAL_MIN, PARLAY_CAL_SHRINK, PARLAY_CAL_DAYS = 150, 300, 5
+
+
+def parlay_group(phase: str, kinds: set) -> str:
+    return f"{phase} {kinds.pop() if len(kinds) == 1 else 'mixed'}"
+
+
+def tune_parlay_calibration(parlays: list) -> tuple:
+    """({"pre props": [a, b, n], ...}, [notes]) from graded auto-parlays."""
+    groups = {}
+    for p in parlays:
+        if p.get("result") not in ("won", "lost"):
+            continue
+        legs = p.get("legs") or []
+        phase = "live" if any(l.get("live") for l in legs) else "pre"
+        g = parlay_group(phase, {l.get("kind") or "props" for l in legs})
+        raw = p.get("raw_prob", p.get("prob"))
+        if raw is None:
+            continue
+        groups.setdefault(g, []).append(((p.get("logged") or "")[:10], _logit(float(raw)),
+                                         1.0 if p["result"] == "won" else 0.0))
+    out, notes = {}, []
+    for g, rows in sorted(groups.items()):
+        days = {d for d, _x, _y in rows}
+        if len(rows) < PARLAY_CAL_MIN or len(days) < PARLAY_CAL_DAYS:
+            continue
+        a, b = _platt([x for _d, x, _y in rows], [y for _d, _x, y in rows])
+        w = len(rows) / (len(rows) + PARLAY_CAL_SHRINK)
+        a, b = w * a, 1 + w * (b - 1)
+
+        def loss(x, y, aa, bb):
+            q = min(max(1 / (1 + math.exp(-(aa + bb * x))), 1e-4), 1 - 1e-4)
+            return -(y * math.log(q) + (1 - y) * math.log(1 - q))
+        gains, counts = {}, {}
+        for d, x, y in rows:
+            gains[d] = gains.get(d, 0.0) + loss(x, y, 0, 1) - loss(x, y, a, b)
+            counts[d] = counts.get(d, 0) + 1
+        mean = sum(gains.values()) / len(rows)
+        se = math.sqrt(sum((v - mean * counts[d]) ** 2 for d, v in gains.items())) / len(rows)
+        if mean > max(0.0005, 2 * se):
+            out[g] = [round(a, 4), round(b, 4), len(rows)]
+            notes.append(f"Parlays ({g}) recalibrated on {len(rows)} graded: a said-40% parlay now "
+                         f"reads {calibrate_p(0.4, a, b):.0%}")
+    return out, notes
+
+
+def parlay_calibrated(p: float, phase: str, kinds: set) -> float:
+    c = load_weights().get("parlay_calibration", {}).get(parlay_group(phase, set(kinds)))
+    return calibrate_p(p, c[0], c[1]) if c else p
+
+
 SEGMENTS = ("pre props", "pre games", "live props", "live games")
 SEGMENT_LABELS = {"pre props": "Pre-game props", "pre games": "Pre-game ML/spreads/totals",
                   "live props": "Live props", "live games": "Live ML/spreads/totals"}
@@ -497,6 +555,10 @@ def run_autotune(tracking_dir: str, today: str) -> list:
         changes += [f"{label}: ▶️ {k} back on (no longer losing on both counts)"
                     for k in before if k not in seg["pruned"]]
         new["segments"][name] = seg
+    from .parlay_track import load_range
+    new["parlay_calibration"], pcal_notes = tune_parlay_calibration(load_range(days, today))
+    if new["parlay_calibration"] != current.get("parlay_calibration", {}):
+        changes += pcal_notes
     # Projection bias belongs to the pre-game projections (live props build on them).
     new["bias"], bias_changes = tune_bias(by_phase["pre"], current)
     changes += bias_changes
@@ -539,6 +601,11 @@ def current_summary() -> str:
               if not segs.get(n, {}).get("calibration", {}).get(k) and _prior(*n.split()[:1], "prop", k)]
     if priors:
         out.append("Starting corrections (until each league's own fit): " + ", ".join(priors))
+    pc = w.get("parlay_calibration") or {}
+    out.append("Parlay calibration: " + (", ".join(f"{k} 40%→{calibrate_p(0.4, v[0], v[1]):.0%} ({v[2]} graded)"
+                                                  for k, v in sorted(pc.items()))
+                                        or f"waiting for {PARLAY_CAL_MIN}+ graded auto-parlays over "
+                                           f"{PARLAY_CAL_DAYS}+ days per group"))
     paused = [f"{SEGMENT_LABELS[n]} {k} ({v})" for n in SEGMENTS for k, v in sorted(segs.get(n, {}).get("pruned", {}).items())]
     if paused:
         out.append("Paused markets: " + ", ".join(paused))
