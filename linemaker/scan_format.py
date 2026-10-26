@@ -9,6 +9,7 @@ from zoneinfo import ZoneInfo
 
 import discord
 
+from .pro import effective_max_odds
 from .discord_format import BOOK_STYLE, GOLD, GREY, _book_key, _clip, _emoji, _kickoff, _style
 from .odds import american_to_decimal, fmt_money, fmt_odds
 from .gamelogs import MIN_SEASON_GAMES, apply_hit_gate
@@ -352,7 +353,7 @@ def scan_messages(sections: list, date: str, cfg, title: str = "") -> list:
         gates = [f"at least {cfg.min_books} books pricing both sides",
                  "the best price beats the sharp consensus"]
     if cfg.min_odds is not None or cfg.max_odds is not None:
-        gates.insert(0, f"odds inside {fmt_odds(cfg.min_odds or -100)} to {fmt_odds(cfg.max_odds or -10000)}")
+        gates.insert(0, f"odds inside {fmt_odds(cfg.min_odds or -100)} to {fmt_odds(effective_max_odds(cfg) or -10000)}")
     if cfg.min_prob is not None:
         gates.insert(1, f"estimated probability of {cfg.min_prob:.0%} or better")
     if cfg.min_gap:
@@ -747,7 +748,7 @@ def volume_messages(sections: list, date: str, cfg, title: str = "") -> list:
              "that level actually landed. Scanned "
              + ", ".join(_scope(sp, res) for sp, res, _e in sections) + "."
              + (f" Projections: {', '.join(sources)}." if sources else ""),
-             f"Each leg is priced {fmt_odds(cfg.min_odds)} to {fmt_odds(cfg.max_odds)}, has an "
+             f"Each leg is priced {fmt_odds(cfg.min_odds)} to {fmt_odds(effective_max_odds(cfg))}, has an "
              f"estimated hit chance of {cfg.min_prob:.0%}+, a season hit rate of "
              f"{cfg.min_prob:.0%}+ where there's a sample, and isn't priced more than "
              f"{abs(cfg.min_gap) * 100:.0f} points above our estimate."]
@@ -758,7 +759,7 @@ def volume_messages(sections: list, date: str, cfg, title: str = "") -> list:
                                        "(main or alternate; a parlay takes one leg per game)"}[what]
         intro = [f"{what} parlays: {which}, likeliest first. Scanned "
                  + ", ".join(_scope(sp, res) for sp, res, _e in sections) + ".",
-                 f"Each leg is priced {fmt_odds(cfg.min_odds)} to {fmt_odds(cfg.max_odds)}, has a "
+                 f"Each leg is priced {fmt_odds(cfg.min_odds)} to {fmt_odds(effective_max_odds(cfg))}, has a "
                  f"{cfg.min_prob:.0%}+ win chance, and isn't priced more than "
                  f"{abs(cfg.min_gap) * 100:.0f} points above fair (a favourite always carries the "
                  "book's margin, so most of these legs are slightly -EV on their own: the edge, "

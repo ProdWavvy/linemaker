@@ -258,7 +258,7 @@ def ml_parlay_config(types=("moneyline",), **overrides) -> "ProConfig":
 def _leg_ok(s, cfg) -> bool:
     from .odds import implied_probability
     return (s.best_odds is not None and s.blended >= cfg.min_prob
-            and cfg.max_odds <= s.best_odds <= cfg.min_odds
+            and (effective_max_odds(cfg) or cfg.max_odds) <= s.best_odds <= cfg.min_odds
             and s.blended - implied_probability(s.best_odds) >= cfg.min_gap)
 
 
@@ -648,10 +648,23 @@ def evaluate(m: ProMarket, cfg: ProConfig, sim: Optional[SimResult] = None) -> O
     return ev
 
 
+def heaviest_allowed() -> Optional[int]:
+    """LINEMAKER_MAX_FAVORITE (e.g. -250): no leg or pick priced heavier, in any mode."""
+    return _env_num("LINEMAKER_MAX_FAVORITE", int)
+
+
+def effective_max_odds(cfg) -> Optional[int]:
+    cap = heaviest_allowed()
+    if cap is None:
+        return cfg.max_odds
+    return cap if cfg.max_odds is None else max(cfg.max_odds, cap)
+
+
 def _window_ok(odds: int, cfg: ProConfig) -> bool:
     if cfg.min_odds is not None and odds > cfg.min_odds:
         return False
-    if cfg.max_odds is not None and odds < cfg.max_odds:
+    top = effective_max_odds(cfg)
+    if top is not None and odds < top:
         return False
     return True
 

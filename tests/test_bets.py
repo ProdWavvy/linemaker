@@ -102,3 +102,20 @@ class BankrollModeTest(unittest.TestCase):
             self.assertEqual(staking.suggested_dollars(0.55, 100), 0.4)                  # 2% of $20
             self.assertEqual(bets.summary(0, paper=True)["won"], 1)
             self.assertEqual(bets.summary(0)["lost"], 1)
+
+
+class MaxFavoriteTest(unittest.TestCase):
+    def test_no_leg_heavier_than_cap(self):
+        from linemaker.pro import ProConfig, rows_to_markets, run_pro, volume_config
+        rows = [{"date": "2026-10-26", "sport": "NFL", "game_id": f"g{i}", "game": f"A{i} @ H{i}", "bet_type": "prop",
+                 "subject": f"P{i}", "market": "receiving yards", "line": "20.5", "mean": str(45 - i * 4), "stdev": "12",
+                 "books": f"FanDuel:{o}/+{max(abs(o) - 60, 110)}|DraftKings:{o}/+{max(abs(o) - 60, 110)}"}
+                for i, o in enumerate((-600, -400, -260, -240, -180, -150, -130))]
+        with mock.patch.dict(os.environ, {"LINEMAKER_MAX_FAVORITE": "-250"}):
+            cfg = volume_config(track=False)
+            cfg.min_prob, cfg.min_gap = 0.5, -1.0
+            res = run_pro(rows_to_markets(rows), "2026-10-26", cfg)
+            self.assertTrue(res.picks)
+            self.assertTrue(all(ev.best.best_odds >= -250 for ev in res.picks))
+            smart = run_pro(rows_to_markets(rows), "2026-10-26", ProConfig(track=False, min_gap=-1.0))
+            self.assertTrue(all(ev.best.best_odds >= -250 for ev in smart.picks))
