@@ -151,8 +151,15 @@ def status_lines() -> list:
     from .oddsapi import credits_today, daily_budget, local_today, spend_breakdown
     budget = daily_budget()
     tz = os.environ.get("LINEMAKER_TZ", "America/New_York").split("/")[-1].replace("_", " ")
+    from .oddsapi import _spend, days_to_reset
+    auto = os.environ.get("LINEMAKER_DAILY_CREDITS", "auto").strip().lower() == "auto"
     out.append(f"• Odds API credits spent today ({tz} time, since midnight): {credits_today():,}" + (
-        f" of a {budget:,} daily budget (extra markets and closing reads pause past it)" if budget else ""))
+        f" of a {budget:,} daily budget" + (" (auto: credits left ÷ days until they refill)" if auto else "")
+        + " · past it, pre-tip scans, news re-checks, alt lines and closing reads pause and asks reuse "
+          "recent odds" if budget else ""))
+    left = _spend(local_today()).get("remaining")
+    if left is not None:
+        out.append(f"  ↳ {left:,} credits left on the account · {days_to_reset()} day(s) until they refill")
     by = spend_breakdown()
     if by:
         out.append("  ↳ " + " · ".join(f"{k} {v:,}" for k, v in by.items()))

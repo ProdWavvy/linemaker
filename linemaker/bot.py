@@ -1952,6 +1952,9 @@ def _todays_events(sport: str, date: str) -> list:
 async def pretip_loop():
     """Props for each game LINEMAKER_PRETIP_MINUTES before it tips; posts only real plays."""
     _spend_as("pre-tip scans & closing reads")
+    from .oddsapi import credits_ok
+    if not credits_ok():   # background spending stops at today's budget; your asks still work
+        return
     from .alerts import load_state, pretip_due, pretip_minutes, save_state
     from .chat import scan_events
     date = today()
@@ -1967,6 +1970,7 @@ async def pretip_loop():
         except Exception as e:
             log.warning("pre-tip %s: %s", sport, e)
             continue
+        ran = False
         for group in pretip_due(events, now, pretip_minutes(), done):
             ids = {e["id"] for e in group}
             done |= ids
@@ -1982,13 +1986,14 @@ async def pretip_loop():
                 await _send_card(channel.send, messages)
             else:
                 log.info("pre-tip %s: nothing cleared the gates (%s)", sport, names)
-            try:   # near-closing game lines too, logged (not posted) for grading and tuning
+            ran = True
+        if ran and credits_ok():
+            try:   # near-closing game lines, logged (not posted) for grading: once per sport, not per game
                 from .chat import track_game_lines
                 await asyncio.to_thread(track_game_lines, sport, date)
             except Exception as e:
                 log.warning("game-line tracking %s: %s", sport, e)
         from .alerts import close_minutes
-        from .oddsapi import credits_ok
         if not close_minutes() or not credits_ok():   # optional spend: skipped once today's budget is used
             continue
         closed = set(load_state(f"close_{date}.json", []))
@@ -2010,6 +2015,9 @@ async def news_loop():
     """Re-price a game when a rotation player is newly ruled Out (basketball, NFL) or an NHL
     team's starting goalie changes."""
     _spend_as("injury/lineup news re-checks")
+    from .oddsapi import credits_ok
+    if not credits_ok():   # re-pricing on news is background spending: paused past today's budget
+        return
     from .alerts import NEWS_SPORTS, load_state, news_events, save_state
     from .chat import drop_slate, scan_events
     from .espn_projections import injuries

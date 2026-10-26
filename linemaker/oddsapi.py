@@ -247,7 +247,7 @@ class OddsAPI:
             if h.get(header) is not None:
                 setattr(self.quota, attr, int(float(h[header])))
         if h.get("x-requests-last") is not None:
-            record_spend(int(float(h["x-requests-last"])))
+            record_spend(int(float(h["x-requests-last"])), self.quota.remaining)
         if self.quota.remaining is not None and self.quota.remaining <= 0:
             self._next_key("is out of credits")
         return json.loads(body)
@@ -402,8 +402,8 @@ def spend_breakdown(day: Optional[str] = None) -> dict:
     return dict(sorted(by.items(), key=lambda kv: -kv[1]))
 
 
-def record_spend(cost: int):
-    if not cost:
+def record_spend(cost: int, remaining: Optional[int] = None):
+    if not cost and remaining is None:
         return
     day = local_today()
     path = _spend_path(day)
@@ -412,7 +412,11 @@ def record_spend(cost: int):
         from .jsonio import path_lock, save_json
         with path_lock(path):
             v = _spend(day)
-            v["total"] = int(v.get("total", 0)) + int(cost)
+            if remaining is not None:
+                # what the account had when the day began (the first call's balance + its cost)
+                v.setdefault("start_remaining", int(remaining) + int(cost or 0))
+                v["remaining"] = int(remaining)
+            v["total"] = int(v.get("total", 0)) + int(cost or 0)
             src = SPEND_SOURCE.get()
             v.setdefault("by", {})[src] = v["by"].get(src, 0) + int(cost)
             save_json(path, v)
@@ -420,8 +424,35 @@ def record_spend(cost: int):
         pass
 
 
+def days_to_reset(today: Optional[dt.date] = None) -> int:
+    """Days left in the Odds API billing month, today included (LINEMAKER_CREDIT_RESET_DAY:
+    the day of the month your credits refill, e.g. 21)."""
+    today = today or dt.date.fromisoformat(local_today())
+    try:
+        day = int(os.environ.get("LINEMAKER_CREDIT_RESET_DAY", "") or 1)
+    except ValueError:
+        day = 1
+    import calendar
+
+    def on(y, m):
+        return dt.date(y, m, min(day, calendar.monthrange(y, m)[1]))
+    nxt = on(today.year, today.month)
+    if nxt <= today:
+        y, m = (today.year + 1, 1) if today.month == 12 else (today.year, today.month + 1)
+        nxt = on(y, m)
+    return max((nxt - today).days, 1)
+
+
 def daily_budget() -> Optional[int]:
-    raw = os.environ.get("LINEMAKER_DAILY_CREDITS", "700").strip()
+    """Credits for today. LINEMAKER_DAILY_CREDITS=auto (default): what the account had when
+    today began, spread evenly over the days left until the credits refill, so the month
+    never runs dry; a number fixes it; blank = no budget."""
+    raw = os.environ.get("LINEMAKER_DAILY_CREDITS", "auto").strip().lower()
+    if raw == "auto":
+        start = _spend(local_today()).get("start_remaining")
+        if start is None:
+            return 700   # until the first call today reports the balance
+        return max(int(start / days_to_reset()), 50)
     try:
         return int(raw) if raw else None
     except ValueError:

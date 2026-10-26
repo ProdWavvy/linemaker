@@ -690,6 +690,16 @@ def _slate_for(sport: str, date: str, kind: str, refresh: bool) -> tuple:
                  (time.time() - hit[0]) / 60)
         _SLATES[key] = hit
         return tuple(hit[1:])
+    from .oddsapi import credits_ok
+    over = float(os.environ.get("LINEMAKER_OVER_BUDGET_CACHE_MINUTES", "180") or 0) * 60
+    if hit and not credits_ok() and kind not in ("live", "live_props") and time.time() - hit[0] < over:
+        # Past today's credit budget: the odds already bought stand in (say "fresh" for new ones).
+        age = (time.time() - hit[0]) / 60
+        log.info("%s %s %s: over today's credit budget, reusing odds from %.0f min ago", sport, date, kind, age)
+        _SLATES[key] = hit
+        note = (f"💳 Today's Odds API budget is used, so these are odds from {age:.0f} min ago "
+                "(prices may have moved). Add \"fresh\" to your ask to buy new ones.")
+        return (hit[1], hit[2], hit[3], note if not hit[4] else f"{hit[4]} {note}", hit[5])
     from .live import run_best, run_games, run_live_games
     snaps = os.environ.get("LINEMAKER_SNAPSHOTS", "snapshots")
     if kind == "pp":

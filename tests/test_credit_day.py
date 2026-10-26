@@ -44,3 +44,18 @@ class AltLinesUntilTest(unittest.TestCase):
                 self.assertFalse(oddsapi.alt_lines_ok())
             with mock.patch.dict(os.environ, {"LINEMAKER_ALT_LINES_UNTIL": "tonight"}):
                 self.assertFalse(oddsapi.alt_lines_ok())
+
+
+class AutoBudgetTest(unittest.TestCase):
+    def test_paces_remaining_over_days_left(self):
+        with tempfile.TemporaryDirectory() as d, mock.patch.dict(os.environ, {
+                "LINEMAKER_CACHE_DIR": d, "LINEMAKER_DAILY_CREDITS": "auto", "LINEMAKER_CREDIT_RESET_DAY": "21"}):
+            self.assertEqual(oddsapi.days_to_reset(dt.date(2026, 10, 26)), 26)
+            self.assertEqual(oddsapi.days_to_reset(dt.date(2026, 11, 20)), 1)
+            self.assertEqual(oddsapi.days_to_reset(dt.date(2026, 11, 21)), 30)
+            self.assertEqual(oddsapi.daily_budget(), 700)                 # no balance seen yet today
+            oddsapi.record_spend(10, 5990)                                # first call: 6,000 at the start
+            with mock.patch.object(oddsapi, "days_to_reset", return_value=20):
+                self.assertEqual(oddsapi.daily_budget(), 300)
+                oddsapi.record_spend(400, 5590)
+                self.assertFalse(oddsapi.credits_ok())                     # 410 spent of 300
