@@ -1970,7 +1970,7 @@ async def pretip_loop():
         except Exception as e:
             log.warning("pre-tip %s: %s", sport, e)
             continue
-        ran = False
+        ran = set()
         for group in pretip_due(events, now, pretip_minutes(), done):
             ids = {e["id"] for e in group}
             done |= ids
@@ -1986,11 +1986,11 @@ async def pretip_loop():
                 await _send_card(channel.send, messages)
             else:
                 log.info("pre-tip %s: nothing cleared the gates (%s)", sport, names)
-            ran = True
+            ran |= ids
         if ran and credits_ok():
-            try:   # near-closing game lines, logged (not posted) for grading: once per sport, not per game
+            try:   # game lines of the games about to start, logged (not posted) for grading
                 from .chat import track_game_lines
-                await asyncio.to_thread(track_game_lines, sport, date)
+                await asyncio.to_thread(track_game_lines, sport, date, ran)
             except Exception as e:
                 log.warning("game-line tracking %s: %s", sport, e)
         from .alerts import close_minutes
@@ -2005,7 +2005,7 @@ async def pretip_loop():
                 await asyncio.to_thread(scan_events, sport, date, ids,
                                         f"{SPORT_NAMES.get(sport, sport)} closing read", True, True)
                 from .chat import track_game_lines
-                await asyncio.to_thread(track_game_lines, sport, date)
+                await asyncio.to_thread(track_game_lines, sport, date, ids)
             except Exception:
                 log.exception("closing read failed (%s)", sport)
 

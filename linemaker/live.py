@@ -173,12 +173,12 @@ def game_extras(odds: OddsAPI, sports: list, feed: list, tz: ZoneInfo, markets: 
 
 
 def run_games(odds: OddsAPI, sports: list, date: str, tz: ZoneInfo, cfg: ProConfig,
-              freezer=None) -> LiveRun:
+              freezer=None, only: Optional[set] = None) -> LiveRun:
     """Moneylines, spreads and totals priced off the free game model (ESPN ratings + Kalshi).
     One /odds call per sport: about 3 credits."""
     from .game_model import game_projections
     from .oddsapi import skip_started
-    feed = fetch_feed(odds, sports, date, tz, props=False, game_lines=True)
+    feed = fetch_feed(odds, sports, date, tz, props=False, game_lines=True, only=only)
     if skip_started():   # in-progress games carry live odds; the pre-game model can't price them
         now = dt.datetime.now(dt.timezone.utc)
         feed = [fm for fm in feed if not fm.commence or

@@ -841,10 +841,11 @@ def drop_slate(sport: str, date: str, kind: str = "props"):
         pass
 
 
-def track_game_lines(sport: str, date: str) -> int:
+def track_game_lines(sport: str, date: str, only: Optional[set] = None) -> int:
     """Price today's not-yet-started moneylines/spreads/totals with the game model just to
-    log them for grading and weight tuning (nothing is posted). One /odds call, ~3 credits.
-    Returns how many markets were logged."""
+    log them for grading and weight tuning (nothing is posted). One /odds call (~3 credits)
+    plus alt spreads / totals / team totals per game (~3 each): only= limits that to the
+    games about to start. Returns how many markets were logged."""
     from .busy import busy
     from .game_model import SUPPORTED
     from .live import run_games
@@ -853,7 +854,7 @@ def track_game_lines(sport: str, date: str) -> int:
     cfg = ProConfig()
     cfg.max_picks = 0   # log only: nothing was posted, so nothing counts as a pick
     with busy():
-        lr = run_games(OddsAPI(), [sport], date, _tz(), cfg, None)
+        lr = run_games(OddsAPI(), [sport], date, _tz(), cfg, None, only=only)
     log.info("%s game lines logged for tracking: %d markets", sport, len(lr.result.evaluated))
     return len(lr.result.evaluated)
 
@@ -870,10 +871,28 @@ def scan_events(sport: str, date: str, event_ids: set, title: str, only_if_picks
     cfg = ProConfig()
     if log_only:
         cfg.max_picks = 0   # nothing was posted, so nothing counts as a pick
-    with busy():
-        lr = run_best(OddsAPI(), [sport], date, _tz(), cfg, None if log_only else Freezer(snaps, date),
-                      only=set(event_ids))
-    res = lr.result
+        names = played_markets(sport, date, event_ids)
+        if not names:
+            log.info("%s: nothing played in these games, no closing read needed (0 credits)", title)
+            return None, None
+        from .oddsapi import PROP_KEYS, market_keys_for
+        token = PROP_KEYS.set(market_keys_for(sport, names) or None)
+    cached = None if log_only else _fresh_rows(sport, date, event_ids)
+    try:
+        if cached is not None:   # an ask bought these games' odds minutes ago: price those (free)
+            from .pro import rows_to_markets, run_pro
+            log.info("%s: reusing odds bought %.0f min ago for %d game(s) (0 credits)", title,
+                     cached[1] / 60, len(event_ids))
+            res = run_pro(rows_to_markets(cached[0]), date, cfg, Freezer(snaps, date))
+            res.projection_source = cached[2]
+        else:
+            with busy():
+                lr = run_best(OddsAPI(), [sport], date, _tz(), cfg, None if log_only else Freezer(snaps, date),
+                              only=set(event_ids))
+            res = lr.result
+    finally:
+        if log_only:
+            PROP_KEYS.reset(token)
     if log_only:
         log.info("%s: %d markets re-read for closing prices", title, len(res.evaluated))
         return None, res
@@ -884,6 +903,38 @@ def scan_events(sport: str, date: str, event_ids: set, title: str, only_if_picks
     if only_if_picks and not res.picks:
         return None, res
     return scan_messages([(sport, res, extras)], date, cfg, title), res
+
+
+def _fresh_rows(sport: str, date: str, event_ids: set):
+    """(rows for these games, age in seconds, source) from a props slate bought inside the
+    reuse window that covers every one of them, else None."""
+    hit = _SLATES.get((sport, date, "props")) or load_slate_cache(sport, date, "props")
+    if not hit or time.time() - hit[0] >= PLAYS_CACHE_SECONDS:
+        return None
+    rows = [r for r in hit[1] if r.get("game_id") in event_ids]
+    if {r.get("game_id") for r in rows} != set(event_ids):
+        return None
+    hit = _apply_news(sport, date, "props", hit)
+    return [r for r in hit[1] if r.get("game_id") in event_ids], time.time() - hit[0], hit[5]
+
+
+def played_markets(sport: str, date: str, event_ids: set) -> set:
+    """Market names in these games that matter at the close: the bot's picks, parlay legs,
+    market edges and your logged bets (everything else keeps its pre-tip read)."""
+    from .tracking import load_day
+    tdir = os.environ.get("LINEMAKER_TRACKING_DIR", "tracking")
+    names = {r.get("market") for r in load_day(tdir, date).values()
+             if r.get("game_id") in event_ids and (r.get("picked") or r.get("volume_pick") or r.get("market_pick"))
+             and (r.get("inputs") or {}).get("bet_type") == "prop"}
+    from .bets import load_bets
+    for b in load_bets():
+        if b.get("status") != "open":
+            continue
+        for leg in b.get("legs", []):
+            parts = (leg.get("key") or "").split("|")
+            if len(parts) >= 4 and parts[1] in event_ids and (leg.get("bet_type") or "prop") == "prop":
+                names.add(parts[3])
+    return {n for n in names if n}
 
 
 def slate_age_minutes(sport: str, date: str, kind: str = "props") -> Optional[float]:

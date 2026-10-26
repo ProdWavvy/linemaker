@@ -42,6 +42,9 @@ def arm_pretip(sport: str, date: str) -> bool:
     Returns True when this call switched it on (False if already on, or pre-tip is off)."""
     if not pretip_minutes():
         return False
+    main = {x.strip().upper() for x in os.environ.get("LINEMAKER_PRETIP_SPORTS", "").split(",") if x.strip()}
+    if main and "ALL" not in main and sport.upper() not in main:
+        return False   # only your main leagues get pre-tip scans (asking about others doesn't add them)
     armed = set(load_state(f"pretip_armed_{date}.json", []))
     if sport.upper() in armed:
         return False

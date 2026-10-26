@@ -83,3 +83,59 @@ class NewsInScansTest(unittest.TestCase):
             self.assertEqual(names["Elsewhere"]["mean"], "10")              # other games untouched
             note = chat.news_note("NBA", "2026-10-26", {chat.norm("New York Knicks @ Boston Celtics")})
             self.assertIn("Out Guy ruled OUT", note)
+
+
+class SavingsTest(unittest.TestCase):
+    def test_reserve_holds_budget_for_pretip(self):
+        with tempfile.TemporaryDirectory() as d, mock.patch.dict(os.environ, {
+                "LINEMAKER_CACHE_DIR": d, "LINEMAKER_DAILY_CREDITS": "1000", "LINEMAKER_PRETIP_RESERVE": "0.3"}):
+            oddsapi.record_spend(750)
+            self.assertFalse(oddsapi.credits_ok())                         # asks stop at 700
+            tok = oddsapi.SPEND_SOURCE.set("pre-tip scans & closing reads")
+            self.assertTrue(oddsapi.credits_ok())                          # pre-tip may use the rest
+            oddsapi.SPEND_SOURCE.reset(tok)
+
+    def test_market_keys_and_closing_read_skips(self):
+        from linemaker import chat
+        keys = oddsapi.market_keys_for("NBA", {"points"})
+        self.assertIn("player_points", keys)
+        self.assertIn("player_points_alternate", keys)
+        self.assertNotIn("player_rebounds", keys)
+        with tempfile.TemporaryDirectory() as d, mock.patch.dict(os.environ, {"LINEMAKER_TRACKING_DIR": d}), \
+                mock.patch("linemaker.live.run_best") as rb:
+            msgs, res = chat.scan_events("NBA", "2026-10-26", {"e1"}, "NBA closing read", True, True)
+            self.assertIsNone(res)
+            rb.assert_not_called()                                         # nothing played: no credits
+
+    def test_pretip_reuses_fresh_ask_odds(self):
+        import time
+        from linemaker import chat
+        rows = [{"date": "2026-10-26", "sport": "NBA", "game_id": "e1", "game": "A @ H", "bet_type": "prop",
+                 "subject": "P", "market": "points", "line": "20.5", "mean": "24", "stdev": "5",
+                 "books": "FanDuel:-110/-110|DraftKings:-110/-110"}]
+        with tempfile.TemporaryDirectory() as d, mock.patch.dict(os.environ, {"LINEMAKER_CACHE_DIR": d}), \
+                mock.patch.dict(chat._SLATES, {("NBA", "2026-10-26", "props"): (time.time() - 120, rows, [], 0, None, "ESPN")}), \
+                mock.patch("linemaker.live.run_best") as rb, mock.patch.object(chat, "enrich", lambda *a, **k: {"profiles": {}, "context": {}, "history": {}}):
+            _m, res = chat.scan_events("NBA", "2026-10-26", {"e1"}, "NBA Pre-Tip Scan", False)
+            rb.assert_not_called()
+            self.assertEqual(len(res.evaluated), 1)
+
+
+class SpendLabelTest(unittest.TestCase):
+    def test_parallel_prop_fetches_keep_the_job_label(self):
+        seen = []
+        events = [{"id": f"e{i}", "commence_time": "2099-01-01T00:00:00Z", "home_team": "H", "away_team": "A"}
+                  for i in range(4)]
+
+        class Api:
+            slate = {}
+            def events(self, *a):
+                return events
+        with mock.patch.object(oddsapi, "fetch_event_props",
+                               side_effect=lambda *a: seen.append(oddsapi.SPEND_SOURCE.get()) or dict(events[0], bookmakers=[])), \
+                mock.patch.object(oddsapi, "_local_date", return_value="2099-01-01"):
+            tok = oddsapi.SPEND_SOURCE.set("pre-tip scans & closing reads")
+            from zoneinfo import ZoneInfo
+            oddsapi.fetch_slate(Api(), "NBA", "2099-01-01", ZoneInfo("UTC"), props=True, game_lines=False)
+            oddsapi.SPEND_SOURCE.reset(tok)
+        self.assertEqual(seen, ["pre-tip scans & closing reads"] * 4)

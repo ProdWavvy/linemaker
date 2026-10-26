@@ -375,6 +375,20 @@ def _spend_path(day: str) -> str:
 # Who spent the credits: set by the bot around each job (chat asks, pre-tip reads, news
 # re-checks, grading ...); threads started with asyncio.to_thread inherit it.
 SPEND_SOURCE = contextvars.ContextVar("linemaker_spend_source", default="buttons & commands")
+# Prop market keys to buy instead of the full menu (closing reads: only what you play).
+PROP_KEYS = contextvars.ContextVar("linemaker_prop_keys", default=None)
+# Jobs that may use the part of the budget held back from asks (LINEMAKER_PRETIP_RESERVE).
+BACKGROUND = {"pre-tip scans & closing reads", "daily post"}
+
+
+def market_keys_for(sport: str, names: set) -> list:
+    """Odds API prop keys (main and alternate ladders) for these market names ("points")."""
+    family = sport_key(sport).split("_")[0]
+    want = {n.lower() for n in names}
+    keys = [k for table in (PROP_MARKETS, ALT_MARKETS, EXTRA_MARKETS)
+            for k, name in table.get(family, {}).items() if name.lower() in want]
+    bad = _bad_markets(sport)
+    return [k for k in dict.fromkeys(keys) if k not in bad]
 
 
 def local_today() -> str:
@@ -478,9 +492,19 @@ def alt_lines_ok() -> bool:
 
 
 def credits_ok() -> bool:
-    """Room left in today's budget for the optional spending (extra markets, closing reads)."""
+    """Room left in today's budget. Your asks (and their extras) stop short of it by
+    LINEMAKER_PRETIP_RESERVE (default 30%), which stays for the pre-tip scans and closing
+    reads later in the day; those may use the whole budget."""
     budget = daily_budget()
-    return budget is None or credits_today() < budget
+    if budget is None:
+        return True
+    if SPEND_SOURCE.get() in BACKGROUND:
+        return credits_today() < budget
+    try:
+        reserve = float(os.environ.get("LINEMAKER_PRETIP_RESERVE", "") or 0.3)
+    except ValueError:
+        reserve = 0.3
+    return credits_today() < budget * (1 - min(max(reserve, 0.0), 0.9))
 
 
 def slate_window(date: str, tz: ZoneInfo) -> tuple:
@@ -636,7 +660,7 @@ def fetch_slate(api: OddsAPI, sport: str, date: str, tz: ZoneInfo, props: bool =
         api.slate[sport.upper()] = [(_game(e), e["commence_time"]) for e in events]
     out = parse_game_odds(events, sport, tz) if game_lines else []
     if props:
-        keys = ",".join(prop_markets or default_prop_markets(sport))
+        keys = ",".join(prop_markets or PROP_KEYS.get() or default_prop_markets(sport))
         from concurrent.futures import ThreadPoolExecutor
         chosen = events[:max_events] if max_events else events
         if skip_started():   # live props can't be bet pre-game; don't pay for them
@@ -644,7 +668,11 @@ def fetch_slate(api: OddsAPI, sport: str, date: str, tz: ZoneInfo, props: bool =
             chosen = [e for e in chosen
                       if dt.datetime.fromisoformat(e["commence_time"].replace("Z", "+00:00")) > now]
         with ThreadPoolExecutor(max_workers=4) as pool:   # a few at a time; 429s are retried
-            payloads = list(pool.map(lambda ev: fetch_event_props(api, sport, ev["id"], keys), chosen))
+            # each worker runs in a copy of this thread's context, so the credits it spends
+            # are counted toward the job that asked (pre-tip, chat ...)
+            ctxs = [contextvars.copy_context() for _ in chosen]
+            payloads = list(pool.map(lambda pair: pair[1].run(fetch_event_props, api, sport, pair[0]["id"], keys),
+                                     zip(chosen, ctxs)))
         for payload in payloads:
             out += parse_event_props(payload, sport, tz)
     return out
