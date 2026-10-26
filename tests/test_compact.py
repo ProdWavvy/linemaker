@@ -177,7 +177,7 @@ class ParlayButtonTest(unittest.TestCase):
         self.assertIn("💵", embed.fields[0].value)
         self.assertIn("Not offered here", embed.fields[1].value)
         labels = [getattr(c, "label", "") for c in view.children]
-        self.assertIn("Log FanDuel parlay", labels)
+        self.assertTrue(any(l.startswith("Bet on FanDuel") for l in labels))
         self.assertEqual(sum(1 for c in picker.children if ":t" in (c.custom_id or "")), 3)
 
 
@@ -264,7 +264,7 @@ class BigParlayTest(unittest.TestCase):
         fd = next(f for f in embed.fields if "FanDuel" in f.name)
         self.assertIn("Open this 12-leg slip on FanDuel", fd.value)
         self.assertRegex(fd.name, r"% hit")
-        self.assertTrue(any(getattr(c, "label", "") == "Log FanDuel parlay" for c in view.children))
+        self.assertTrue(any(str(getattr(c, "custom_id", "")).startswith("lm:betgo:") for c in view.children))
 
 
 class MoneylineParlayTest(unittest.TestCase):
@@ -386,7 +386,7 @@ class LiveSlipTest(unittest.TestCase):
         self.assertEqual(e.title, "🎰 Your 2-Leg Parlay · live slip")
         self.assertRegex(e.fields[0].name, r"% hit")
         self.assertIn("EV", e.fields[0].value)
-        self.assertIn("Log FanDuel parlay", [c.label for c in v.children])
+        self.assertTrue(any(c.label.startswith("Bet on FanDuel") for c in v.children))
         e, v = tap(btn(v, ":t2").custom_id)
         self.assertEqual(e.title, "🎰 Your 3-Leg Parlay · live slip")
         e, v = tap(btn(v, ":t0").custom_id)                          # tap again removes it
@@ -552,14 +552,13 @@ class BetDropdownTest(unittest.TestCase):
         n = sum(len(bot.PICK_DETAILS[k]["parlays"]) for k in keys)
         self.assertEqual(len(select.options), n)                          # every parlay on the card
         self.assertGreaterEqual(n, 6)
-        self.assertTrue(any(getattr(c, "url", None) for c in view.children))   # one-tap Bet buttons kept
+        self.assertTrue(any(str(getattr(c, "custom_id", "")).startswith("lm:betgo:") for c in view.children))
 
         async def open_one():
             return bot.parlay_card([ev for ev, _o in bot.PICK_DETAILS[select.options[0].value.rsplit(":", 1)[0]]
                                     ["parlays"][0].legs], ("FanDuel",))
         _e, pview = asyncio.run(open_one())
-        urls = [c.url for c in pview.children if getattr(c, "url", None)]
-        self.assertTrue(urls and "addToBetslip" in urls[0])
+        self.assertTrue(any(str(getattr(c, "custom_id", "")).startswith("lm:betgo:") for c in pview.children))
 
     def test_no_slip_ids_gives_open_book_button(self):
         from linemaker import bot
@@ -571,7 +570,7 @@ class BetDropdownTest(unittest.TestCase):
             p = bot.PICK_DETAILS[key]["parlays"][0]
             return bot.parlay_card([ev for ev, _o in p.legs], (p.book,))
         embed, pview = asyncio.run(open_one())
-        self.assertTrue(any((getattr(c, "label", "") or "").startswith("Open ") for c in pview.children))
+        self.assertTrue(any(str(getattr(c, "custom_id", "")).startswith("lm:betgo:") for c in pview.children))
         self.assertIn("no one-tap slip", embed.fields[0].value)
 
 
@@ -668,3 +667,33 @@ class CardSizeTest(unittest.TestCase):
         self.assertEqual(len(sent), 1)
         self.assertIsNotNone(sent[0].get("view"))                     # buttons kept on the retry
         self.assertLessEqual(sum(1 for e in sent[0]["embeds"] if (e.title or "").startswith("#")), 3)
+
+
+class AutoLogTest(unittest.TestCase):
+    def test_bet_logs_once_then_undo(self):
+        import tempfile
+        from types import SimpleNamespace
+        from linemaker import bets, bot, parlay
+        from tests.test_parlay_opt import leg
+        a, b = leg("g1", "A", "points", p=0.7, odds=-200, key="k1"), leg("g2", "B", "points", p=0.7, odds=-200, key="k2")
+        p = parlay.price("FanDuel", [(a, -200), (b, -200)])
+        key = bot._remember({"parlays": [p]})
+        replies = []
+
+        class Resp:
+            async def send_message(self, text, view=None, ephemeral=False):
+                replies.append((text, view))
+
+        inter = SimpleNamespace(user="me", response=Resp())
+        with tempfile.TemporaryDirectory() as d, mock.patch.dict(os.environ, {"LINEMAKER_TRACKING_DIR": d}):
+            asyncio.run(bot._bet_go(key, 0)(inter))
+            asyncio.run(bot._bet_go(key, 0)(inter))                    # second tap: no duplicate
+            logged = bets.load_bets()
+            self.assertEqual(len(logged), 1)
+            self.assertTrue(logged[0]["auto"])
+            self.assertIn("Logged", replies[0][0])
+            self.assertIn("Already logged", replies[1][0])
+            ids = [c.custom_id for c in replies[0][1].children if getattr(c, "custom_id", None)]
+            self.assertIn(f"lm:unlog:{logged[0]['id']}", ids)
+            asyncio.run(bot._unlog(logged[0]["id"])(inter))
+            self.assertEqual(bets.load_bets(), [])

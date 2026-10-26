@@ -47,6 +47,30 @@ def leg_from_eval(ev, live: Optional[bool] = None, odds: Optional[int] = None, b
             "book": book or s.best_book, "live": live, "model_prob": round(s.blended, 4)}
 
 
+def find_open(book: str, legs: list) -> Optional[dict]:
+    """An open logged bet with exactly these legs at this book (a second tap on Bet)."""
+    want = sorted(f"{l['key']}|{l['side']}" for l in legs)
+    return next((b for b in load_bets() if b.get("status") == "open" and b.get("book") == book
+                 and sorted(f"{l['key']}|{l['side']}" for l in b.get("legs", [])) == want), None)
+
+
+def update_bet(bet_id: str, **fields) -> Optional[dict]:
+    bets = load_bets()
+    bet = next((b for b in bets if b["id"] == bet_id), None)
+    if bet is not None:
+        bet.update(fields)
+        save_bets(bets)
+    return bet
+
+
+def remove_bet(bet_id: str) -> bool:
+    bets = load_bets()
+    keep = [b for b in bets if b["id"] != bet_id]
+    if len(keep) != len(bets):
+        save_bets(keep)
+    return len(keep) != len(bets)
+
+
 def leg_exposure(leg: dict) -> tuple:
     """Same as parlay.exposure for a logged leg: (game, player) for props, (game, "game line")
     for moneylines / spreads / totals (a team's lines lose together)."""

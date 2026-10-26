@@ -154,6 +154,12 @@ async def route_component(interaction: discord.Interaction) -> bool:
         handler = _show_targets(key)
     elif kind == "mkt":
         handler = _market_rescan(key)
+    elif kind == "betgo":
+        handler = _bet_go(key, int(parts[3]) if len(parts) > 3 else 0)
+    elif kind == "restake":
+        handler = _restake(key)
+    elif kind == "unlog":
+        handler = _unlog(key)
     elif kind == "pbet":   # lm:pbet:<key>:<i>; the dropdown sends the chosen parlay as key:i
         values = (interaction.data or {}).get("values") or [f"{key}:{parts[3] if len(parts) > 3 else 0}"]
         handler = _parlay_bet_card(values[0])
@@ -281,6 +287,103 @@ class BetModal(discord.ui.Modal):
             + (f" ({self.book.value})" if self.book.value else "")
             + ". It settles automatically after grading; `/record` shows your results.",
             ephemeral=True)
+
+
+def bet_button(key: str, i: int, p, label: Optional[str] = None, row: Optional[int] = None) -> discord.ui.Button:
+    """'Bet': logs the parlay (your suggested stake) and hands back its one-tap slip, with
+    Change stake and Undo, so every parlay you place from the bot is tracked."""
+    return discord.ui.Button(label=(label or f"Bet on {p.book} {fmt_odds(p.american)}")[:80], row=row,
+                             emoji="🟦" if p.book == "FanDuel" else "🟩", style=discord.ButtonStyle.success,
+                             custom_id=f"lm:betgo:{key}:{i}")
+
+
+def _bet_go(key: str, i: int):
+    async def callback(interaction: discord.Interaction):
+        detail = PICK_DETAILS.get(key)
+        if detail is None or not detail.get("parlays"):
+            await interaction.response.send_message("This card is too old. Ask again for fresh parlays.",
+                                                    ephemeral=True)
+            return
+        try:
+            from .betlinks import book_home, parlay_link
+            from .bets import add_bet, find_open, leg_from_eval
+            from .staking import _money, suggested_dollars
+            p = detail["parlays"][i]
+            legs = [leg_from_eval(ev, odds=o, book=p.book) for ev, o in p.legs]
+            bet = find_open(p.book, legs)
+            again = bet is not None
+            if bet is None:
+                stake = suggested_dollars(p.prob, p.american, parlay=True) or 2.5
+                bet = add_bet(legs, p.american, stake, p.book, str(interaction.user), auto=True,
+                              what=f"{len(p.legs)}-leg {getattr(p, 'kind', '') or 'parlay'}")
+            view = discord.ui.View(timeout=None)
+            url = parlay_link(p)
+            live = any(getattr(ev, "phase", "pre") == "live" for ev, _o in p.legs)
+            if url and len(url) <= 512:
+                view.add_item(discord.ui.Button(label=f"Open the slip on {p.book}", url=url,
+                                                emoji="🟦" if p.book == "FanDuel" else "🟩"))
+            else:
+                view.add_item(discord.ui.Button(label=f"Open {p.book}" + (" live" if live else ""),
+                                                url=book_home(p.book, live)))
+            view.add_item(discord.ui.Button(label="Change stake / odds", emoji="✏️", style=discord.ButtonStyle.secondary,
+                                            custom_id=f"lm:restake:{bet['id']}"))
+            view.add_item(discord.ui.Button(label="Undo (didn't place it)", emoji="↩️",
+                                            style=discord.ButtonStyle.danger, custom_id=f"lm:unlog:{bet['id']}"))
+            head = ("Already logged" if again else "📝 Logged") + (
+                f" **{_money(bet['stake'])}** on the {len(p.legs)}-leg {p.book} parlay at **{fmt_odds(bet['odds'])}**.")
+            tail = ("" if url else "\nNo one-tap slip for this one: open the book and add the legs.") + (
+                "\nIt settles itself after grading (`/record`). Different stake or price? ✏️. "
+                "Didn't place it? ↩️.")
+            await interaction.response.send_message(head + tail, view=view, ephemeral=True)
+        except Exception as e:
+            await _report_error(interaction, e)
+    return callback
+
+
+class StakeModal(discord.ui.Modal):
+    def __init__(self, bet: dict):
+        super().__init__(title="Change this bet", timeout=600)
+        self.bet_id = bet["id"]
+        self.stake = discord.ui.TextInput(label="Stake ($)", default=f"{bet['stake']:g}", max_length=12)
+        self.odds = discord.ui.TextInput(label="Odds you got (American)", default=fmt_odds(bet["odds"]), max_length=8)
+        self.add_item(self.stake)
+        self.add_item(self.odds)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        from .bets import update_bet
+        try:
+            stake = float(str(self.stake.value).replace("$", "").replace(",", "").strip())
+            odds = int(str(self.odds.value).replace("+", "").strip())
+            if stake <= 0 or abs(odds) < 100:
+                raise ValueError
+        except ValueError:
+            await interaction.response.send_message("Stake should be a number like 5 and odds like +230.",
+                                                    ephemeral=True)
+            return
+        bet = update_bet(self.bet_id, stake=round(stake, 2), odds=odds)
+        await interaction.response.send_message(
+            f"✏️ Updated: **${stake:,.2f}** at **{fmt_odds(odds)}**." if bet else "That bet isn't logged anymore.",
+            ephemeral=True)
+
+
+def _restake(bet_id: str):
+    async def callback(interaction: discord.Interaction):
+        from .bets import load_bets
+        bet = next((b for b in load_bets() if b["id"] == bet_id), None)
+        if bet is None or bet.get("status") != "open":
+            await interaction.response.send_message("That bet is settled or no longer logged.", ephemeral=True)
+            return
+        await interaction.response.send_modal(StakeModal(bet))
+    return callback
+
+
+def _unlog(bet_id: str):
+    async def callback(interaction: discord.Interaction):
+        from .bets import remove_bet
+        ok = remove_bet(bet_id)
+        await interaction.response.send_message("↩️ Removed from your log." if ok else "That bet was already removed.",
+                                                ephemeral=True)
+    return callback
 
 
 def _pp_log(key, i):
@@ -515,19 +618,17 @@ class CompactView(discord.ui.View):
                         description=f"{p.prob:.0%} hit · {leg_text}"[:70], value=f"{key}:{i}",
                         emoji="🟦" if p.book == "FanDuel" else "🟩"))
             if options:
-                self.add_item(discord.ui.Select(placeholder="🧾 Bet a parlay: pick #1, #2 ... for its Bet & Log buttons",
+                self.add_item(discord.ui.Select(placeholder="🧾 Bet a parlay: pick #1, #2 ... (Bet logs it for you)",
                                                 options=options[:25], row=1,
                                                 custom_id=f"lm:pbet:{options[0].value}"))
             bets = 0
             for key, detail in auto:
                 nums = detail.get("numbers") or []
                 for i, p in enumerate(detail.get("parlays") or []):
-                    url = parlay_link(p)
-                    if bets < 5 and url and len(url) <= 512:
+                    if bets < 5:   # Bet logs it, then hands back the slip
                         tag = f"#{nums[i]} " if i < len(nums) else ""
-                        self.add_item(discord.ui.Button(
-                            label=f"Bet {tag}{'FD' if p.book == 'FanDuel' else 'DK'} {fmt_odds(p.american)}"[:80],
-                            url=url, row=2, emoji="🟦" if p.book == "FanDuel" else "🟩"))
+                        self.add_item(bet_button(key, i, p, row=2,
+                                                 label=f"Bet {tag}{'FD' if p.book == 'FanDuel' else 'DK'} {fmt_odds(p.american)}"))
                         bets += 1
         pp_used = False
         for _embed, detail in [p for p in parlays if "pp" in p[1]]:
@@ -661,24 +762,14 @@ def parlay_card(legs: list, books: Optional[tuple] = None, boost: float = 0.0) -
         if repeats:
             value += f"\n🧯 Already in your open bets: {', '.join(repeats)[:300]}"
         url = parlay_link(p)
-        if url and len(url) <= 512:
-            view.add_item(discord.ui.Button(label=f"Bet on {p.book}", url=url,
-                                            emoji="🟦" if p.book == "FanDuel" else "🟩"))
-        elif url:   # too long for a button (Discord caps those at 512): a link in the text
+        if url and len(url) > 512:   # too long for a button (Discord caps those at 512): a link in the text
             value += f"\n🧾 [Open this {len(p.legs)}-leg slip on {p.book}]({url})"
-        else:       # a leg came without the book's slip ids: open the book, add the legs by hand
-            from .betlinks import book_home
-            live = any(getattr(ev, "phase", "pre") == "live" for ev, _o in p.legs)
-            view.add_item(discord.ui.Button(label=f"Open {p.book}" + (" live" if live else ""),
-                                            url=book_home(p.book, live),
-                                            emoji="🟦" if p.book == "FanDuel" else "🟩"))
+        elif not url:   # a leg came without the book's slip ids: Bet still logs it, then opens the book
             value += (f"\n🧾 {p.book} didn't send slip ids for every leg, so there's no one-tap slip: "
-                      "open the book and add the legs above.")
+                      "Bet logs it and opens the book; add the legs above.")
         embed.add_field(name=header(p), value=value[:1024], inline=False)
         key = _remember({"parlays": [p]})
-        b = discord.ui.Button(label=f"Log {p.book} parlay", emoji="📝", style=discord.ButtonStyle.success,
-                              custom_id=f"lm:betp:{key}:0")
-        view.add_item(b)
+        view.add_item(bet_button(key, 0, p))
     if not built:
         embed.add_field(name="Can't price this one",
                         value=("Neither FanDuel nor DraftKings" if len(books) > 1 else books[0])
@@ -775,14 +866,8 @@ def targets_card(picks: list, books, found: Optional[dict] = None) -> tuple:
             name, value = block(p, extra)
             e.add_field(name=name, value=value, inline=False)
             k = _remember({"parlays": [p]})
-            if len(view.children) < 24:
-                url = parlay_link(p)
-                tag = f"{p.american:+d} {book}"
-                if url and len(url) <= 512:
-                    view.add_item(discord.ui.Button(label=f"Bet {tag}", url=url,
-                                                    emoji="🟦" if book == "FanDuel" else "🟩"))
-                view.add_item(discord.ui.Button(label=f"Log {tag}", emoji="📝",
-                                                style=discord.ButtonStyle.success, custom_id=f"lm:betp:{k}:0"))
+            if len(view.children) < 25:
+                view.add_item(bet_button(k, 0, p, label=f"Bet {p.american:+d} {book}"))
         embeds.append(e)
     embeds[-1].set_footer(text="Hit chances are calibrated to past results and count legs from one "
                                "game moving together. Rolling over: every step has to hit.")

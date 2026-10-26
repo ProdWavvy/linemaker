@@ -122,7 +122,7 @@ class TargetCardTest(unittest.TestCase):
         self.assertIn("• P", field.value)                                         # one leg per line
         self.assertIn("💵", field.value)
         self.assertIn("Roll it over", field.value)
-        self.assertTrue(any((getattr(c, "label", "") or "").startswith("Log +") for c in view.children))
+        self.assertTrue(any((getattr(c, "label", "") or "").startswith("Bet +") for c in view.children))
 
     def test_repeat_is_merged(self):
         import asyncio
