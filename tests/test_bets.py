@@ -15,7 +15,7 @@ class StakeTest(unittest.TestCase):
             self.assertAlmostEqual(staking.suggested(0.55, 100), 0.02)       # 2.5% capped at 2%
             self.assertAlmostEqual(staking.suggested(0.53, 100), 0.015)
             self.assertEqual(staking.suggested(0.45, 100), 0.0)
-            self.assertIn("($15)", staking.stake_line(0.53, 100))
+            self.assertIn("$15 · 1.5% of your $1,000 bankroll", staking.stake_line(0.53, 100))
             self.assertIn("no edge", staking.stake_line(0.45, 100))
             self.assertEqual(staking.suggested_dollars(0.53, 100), 15.0)
         with mock.patch.dict(os.environ, {"LINEMAKER_BANKROLL": "", "LINEMAKER_STAKE_TIERS": ""}):
@@ -81,3 +81,24 @@ class BetLogTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class BankrollModeTest(unittest.TestCase):
+    def test_stakes_follow_the_bankroll_and_paper_stays_apart(self):
+        import tempfile
+        from linemaker import bets
+        with tempfile.TemporaryDirectory() as d, mock.patch.dict(os.environ, {
+                "LINEMAKER_TRACKING_DIR": d, "LINEMAKER_BANKROLL": "30", "LINEMAKER_BANKROLL_SINCE": "2026-01-01",
+                "LINEMAKER_KELLY": "0.25", "LINEMAKER_MAX_STAKE_PCT": "2"}):
+            self.assertEqual(staking.suggested_dollars(0.55, 100), 0.6)                  # 2% of $30
+            self.assertEqual(staking.suggested_dollars(0.40, 100, parlay=True), 0.15)    # fun money 0.5%
+            self.assertLessEqual(staking.suggested_dollars(0.6, 150, parlay=True), 0.3)  # parlays: 1% cap
+            leg = {"key": "d|g|P|points|20.5", "side": "A", "label": "P o20.5", "date": "2026-10-26"}
+            real = bets.add_bet([leg], 100, 10, "FanDuel")
+            bets.update_bet(real["id"], status="lost", profit=-10.0, settled="2026-10-26T12:00:00")
+            fake = bets.add_bet([leg], 100, 10, "FanDuel", paper=True)
+            bets.update_bet(fake["id"], status="won", profit=10.0, settled="2026-10-26T12:00:00")
+            self.assertEqual(staking.current_bankroll(), 20.0)                           # practice doesn't count
+            self.assertEqual(staking.suggested_dollars(0.55, 100), 0.4)                  # 2% of $20
+            self.assertEqual(bets.summary(0, paper=True)["won"], 1)
+            self.assertEqual(bets.summary(0)["lost"], 1)

@@ -176,11 +176,12 @@ def settle() -> int:
     return n
 
 
-def summary(days: Optional[int] = 30, today: Optional[str] = None) -> dict:
+def summary(days: Optional[int] = 30, today: Optional[str] = None, paper: bool = False) -> dict:
+    """Your record: real bets, or with paper=True the practice bets (kept apart)."""
     end = dt.date.fromisoformat(today) if today else dt.date.today()
     start = end - dt.timedelta(days=days) if days else None
-    rows = [b for b in load_bets()
-            if not start or dt.date.fromisoformat(b["placed"][:10]) >= start]
+    rows = [b for b in load_bets() if bool(b.get("paper")) == paper
+            and (not start or dt.date.fromisoformat(b["placed"][:10]) >= start)]
     done = [b for b in rows if b["status"] != "open"]
     staked = sum(b["stake"] for b in done)
     profit = sum(b.get("profit", 0.0) for b in done)

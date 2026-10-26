@@ -12,6 +12,14 @@ Kelly suggestion as a share of the cap picks the tier, so the strongest edges ge
 amount. Parlays with an edge go up to LINEMAKER_PARLAY_MAX_STAKE ($10 by default) and
 parlays without one get the smallest amount (they swing much harder). Set the tiers blank to
 see Kelly percentages (and dollars, with LINEMAKER_BANKROLL) instead.
+
+Bankroll mode (/bankroll, or LINEMAKER_BANKROLL): every stake is a share of what you have
+now, the starting amount plus what your real (not practice) bets have won or lost since
+LINEMAKER_BANKROLL_SINCE, so stakes shrink after losses and grow with wins:
+  straight bets  quarter Kelly, at most LINEMAKER_MAX_STAKE_PCT (2%)
+  parlays        quarter Kelly, at most LINEMAKER_PARLAY_STAKE_PCT (1%)
+  no-edge parlay LINEMAKER_FUN_STAKE_PCT (0.5%)
+rounded to 5 cents, never under the books' $0.10 minimum. It replaces the dollar tiers.
 """
 import os
 from typing import Optional
@@ -29,6 +37,34 @@ def _env(name: str, default: float) -> float:
 def bankroll() -> Optional[float]:
     v = _env("LINEMAKER_BANKROLL", 0.0)
     return v if v > 0 else None
+
+
+def bankroll_pl() -> float:
+    """Profit / loss of your real (not practice) settled bets since the bankroll was set."""
+    since = os.environ.get("LINEMAKER_BANKROLL_SINCE", "").strip()
+    from .bets import load_bets
+    return sum(b.get("profit", 0.0) for b in load_bets()
+               if b.get("status") in ("won", "lost", "push") and not b.get("paper")
+               and (not since or (b.get("settled") or b.get("placed", "")) >= since))
+
+
+def current_bankroll() -> Optional[float]:
+    start = bankroll()
+    return None if start is None else max(start + bankroll_pl(), 0.0)
+
+
+def bankroll_stake(p: float, american: int, parlay: bool = False) -> Optional[float]:
+    """Dollars for this bet in bankroll mode (None: no edge on a straight bet, or no bankroll)."""
+    roll = current_bankroll()
+    if not roll:
+        return None
+    share = suggested(p, american)
+    if parlay:
+        share = (min(share, _env("LINEMAKER_PARLAY_STAKE_PCT", 1.0) / 100) if share > 0
+                 else _env("LINEMAKER_FUN_STAKE_PCT", 0.5) / 100)
+    if share <= 0:
+        return None
+    return max(round(roll * share * 20) / 20, 0.10)   # to the nickel
 
 
 def kelly_fraction(p: float, american: int) -> float:
@@ -55,6 +91,8 @@ def tiers() -> list:
 
 def stake_tier(p: float, american: int, parlay: bool = False) -> Optional[float]:
     """One of your amounts for this bet, or None when there's no edge at this price."""
+    if bankroll() is not None:
+        return bankroll_stake(p, american, parlay)
     levels = tiers()
     if not levels:
         return None
@@ -73,7 +111,18 @@ def _money(v: float) -> str:
     return f"${v:,.2f}" if v != int(v) else f"${v:,.0f}"
 
 
+def paper_on() -> bool:
+    """Practice mode: Bet / I bet this log practice bets (no real money)."""
+    return os.environ.get("LINEMAKER_PAPER", "off").strip().lower() in ("on", "1", "yes", "true")
+
+
 def stake_line(p: float, american: int, parlay: bool = False) -> str:
+    if bankroll() is not None:
+        amount, roll = bankroll_stake(p, american, parlay), current_bankroll() or 0
+        if amount is None:
+            return "💵 **Stake:** skip — no edge left at this price"
+        note = " (fun money: no edge, so keep it small)" if parlay and suggested(p, american) <= 0 else ""
+        return f"💵 **Stake:** {_money(amount)} · {amount / roll:.1%} of your {_money(round(roll, 2))} bankroll{note}"
     if tiers():
         amount = stake_tier(p, american, parlay)
         if amount is None:
@@ -93,6 +142,8 @@ def stake_line(p: float, american: int, parlay: bool = False) -> str:
 
 
 def suggested_dollars(p: float, american: int, parlay: bool = False) -> Optional[float]:
+    if bankroll() is not None:
+        return bankroll_stake(p, american, parlay)
     if tiers():
         return stake_tier(p, american, parlay)
     roll = bankroll()

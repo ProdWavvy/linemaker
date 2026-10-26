@@ -281,8 +281,10 @@ class BetModal(discord.ui.Modal):
                 "Couldn't read that: stake should be a number like 25 and odds like -150 or +120.",
                 ephemeral=True)
             return
-        add_bet(self.legs, odds, stake, str(self.book.value).strip(), str(interaction.user))
+        from .staking import paper_on
+        add_bet(self.legs, odds, stake, str(self.book.value).strip(), str(interaction.user), paper=paper_on())
         await interaction.response.send_message(
+            ("🧪 Practice bet: " if paper_on() else "") +
             f"✅ Logged **${stake:,.2f}** on {self.what} at **{fmt_odds(odds)}**"
             + (f" ({self.book.value})" if self.book.value else "")
             + ". It settles automatically after grading; `/record` shows your results.",
@@ -312,10 +314,11 @@ def _bet_go(key: str, i: int):
             legs = [leg_from_eval(ev, odds=o, book=p.book) for ev, o in p.legs]
             bet = find_open(p.book, legs)
             again = bet is not None
+            from .staking import bankroll, paper_on
             if bet is None:
-                stake = suggested_dollars(p.prob, p.american, parlay=True) or 2.5
+                stake = suggested_dollars(p.prob, p.american, parlay=True) or (0.10 if bankroll() else 2.5)
                 bet = add_bet(legs, p.american, stake, p.book, str(interaction.user), auto=True,
-                              what=f"{len(p.legs)}-leg {getattr(p, 'kind', '') or 'parlay'}")
+                              paper=paper_on(), what=f"{len(p.legs)}-leg {getattr(p, 'kind', '') or 'parlay'}")
             view = discord.ui.View(timeout=None)
             url = parlay_link(p)
             live = any(getattr(ev, "phase", "pre") == "live" for ev, _o in p.legs)
@@ -329,8 +332,10 @@ def _bet_go(key: str, i: int):
                                             custom_id=f"lm:restake:{bet['id']}"))
             view.add_item(discord.ui.Button(label="Undo (didn't place it)", emoji="↩️",
                                             style=discord.ButtonStyle.danger, custom_id=f"lm:unlog:{bet['id']}"))
+            practice = " as a 🧪 **practice bet** (paper mode: no real money; `/record practice:True`)" if bet.get("paper") else ""
             head = ("Already logged" if again else "📝 Logged") + (
-                f" **{_money(bet['stake'])}** on the {len(p.legs)}-leg {p.book} parlay at **{fmt_odds(bet['odds'])}**.")
+                f" **{_money(bet['stake'])}** on the {len(p.legs)}-leg {p.book} parlay at **{fmt_odds(bet['odds'])}**"
+                f"{practice}.")
             tail = ("" if url else "\nNo one-tap slip for this one: open the book and add the legs.") + (
                 "\nIt settles itself after grading (`/record`). Different stake or price? ✏️. "
                 "Didn't place it? ↩️.")
@@ -1630,14 +1635,15 @@ async def ufc_cmd(interaction: discord.Interaction):
 
 
 @bot.tree.command(name="record", description="Your logged bets: open bets, record, profit and ROI")
-@app_commands.describe(days="How many days back (default 30; 0 = all time)")
-async def record_cmd(interaction: discord.Interaction, days: Optional[int] = 30):
+@app_commands.describe(days="How many days back (default 30; 0 = all time)",
+                       practice="Show your practice (paper) bets instead of real ones")
+async def record_cmd(interaction: discord.Interaction, days: Optional[int] = 30, practice: bool = False):
     await interaction.response.defer(thinking=True)
     try:
         from .bets import settle, summary
         await asyncio.to_thread(settle)
-        s = await asyncio.to_thread(summary, days or None, today())
-        span = f"last {days} days" if days else "all time"
+        s = await asyncio.to_thread(summary, days or None, today(), practice)
+        span = (f"last {days} days" if days else "all time") + (" · 🧪 practice bets" if practice else "")
         lines = []
         if s["settled"]:
             roi = f"{s['roi']:+.1%}" if s["roi"] is not None else "—"
@@ -2267,6 +2273,54 @@ async def _owner_only(interaction: discord.Interaction) -> bool:
         return True
     await interaction.response.send_message("Only the bot's owner can use this.", ephemeral=True)
     return False
+
+
+@bot.tree.command(name="bankroll", description="Set your bankroll: every stake becomes a small share of it")
+@app_commands.describe(amount="What you have to bet with now, e.g. 30 (0 turns bankroll mode off; blank shows it)")
+async def bankroll_cmd(interaction: discord.Interaction, amount: Optional[float] = None):
+    if not await _owner_only(interaction):
+        return
+    from .admin import apply_set
+    from .staking import _money, bankroll, bankroll_pl, current_bankroll
+    if amount is not None:
+        if amount <= 0:
+            apply_set("LINEMAKER_BANKROLL", "")
+            await interaction.response.send_message("Bankroll mode off: stakes are back to your dollar tiers.",
+                                                    ephemeral=True)
+            return
+        apply_set("LINEMAKER_BANKROLL", f"{amount:g}")
+        apply_set("LINEMAKER_BANKROLL_SINCE", dt.datetime.now().isoformat(timespec="seconds"))
+    start = bankroll()
+    if start is None:
+        await interaction.response.send_message(
+            "No bankroll set. `/bankroll amount:30` makes every stake a share of what you have.", ephemeral=True)
+        return
+    now = current_bankroll() or 0.0
+    pct = lambda name, d: float(os.environ.get(name, "") or d) / 100
+    lines = [f"💰 **Bankroll: {_money(round(now, 2))}**" + (
+                 f" (started {_money(start)}, {'+' if now >= start else '-'}{_money(abs(round(now - start, 2)))} "
+                 "from real bets settled since)" if amount is None else " (set just now)"),
+             f"• Straight bets with an edge: up to **{_money(max(round(now * pct('LINEMAKER_MAX_STAKE_PCT', 2) * 20) / 20, 0.1))}** "
+             f"({pct('LINEMAKER_MAX_STAKE_PCT', 2):.0%})",
+             f"• Parlays with an edge: up to **{_money(max(round(now * pct('LINEMAKER_PARLAY_STAKE_PCT', 1) * 20) / 20, 0.1))}** "
+             f"({pct('LINEMAKER_PARLAY_STAKE_PCT', 1):.0%})",
+             f"• Parlays without one (fun money): **{_money(max(round(now * pct('LINEMAKER_FUN_STAKE_PCT', 0.5) * 20) / 20, 0.1))}** "
+             f"({pct('LINEMAKER_FUN_STAKE_PCT', 0.5):.1%})",
+             "Stakes follow the bankroll: smaller after losses, bigger after wins. Practice bets don't count."]
+    await interaction.response.send_message("\n".join(lines), ephemeral=True)
+
+
+@bot.tree.command(name="paper", description="Practice mode: Bet logs practice bets (no real money)")
+@app_commands.describe(on="True: practice bets · False: real bets")
+async def paper_cmd(interaction: discord.Interaction, on: bool):
+    if not await _owner_only(interaction):
+        return
+    from .admin import apply_set
+    apply_set("LINEMAKER_PAPER", "on" if on else "off")
+    await interaction.response.send_message(
+        "🧪 **Practice mode on.** Bet and I bet this now log practice bets: they settle like real ones "
+        "and show in `/record practice:True`, apart from your real record. `/paper on:False` when you're done."
+        if on else "💵 **Practice mode off.** Bets you log count as real again.", ephemeral=True)
 
 
 @bot.tree.command(name="settings", description="Owner: show the bot's settings and where each comes from")

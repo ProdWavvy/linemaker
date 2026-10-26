@@ -250,10 +250,16 @@ def side_book_embed(records: dict) -> Optional[discord.Embed]:
 
 def bets_embed(date: str, settled_now: int) -> Optional[discord.Embed]:
     from .bets import load_bets
-    mine = [b for b in load_bets() if any(l.get("date") == date for l in b.get("legs", []))]
-    if not mine:
+    day = [b for b in load_bets() if any(l.get("date") == date for l in b.get("legs", []))]
+    mine = [b for b in day if not b.get("paper")]
+    practice = [b for b in day if b.get("paper") and b["status"] != "open"]
+    if not mine and not practice:
         return None
     lines = []
+    if practice:
+        pw = sum(b["status"] == "won" for b in practice)
+        lines.append(f"🧪 Practice bets: {pw}-{sum(b['status'] == 'lost' for b in practice)} · "
+                     f"{fmt_money(sum(b.get('profit', 0) for b in practice))} (not real money)")
     done = [b for b in mine if b["status"] != "open"]
     profit = sum(b.get("profit", 0) for b in done)
     staked = sum(b["stake"] for b in done)
