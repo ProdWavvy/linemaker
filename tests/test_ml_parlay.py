@@ -196,3 +196,18 @@ class LiveGameParlayTest(unittest.TestCase):
             recs = load_day(live, "2026-10-25")
             self.assertTrue(all(recs[ev.market.key].get("volume_pick") for ev in res.picks))
             self.assertFalse(os.path.exists(os.path.join(d, "NFL-games")))     # nothing pre-game
+
+
+class CalibrationPriorTest(unittest.TestCase):
+    def test_prior_until_a_fit_exists(self):
+        from linemaker import autotune
+        with mock.patch.dict(os.environ, {"LINEMAKER_CALIBRATION_PRIORS": "on"}), \
+                mock.patch.object(autotune, "load_weights", return_value={}):
+            self.assertAlmostEqual(autotune.calibrated(0.85, "NBA", "prop"), 0.82, places=2)
+            self.assertAlmostEqual(autotune.calibrated(0.85, "NHL", "prop"), 0.85)       # no prior
+            self.assertAlmostEqual(autotune.calibrated(0.85, "NBA", "prop", "live"), 0.85)  # live: its own
+            self.assertAlmostEqual(autotune.calibrated(0.85, "NBA", "moneyline"), 0.85)    # game lines apart
+        fitted = {"segments": {"pre props": {"calibration": {"NBA": [0.0, 1.0, 900]}}}}
+        with mock.patch.dict(os.environ, {"LINEMAKER_CALIBRATION_PRIORS": "on"}), \
+                mock.patch.object(autotune, "load_weights", return_value=fitted):
+            self.assertAlmostEqual(autotune.calibrated(0.85, "NBA", "prop"), 0.85)       # the fit wins

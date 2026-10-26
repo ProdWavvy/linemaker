@@ -382,10 +382,25 @@ def calibrate_p(p: float, a: float, b: float) -> float:
     return 1 / (1 + math.exp(-(a + b * _logit(p))))
 
 
+# Starting corrections for a segment's league until its own fit clears the noise test (the
+# fit wins once it exists). From the graded 10/25 slate, one row per player-stat-side,
+# shrunk by n / (n + 500) like the fit: favourite props hit less often than both the model
+# and the books said (NBA "85%" landed 78%, NFL "85%" 80%), mostly low alt-line overs
+# sunk by a player's dud night. LINEMAKER_CALIBRATION_PRIORS=off drops them.
+CALIBRATION_PRIORS = {"pre props": {"NBA": [-0.139, 0.973, 758], "NFL": [-0.067, 0.985, 978]}}
+
+
+def _prior(phase: str, bet_type: str, sport: str):
+    if os.environ.get("LINEMAKER_CALIBRATION_PRIORS", "on").strip().lower() in ("off", "0", "no", "false"):
+        return None
+    from .tracking import kind_of
+    return CALIBRATION_PRIORS.get(f"{phase} {kind_of(bet_type)}", {}).get(sport)
+
+
 def calibrated(p: float, sport: str, bet_type: str = "prop", phase: str = "pre") -> float:
     """Calibrated hit chance from the segment's own fit for the league (pre-game NBA props,
-    live NFL game lines ...); one with no fit yet is left raw."""
-    c = segment(phase, bet_type).get("calibration", {}).get(sport)
+    live NFL game lines ...), else its starting correction; else left raw."""
+    c = segment(phase, bet_type).get("calibration", {}).get(sport) or _prior(phase, bet_type, sport)
     return calibrate_p(p, c[0], c[1]) if c else p
 
 
@@ -519,6 +534,11 @@ def current_summary() -> str:
            for n in SEGMENTS for k, v in sorted(segs.get(n, {}).get("calibration", {}).items())]
     if cal:
         out.append("Hit-chance calibration (volume, parlays, PrizePicks): " + ", ".join(cal))
+    priors = [f"{SEGMENT_LABELS[n]} {k} 85%→{calibrate_p(0.85, v[0], v[1]):.0%}"
+              for n, by in CALIBRATION_PRIORS.items() for k, v in by.items()
+              if not segs.get(n, {}).get("calibration", {}).get(k) and _prior(*n.split()[:1], "prop", k)]
+    if priors:
+        out.append("Starting corrections (until each league's own fit): " + ", ".join(priors))
     paused = [f"{SEGMENT_LABELS[n]} {k} ({v})" for n in SEGMENTS for k, v in sorted(segs.get(n, {}).get("pruned", {}).items())]
     if paused:
         out.append("Paused markets: " + ", ".join(paused))
