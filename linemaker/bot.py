@@ -2010,20 +2010,23 @@ async def pretip_loop():
                 log.exception("closing read failed (%s)", sport)
 
 
+def news_posts() -> bool:
+    """LINEMAKER_NEWS_POSTS=on brings back the injury / goalie / pitcher alert posts (each one
+    re-prices the game: credits). Off (default): news is recorded and every scan uses it."""
+    return os.environ.get("LINEMAKER_NEWS_POSTS", "off").strip().lower() in ("on", "1", "yes", "true")
+
+
 @tasks.loop(minutes=12)
 async def news_loop():
     """Re-price a game when a rotation player is newly ruled Out (basketball, NFL) or an NHL
     team's starting goalie changes."""
     _spend_as("injury/lineup news re-checks")
-    from .oddsapi import credits_ok
-    if not credits_ok():   # re-pricing on news is background spending: paused past today's budget
-        return
     from .alerts import NEWS_SPORTS, load_state, news_events, save_state
     from .chat import drop_slate, scan_events
     from .espn_projections import injuries
     date = today()
     channel = bot.get_channel(bot.alert_channel_id() or 0)
-    if channel is None:
+    if channel is None and news_posts():
         return
     cap = int(os.environ.get("LINEMAKER_NEWS_MAX_ALERTS", "8") or 0)
     sent = load_state(f"news_sent_{date}.json", 0)
@@ -2041,6 +2044,11 @@ async def news_loop():
             log.exception("injury news check failed (%s)", sport)
             continue
         for ev, players in hits:
+            if not news_posts():   # recorded for every scan (free); no post, no re-price spend
+                from .chat import record_news
+                record_news(sport, date, f"{ev['away_team']} @ {ev['home_team']}",
+                            f"{' & '.join(players)} ruled OUT")
+                continue
             if sent >= cap:
                 log.info("news alerts: daily cap of %d reached", cap)
                 break
@@ -2094,10 +2102,14 @@ async def _pitcher_news(channel, date: str, now, sent: int, cap: int):
             continue
         if (dt.datetime.fromisoformat(ev["commence_time"].replace("Z", "+00:00")) - now).total_seconds() < 600:
             continue
-        sent += 1
-        save_state(f"news_sent_{date}.json", sent)
         game = f"{ev['away_team']} @ {ev['home_team']}"
         was = (previous or {}).get(team, ["?"])[0]
+        if not news_posts():
+            from .chat import record_news
+            record_news("MLB", date, game, f"{pitcher} now starting for the {p['team']} (was {was})")
+            continue
+        sent += 1
+        save_state(f"news_sent_{date}.json", sent)
         drop_slate("MLB", date)
         drop_slate("MLB", date, "games")
         try:
@@ -2148,11 +2160,15 @@ async def _goalie_news(channel, date: str, now, sent: int, cap: int):
             continue                      # usual starter in net, not on tonight's slate, or done
         if (dt.datetime.fromisoformat(ev["commence_time"].replace("Z", "+00:00")) - now).total_seconds() < 600:
             continue
-        sent += 1
         alerted.add(key)
-        save_state(f"news_sent_{date}.json", sent)
         save_state(f"goalies_alerted_{date}.json", sorted(alerted))
         game = f"{ev['away_team']} @ {ev['home_team']}"
+        if not news_posts():
+            from .chat import record_news
+            record_news("NHL", date, game, f"{goalie} in net ({eff['note']})")
+            continue
+        sent += 1
+        save_state(f"news_sent_{date}.json", sent)
         drop_slate("NHL", date)
         drop_slate("NHL", date, "games")
         try:

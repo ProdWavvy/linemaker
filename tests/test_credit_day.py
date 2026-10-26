@@ -59,3 +59,27 @@ class AutoBudgetTest(unittest.TestCase):
                 self.assertEqual(oddsapi.daily_budget(), 300)
                 oddsapi.record_spend(400, 5590)
                 self.assertFalse(oddsapi.credits_ok())                     # 410 spent of 300
+
+
+class NewsInScansTest(unittest.TestCase):
+    def test_cached_rows_reprojected_after_news(self):
+        import time
+        from linemaker import chat
+        rows = [{"sport": "NBA", "game": "New York Knicks @ Boston Celtics", "bet_type": "prop", "subject": "Out Guy",
+                 "market": "points", "mean": "20", "stdev": "5"},
+                {"sport": "NBA", "game": "New York Knicks @ Boston Celtics", "bet_type": "prop", "subject": "Teammate",
+                 "market": "points", "mean": "15", "stdev": "5"},
+                {"sport": "NBA", "game": "Other @ Game", "bet_type": "prop", "subject": "Elsewhere",
+                 "market": "points", "mean": "10", "stdev": "3"}]
+        hit = (time.time() - 600, rows, [], 100, None, "ESPN")
+        fresh = [{"subject": "Teammate", "market": "points", "mean": "18.5", "stdev": "5.2", "notes": "usage bump"}]
+        with tempfile.TemporaryDirectory() as d, mock.patch.dict(os.environ, {"LINEMAKER_CACHE_DIR": d}), \
+                mock.patch("linemaker.espn_projections.espn_projections", return_value=fresh):
+            chat.record_news("NBA", "2026-10-26", "New York Knicks @ Boston Celtics", "Out Guy ruled OUT")
+            out = chat._apply_news("NBA", "2026-10-26", "props", hit)[1]
+            names = {r["subject"]: r for r in out}
+            self.assertNotIn("Out Guy", names)                              # ruled out: gone
+            self.assertEqual(names["Teammate"]["mean"], "18.5")             # re-projected
+            self.assertEqual(names["Elsewhere"]["mean"], "10")              # other games untouched
+            note = chat.news_note("NBA", "2026-10-26", {chat.norm("New York Knicks @ Boston Celtics")})
+            self.assertIn("Out Guy ruled OUT", note)

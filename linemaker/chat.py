@@ -400,6 +400,7 @@ class LinemakerChat:
             res.projection_source = source
             res.kind = "live" if kind == "live_props" else kind
             res.odds_age = slate_age_minutes(sport, date, kind)
+            res.news_note = news_note(sport, date, {norm(ev.market.game) for ev in res.picks})
             res.scan_args = {"sport": sport, "kind": kind, "teams": focus, "book": book, "mode": mode,
                              "date": date}
             extras = enrich(res, sport, date, cfg.min_prob if mode == "volume" else None)
@@ -689,6 +690,7 @@ def _slate_for(sport: str, date: str, kind: str, refresh: bool) -> tuple:
         log.info("%s %s %s: reusing odds from %.0f min ago (0 credits)", sport, date, kind,
                  (time.time() - hit[0]) / 60)
         _SLATES[key] = hit
+        hit = _apply_news(sport, date, kind, hit)
         return tuple(hit[1:])
     from .oddsapi import credits_ok
     over = float(os.environ.get("LINEMAKER_OVER_BUDGET_CACHE_MINUTES", "180") or 0) * 60
@@ -697,6 +699,7 @@ def _slate_for(sport: str, date: str, kind: str, refresh: bool) -> tuple:
         age = (time.time() - hit[0]) / 60
         log.info("%s %s %s: over today's credit budget, reusing odds from %.0f min ago", sport, date, kind, age)
         _SLATES[key] = hit
+        hit = _apply_news(sport, date, kind, hit)
         note = (f"💳 Today's Odds API budget is used, so these are odds from {age:.0f} min ago "
                 "(prices may have moved). Add \"fresh\" to your ask to buy new ones.")
         return (hit[1], hit[2], hit[3], note if not hit[4] else f"{hit[4]} {note}", hit[5])
@@ -749,6 +752,84 @@ def pretip_note(sports: list) -> str:
     names = ", ".join(SPORT_DISPLAY.get(s, s) for s in sports)
     return (f"⏰ I'll also re-check each {names} game about {pretip_minutes()} minutes before it "
             "starts today (once lineups are in) and post anything new that clears the gates.")
+
+
+# ---- injury / lineup news, applied to every scan ----------------------------------------
+# The news loop records what changed (a player ruled Out, a new goalie or starting pitcher);
+# it doesn't post or buy odds. A scan on odds bought before the news re-runs the projections
+# for that game (ESPN, free), so a player now out drops off and his teammates get the usage
+# bump, and the card says what changed. Fresh odds already carry it.
+_NEWS_DONE = {}   # (sport, date, kind, odds time) -> news entries already applied
+
+
+def record_news(sport: str, date: str, game: str, what: str):
+    from .alerts import load_state, save_state
+    log_ = load_state(f"news_log_{date}.json", [])
+    if not any(e["game"] == game and e["what"] == what for e in log_):
+        log_.append({"sport": sport, "game": game, "what": what, "t": time.time()})
+        save_state(f"news_log_{date}.json", log_)
+
+
+def news_today(sport: str, date: str, since: float = 0.0) -> list:
+    from .alerts import load_state
+    return [e for e in load_state(f"news_log_{date}.json", []) if e["sport"] == sport and e["t"] > since]
+
+
+def _reproject(sport: str, date: str, rows: list, games: set) -> list:
+    """Cached rows with fresh projections for the props in `games` (players now out drop off)."""
+    from .oddsapi import PROJ_COLUMNS, proj_key
+    hit = [r for r in rows if norm(r.get("game", "")) in games and r.get("bet_type") == "prop"]
+    if not hit:
+        return rows
+    wanted = {}
+    for r in hit:
+        wanted.setdefault(r["subject"], set()).add(r["market"])
+    from .espn_projections import espn_projections
+    fresh = {proj_key(sport, p["subject"], p["market"]): p for p in espn_projections(sport, date, wanted)}
+    out = []
+    for r in rows:
+        if norm(r.get("game", "")) not in games or r.get("bet_type") != "prop":
+            out.append(r)
+            continue
+        p = fresh.get(proj_key(sport, r["subject"], r["market"]))
+        if p is None:
+            continue                       # ruled out / no longer projected
+        r = dict(r)
+        for c in PROJ_COLUMNS:
+            if p.get(c) not in (None, ""):
+                r[c] = str(p[c])
+        out.append(r)
+    return out
+
+
+def _apply_news(sport: str, date: str, kind: str, hit: tuple) -> tuple:
+    """hit with its rows re-projected for news that came after its odds were bought."""
+    if kind in ("live", "live_props", "games"):
+        return hit
+    news = news_today(sport, date, since=hit[0])
+    key = (sport, date, kind, hit[0])
+    if not news or _NEWS_DONE.get(key) == len(news):
+        return hit
+    games = {norm(e["game"]) for e in news}
+    try:
+        rows = _reproject(sport, date, hit[1], games)
+    except Exception as e:
+        log.warning("news re-projection %s: %s", sport, e)
+        return hit
+    log.info("%s %s: re-projected %d game(s) for news since the odds were bought", sport, date, len(games))
+    _NEWS_DONE[key] = len(news)
+    hit = (hit[0], rows) + tuple(hit[2:])
+    _SLATES[(sport, date, kind)] = hit
+    return hit
+
+
+def news_note(sport: str, date: str, games: set) -> str:
+    """'🩹 Jalen Brunson ruled OUT (Knicks @ Celtics) · ...' for today's news in these games."""
+    hits = [e for e in news_today(sport, date) if norm(e["game"]) in games]
+    if not hits:
+        return ""
+    return "🩹 **News today, already in these numbers:** " + " · ".join(
+        f"{e['what']} ({e['game']})" for e in hits[:6])
 
 
 def drop_slate(sport: str, date: str, kind: str = "props"):

@@ -373,6 +373,7 @@ def scan_messages(sections: list, date: str, cfg, title: str = "") -> list:
                      + "; ".join(gates) + "." + where)
     else:
         intro.append("**Nothing cleared every gate today.** No plays are forced.")
+    intro += [n for n in (getattr(res, "news_note", "") for _s, res, _p in sections) if n]
     header = discord.Embed(title=f"🎯 {title} · Today's Board ({_day(date)})",
                            description=_clip("\n\n".join(intro), 4096), color=GOLD if ranked else GREY)
     header.set_footer(text=odds_age_note(sections))
@@ -770,6 +771,9 @@ def volume_messages(sections: list, date: str, cfg, title: str = "") -> list:
                      "**No legs cleared those bars today.** Try again closer to game time.")
     header = discord.Embed(title=f"🎰 {title} · Today's Board ({_day(date)})", color=GOLD if legs else GREY,
                            description="\n\n".join(intro))
+    news = [getattr(res, "news_note", "") for _s, res, _e in sections]
+    if any(news):
+        header.description += "\n\n" + "\n".join(n for n in news if n)
     header.set_footer(text=odds_age_note(sections))
     out = [([header], None)]
     if legs:
