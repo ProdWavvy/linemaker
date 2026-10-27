@@ -152,7 +152,7 @@ class ClosingReadKeysTest(unittest.TestCase):
             return NS(result=NS(evaluated=[]))
         from types import SimpleNamespace as NS
         with tempfile.TemporaryDirectory() as d, mock.patch.dict(os.environ, {"LINEMAKER_TRACKING_DIR": d}), \
-                mock.patch("linemaker.live.run_best", fake_run_best):
+                mock.patch("linemaker.live.run_best", fake_run_best), mock.patch.object(chat, "OddsAPI", lambda: None):
             save_json(os.path.join(d, "NBA-props", "2026-10-27.json"), {
                 "k": {"sport": "NBA", "game_id": "e1", "market": "rebounds", "picked": True, "inputs": {"bet_type": "prop"}},
                 "j": {"sport": "NBA", "game_id": "e1", "market": "points", "picked": False, "inputs": {"bet_type": "prop"}}})
