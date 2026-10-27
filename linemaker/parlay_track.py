@@ -80,7 +80,8 @@ def log_parlays(parlays: list, date: str):
             "book": p.book, "style": p.style, "kind": p.kind, "legs": legs, "segment": seg,
             "prob": round(p.prob, 4), "raw_prob": round(getattr(p, "raw_prob", p.prob), 4),
             "indep_prob": round(p.indep_prob, 4),
-            "decimal": round(p.decimal, 4), "logged": dt.datetime.now().isoformat(timespec="seconds"),
+            "decimal": round(p.decimal, 4), "listed_decimal": round(getattr(p, "listed_decimal", p.decimal), 4),
+            "logged": dt.datetime.now().isoformat(timespec="seconds"),
             "result": None}
     for seg, entries in new.items():
         path = _path(date, seg)
@@ -122,7 +123,9 @@ def _grade(data: dict, cache: dict, leg_outcome) -> int:
             for l, o in zip(p["legs"], outs):
                 if o == "won":
                     dec *= american_to_decimal(l["odds"])
-            p["result"], p["profit"] = "won", round(dec - 1, 4)
+            # same-game tickets pay the book's SGP price, below the multiplied odds
+            dec *= p.get("decimal", 1.0) / p.get("listed_decimal", p.get("decimal", 1.0) or 1.0)
+            p["result"], p["profit"] = "won", round(max(dec, 1.0) - 1, 4)
         p["outcomes"] = outs
         n += 1
     return n
@@ -151,7 +154,8 @@ def summary_lines(parlays: list) -> list:
     groups = {}
     segs = {p.get("segment") or segment_of(p["legs"]) for p in done}
     for p in done:
-        style = ("SGP" if p.get("kind") else "💰 value" if p.get("style") == "value" else "🔒 safest")
+        style = ("🎯 edge" if p.get("style") == "edge" else "SGP" if p.get("kind") else
+                 "💰 value" if p.get("style") == "value" else "🔒 safest")
         seg = segment_label(p.get("segment") or segment_of(p["legs"])) + " · " if len(segs) > 1 else ""
         groups.setdefault(f"{seg}{style} {len(p['legs'])}-leg", []).append(p)
     out = []

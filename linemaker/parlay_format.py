@@ -20,9 +20,24 @@ def short_label(label: str) -> str:
     return re.sub(r" (Over|Under) (\d)", lambda m: f" {'o' if m.group(1) == 'Over' else 'u'}{m.group(2)}", label)
 
 
+def odds_text(p) -> str:
+    """'+230', or '≈+230' when it's an estimate of the book's same-game price."""
+    return ("≈" if getattr(p, "sgp_estimated", False) else "") + fmt_odds(p.american)
+
+
+def sgp_line(p) -> str:
+    """Why a same-game price is an estimate, with the multiplied odds for comparison."""
+    if not getattr(p, "sgp_estimated", False):
+        return ""
+    from .odds import decimal_to_american
+    listed = getattr(p, "listed_decimal", p.decimal)
+    return (f"🔗 {p.book} prices same-game legs together: ≈{fmt_odds(p.american)} estimated "
+            f"(multiplied odds {fmt_odds(decimal_to_american(listed))}); check the slip's price")
+
+
 def header(p, extra: str = "") -> str:
     kind = f" · {p.kind}" if getattr(p, "kind", "") else ""
-    return (f"{BOOK_EMOJI.get(p.book, '🎟️')} {p.book} · {fmt_odds(p.american)} · {p.prob:.0%} hit"
+    return (f"{BOOK_EMOJI.get(p.book, '🎟️')} {p.book} · {odds_text(p)} · {p.prob:.0%} hit"
             f"{kind}{extra}")
 
 
@@ -43,5 +58,5 @@ def money_line(p) -> str:
 
 def block(p, extra_lines=(), header_extra: str = "") -> tuple:
     """(field name, field value) for one parlay."""
-    value = "\n".join(legs_lines(p) + [money_line(p)] + [x for x in extra_lines if x])
+    value = "\n".join(legs_lines(p) + [money_line(p), sgp_line(p)] + [x for x in extra_lines if x])
     return header(p, header_extra)[:256], value[:1024]

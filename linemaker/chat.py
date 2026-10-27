@@ -394,6 +394,8 @@ class LinemakerChat:
             if kind == "pp":
                 from .pp import select_legs
                 res.picks = select_legs(res.picks, cfg.pp_floor)
+            if mode == "volume" and kind != "pp":
+                res.edge_legs = edge_legs(rows, date, kind, cfg, game_types)
             res.slate = slate
             res.focus = " vs ".join(focus) if focus else ""
             res.source_warning = warning
@@ -839,6 +841,25 @@ def drop_slate(sport: str, date: str, kind: str = "props"):
         os.remove(_cache_path(sport, date, kind))
     except OSError:
         pass
+
+
+def edge_legs(rows: list, date: str, kind: str, cfg, game_types=None) -> list:
+    """The model's own picks on the same odds (no extra credits): legs priced above fair by
+    a real edge, for the 🎯 Edge parlays next to the high-hit-rate ones. Not tracked again
+    (the parlay mode's run already logged every market)."""
+    from .pro import ProConfig, rows_to_markets, run_pro
+    ecfg = ProConfig(track=False, bet_books=cfg.bet_books)
+    if kind in ("live", "live_props"):
+        from .live import live_settings
+        ecfg, _t = live_settings(ecfg, date)
+    try:
+        picks = run_pro(rows_to_markets(rows), date, ecfg).picks
+    except Exception as e:
+        log.warning("edge legs: %s", e)
+        return []
+    if game_types:
+        picks = [ev for ev in picks if ev.market.bet_type in game_types]
+    return picks
 
 
 def track_game_lines(sport: str, date: str, only: Optional[set] = None) -> int:

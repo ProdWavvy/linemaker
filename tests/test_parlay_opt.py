@@ -262,3 +262,66 @@ class ExposureTest(unittest.TestCase):
             found = bot.target_parlays([{"rank": i, "ev": ev} for i, ev in enumerate(res.picks, 1)], ("FanDuel",))
             self.assertFalse(any(ev.market.subject == "J.K. Dobbins" for p in found.values() if p
                                  and not getattr(p, "reuses", False) for ev, _o in p.legs))
+
+
+class ParlaySystemFixTest(unittest.TestCase):
+    def test_same_game_priced_like_an_sgp(self):
+        a = leg("g1", "A", "points", p=0.6, odds=-120)
+        b = leg("g1", "A", "pra", p=0.6, odds=-120)          # same player, overlapping stats: rho 0.7
+        with mock.patch.dict(os.environ, {"LINEMAKER_SGP_MARGIN": "0.05"}):
+            p = parlay.price("FanDuel", [(a, -120), (b, -120)])
+        self.assertTrue(p.sgp_estimated)
+        self.assertLess(p.decimal, p.listed_decimal)
+        self.assertGreater(p.prob, p.indep_prob)                       # they do move together...
+        self.assertAlmostEqual(p.prob * p.decimal, p.indep_prob * p.listed_decimal * 0.95, places=3)  # ...but it isn't free
+        other = parlay.price("FanDuel", [(a, -120), (leg("g2", "B", "points", p=0.6, odds=-120), -120)])
+        self.assertFalse(other.sgp_estimated)
+        self.assertEqual(other.decimal, other.listed_decimal)
+
+    def test_best_next_leg_balances_hit_chance_and_value(self):
+        from linemaker import bot
+        picks = [{"rank": 1, "ev": leg("g1", "Anchor", "points", p=0.65, odds=-150)},
+                 {"rank": 2, "ev": leg("g2", "Longshot", "points", p=0.30, odds=+260)},     # value 1.08, 30% hit
+                 {"rank": 3, "ev": leg("g3", "Solid", "points", p=0.66, odds=-150)},        # value 1.10, 66% hit
+                 {"rank": 4, "ev": leg("g1", "Anchor", "rebounds", p=0.7, odds=-150)}]      # same player
+        with mock.patch.object(parlay, "leg_price", side_effect=lambda ev, b: ev.best.best_odds), \
+                mock.patch("linemaker.bets.open_exposure", return_value={}):
+            self.assertEqual(bot.best_next_leg(picks, [0], ("FanDuel",)), 2)        # Solid, not the long shot
+            self.assertEqual(bot.best_next_leg(picks, [0, 2, 1], ("FanDuel",)), None)   # only Anchor left: same player
+
+    def test_best_next_leg_skips_what_you_already_hold(self):
+        from linemaker import bot
+        picks = [{"rank": 1, "ev": leg("g1", "Anchor", "points", p=0.65, odds=-150)},
+                 {"rank": 2, "ev": leg("g2", "Held", "points", p=0.7, odds=-140)},
+                 {"rank": 3, "ev": leg("g3", "Other", "points", p=0.62, odds=-150)}]
+        held = {("g2", "Held"): {"n": 2, "label": "Held points A"}}
+        with mock.patch.object(parlay, "leg_price", side_effect=lambda ev, b: ev.best.best_odds), \
+                mock.patch("linemaker.bets.open_exposure", return_value=held):
+            self.assertEqual(bot.best_next_leg(picks, [0], ("FanDuel",)), 2)
+
+    def test_edge_parlays_from_model_picks(self):
+        legs = []
+        for i, (p, o, gap) in enumerate(((0.62, -120, 0.08), (0.60, -115, 0.07), (0.58, -110, 0.06), (0.50, -150, -0.1))):
+            ev = leg(f"g{i}", f"E{i}", "points", p=p, odds=o)
+            ev.best.gap = gap
+            legs.append(ev)
+        with mock.patch.object(parlay, "leg_price", side_effect=lambda ev, b: ev.best.best_odds):
+            out = parlay.build_edge_parlays(legs, sizes=(2, 3), books=("FanDuel",))
+        self.assertTrue(out)
+        self.assertTrue(all(p.style == "edge" and p.prob * p.decimal > 1 for p in out))
+        self.assertFalse(any(ev.market.subject == "E3" for p in out for ev, _o in p.legs))   # -EV leg left out
+        self.assertEqual([ev.market.subject for ev, _o in out[0].legs], ["E0", "E1"])       # biggest edge first
+
+    def test_sgp_graded_at_its_price(self):
+        import tempfile
+        a, b = leg("g1", "A", "points", key="k1", odds=-120), leg("g1", "A", "pra", key="k2", odds=-120)
+        p = parlay.price("FanDuel", [(a, -120), (b, -120)])
+        d = tempfile.mkdtemp()
+        with mock.patch.dict(os.environ, {"LINEMAKER_TRACKING_DIR": d, "LINEMAKER_TRACKING": "on"}):
+            parlay_track.log_parlays([p], "2026-10-24")
+            with open(os.path.join(d, "2026-10-24.json"), "w") as f:
+                json.dump({"k1": {"result": {"winner": "A"}}, "k2": {"result": {"winner": "A"}}}, f)
+            parlay_track.grade_parlays("2026-10-24")
+            done = list(parlay_track._load("2026-10-24").values())[0]
+        self.assertAlmostEqual(done["profit"], round(p.decimal - 1, 4), places=3)
+        self.assertLess(done["profit"], p.listed_decimal - 1)

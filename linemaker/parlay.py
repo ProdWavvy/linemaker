@@ -29,6 +29,8 @@ class Parlay:
     style: str = "safest"   # safest (likeliest legs) or value (legs that beat their price)
     indep_prob: float = 1.0  # hit chance if the legs were independent (shown next to prob)
     boost: float = 0.0      # profit boost applied to `decimal` (0.25 = +25%)
+    listed_decimal: float = 1.0   # the legs' odds multiplied (what a regular parlay would pay)
+    sgp_estimated: bool = False   # same-game legs: `decimal` is an estimate of the book's SGP price
 
     @property
     def american(self) -> int:
@@ -45,16 +47,41 @@ class Parlay:
         return (self.prob * self.decimal - 1) * 100
 
 
+def sgp_margin() -> float:
+    """Extra margin a book takes on same-game parlays (LINEMAKER_SGP_MARGIN, default 5%)."""
+    import os
+    try:
+        return float(os.environ.get("LINEMAKER_SGP_MARGIN", "") or 0.05)
+    except ValueError:
+        return 0.05
+
+
+def sgp_payout(listed: float, indep: float, joint: float, groups: int) -> float:
+    """What a book pays for same-game legs: it prices their correlation, so the multiplied
+    odds shrink by independent / joint chance, then by its SGP margin per game group. Without
+    this, legs that move together would look like free value (joint chance x full payout)."""
+    if not groups or joint <= 0:
+        return listed
+    return max(1.01, listed * (indep / joint) * (1 - sgp_margin()) ** groups)
+
+
 def price(book: str, chosen: list, kind: str = "", style: str = "safest", boost: float = 0.0) -> Parlay:
     """A Parlay for [(ev, odds at this book)]: payout multiplies the prices (plus any boost),
-    hit chance is the correlated joint chance (parlay_math)."""
+    hit chance is the correlated joint chance (parlay_math). Same-game legs are priced the way
+    the book prices an SGP (sgp_payout), marked as an estimate."""
     from .parlay_math import boosted, hit_chance, joint_prob
     p = Parlay(book=book, legs=list(chosen), kind=kind, style=style, boost=boost)
     for ev, odds in p.legs:
         p.indep_prob *= hit_chance(ev)
         p.decimal *= american_to_decimal(odds)
-    p.decimal = boosted(p.decimal, boost) if boost else p.decimal
+    p.listed_decimal = p.decimal
     p.raw_prob = joint_prob([ev for ev, _o in p.legs])
+    check = sgp_check([ev for ev, _o in p.legs], book)
+    if check["groups"]:
+        p.decimal = sgp_payout(p.decimal, p.indep_prob, p.raw_prob, len(check["groups"]))
+        p.sgp_estimated = True
+        p.kind = p.kind or check["kind"]
+    p.decimal = boosted(p.decimal, boost) if boost else p.decimal
     from .autotune import parlay_calibrated
     from .tracking import kind_of
     phase = "live" if any(getattr(ev, "phase", "pre") == "live" for ev, _o in p.legs) else "pre"
@@ -107,6 +134,25 @@ def build_parlays(legs: list, sizes=(2, 3, 4), books=PARLAY_BOOKS, value: bool =
                     p = price(book, best, style="value")
                     if p.prob * p.decimal > 1:
                         out.append(p)
+    return out
+
+
+def build_edge_parlays(legs: list, sizes=(2, 3), books=PARLAY_BOOKS) -> list:
+    """🎯 Edge parlays: the model's own picks (legs priced above fair by a real edge), one per
+    game, biggest edge first, only legs that are +EV at that book and only when the whole
+    ticket is +EV. They hit less often than the safest ones and pay more."""
+    from .parlay_math import leg_value
+    out = []
+    for book in books:
+        priced = [(ev, leg_price(ev, book)) for ev in legs]
+        priced = sorted([(ev, o) for ev, o in priced if o is not None and leg_value(ev, o) > 1.0],
+                        key=lambda x: x[0].best.gap, reverse=True)
+        for size in sizes:
+            chosen = _one_per_game(priced, size)
+            if chosen:
+                p = price(book, chosen, style="edge")
+                if p.prob * p.decimal > 1:
+                    out.append(p)
     return out
 
 
@@ -264,27 +310,30 @@ def _ladder_limits() -> tuple:
             num("LINEMAKER_TARGET_FRESH_FLOOR", 0.8, float))
 
 
-def _search(cands: list, target: float, max_legs: int, prob, allowed, used: dict):
+def _search(cands: list, target: float, max_legs: int, evaluate, allowed, used: dict):
     """The combo of cands ([(ev, odds)]) paying at least target with the best hit chance,
     keeping the payout ladder spread out (used: exposure -> parlays it's already in):
     no leg past its use limit, at most MAX_SHARED reused legs, and a parlay with no reused
-    leg wins unless it hits less than FRESH_FLOOR as often as the best one that shares."""
+    leg wins unless it hits less than FRESH_FLOOR as often as the best one that shares.
+    evaluate(combo) -> (hit chance, payout as decimal odds)."""
     import itertools
     import math
     max_shared, max_uses, floor = _ladder_limits()
     best = {}   # shares a leg? -> ((p, p x payout), combo)
     for k in range(1, min(max_legs, len(cands)) + 1):
         for combo in itertools.combinations(cands, k):
-            d = math.prod(american_to_decimal(o) for _e, o in combo)
-            if d < target:
-                continue
+            listed = math.prod(american_to_decimal(o) for _e, o in combo)
+            if listed < target:
+                continue      # an SGP pays less than the multiplied odds, never more
             exps = [exposure(e) for e, _o in combo]
             if any(used.get(x, 0) >= max_uses for x in exps):
                 continue
             shared = sum(1 for x in exps if used.get(x))
             if shared > max_shared or not allowed(combo):
                 continue
-            p = prob(combo, d)
+            p, d = evaluate(combo)
+            if d < target:
+                continue
             key = (p, p * d)
             bucket = shared > 0
             if bucket not in best or key > best[bucket][0]:
@@ -316,7 +365,9 @@ def best_for_target(legs: list, book: str, target: float, max_legs: int = 6, poo
         if g not in best_per_game or leg_value(ev, o) > leg_value(*best_per_game[g]):
             best_per_game[g] = (ev, o)
     cands = sorted(best_per_game.values(), key=lambda x: leg_value(*x), reverse=True)[:pool]
-    best = _search(cands, target, max_legs, lambda combo, _d: math.prod(hit_chance(e) for e, _o in combo),
+    best = _search(cands, target, max_legs,
+                   lambda combo: (math.prod(hit_chance(e) for e, _o in combo),
+                                  math.prod(american_to_decimal(o) for _e, o in combo)),
                    lambda combo: True, used or {})
     if best is None:
         return None
@@ -337,9 +388,16 @@ def _best_same_game(legs: list, book: str, target: float, max_legs: int, pool: i
         if k not in best_per_player or leg_value(ev, o) > leg_value(*best_per_player[k]):
             best_per_player[k] = (ev, o)
     cands = sorted(best_per_player.values(), key=lambda x: leg_value(*x), reverse=True)[:min(pool, 10)]
-    best = _search(cands, target, max_legs,
-                   lambda combo, d: joint_prob([e for e, _o in combo], draws=3000) if len(combo) > 1
-                   else leg_value(*combo[0]) / d,
+    def evaluate(combo):
+        import math
+        from .parlay_math import hit_chance
+        listed = math.prod(american_to_decimal(o) for _e, o in combo)
+        if len(combo) == 1:
+            return hit_chance(combo[0][0]), listed
+        joint = joint_prob([e for e, _o in combo], draws=3000)
+        indep = math.prod(hit_chance(e) for e, _o in combo)
+        return joint, sgp_payout(listed, indep, joint, 1)
+    best = _search(cands, target, max_legs, evaluate,
                    lambda combo: len(combo) == 1 or not sgp_check([e for e, _o in combo], book)["blocked"],
                    used)
     if best is None:

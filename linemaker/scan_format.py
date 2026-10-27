@@ -769,13 +769,30 @@ def volume_messages(sections: list, date: str, cfg, title: str = "") -> list:
         intro.append("**No legs cleared those bars.** Games already under way are left out: "
                      "ask for a live ML parlay for those." if ml else
                      "**No legs cleared those bars today.** Try again closer to game time.")
-    header = discord.Embed(title=f"🎰 {title} · Today's Board ({_day(date)})", color=GOLD if legs else GREY,
-                           description="\n\n".join(intro))
+    # 🎯 The model's own picks on the same odds: legs priced above fair by a real edge.
+    edge_all, seen = [], set()
+    for _s, res, _e in sections:
+        for ev in getattr(res, "edge_legs", None) or []:
+            k = (ev.market.key, ev.best.side)
+            if k not in seen:
+                seen.add(k)
+                edge_all.append(ev)
+    edge_all.sort(key=lambda ev: ev.best.gap, reverse=True)
+    on_board = {(ev.market.key, ev.best.side) for ev in legs}
+    extra = [ev for ev in edge_all if (ev.market.key, ev.best.side) not in on_board][:10]
+    if edge_all:
+        intro.append(f"🎯 **{len(edge_all)} model pick{'s' if len(edge_all) != 1 else ''}** (priced above fair by "
+                     "a real edge) are marked 🎯 and get their own Edge parlays: they hit less often than "
+                     "the safest legs but pay more, and they're the bot's actual picks.")
+    header = discord.Embed(title=f"🎰 {title} · Today's Board ({_day(date)})",
+                           color=GOLD if legs or edge_all else GREY, description="\n\n".join(intro))
     news = [getattr(res, "news_note", "") for _s, res, _e in sections]
     if any(news):
         header.description += "\n\n" + "\n".join(n for n in news if n)
     header.set_footer(text=odds_age_note(sections))
     out = [([header], None)]
+    vol_legs, legs = legs, legs + extra
+    edge_keys = {(ev.market.key, ev.best.side) for ev in edge_all}
     if legs:
         short = {"FanDuel": "FD", "DraftKings": "DK"}
         from .parlay import leg_price
@@ -788,12 +805,14 @@ def volume_messages(sections: list, date: str, cfg, title: str = "") -> list:
             best_o = max((o for o in prices if o), key=lambda o: american_to_decimal(o), default=None)
             evp = f" · EV {ev.best.blended * american_to_decimal(best_o) - 1:+.0%}" if best_o else ""
             quotes = " · ".join(f"{short.get(b, b[:2])} {fmt_odds(o)}" for b, o in zip(books, prices) if o)
-            rows.append(f"**{i}.** {short_label(ev.best.label)} · **{_pct(ev.best.blended)}**\n"
+            mark = "🎯 " if (ev.market.key, ev.best.side) in edge_keys else ""
+            rows.append(f"**{i}.** {mark}{short_label(ev.best.label)} · **{_pct(ev.best.blended)}**\n"
                         f"\u2003{quotes}{evp}{szn}")
         board = discord.Embed(title="✅ High-Hit-Rate Legs", color=GOLD,
                               description=_clip("\n".join(rows), 4096))
         board.set_footer(text="Bold % = our hit chance (calibrated to past results) · EV = value at the "
-                              "best price · season = hit rate at this line · one leg per player")
+                              "best price · season = hit rate at this line · one leg per player · "
+                              "🎯 = a model pick (priced above fair)")
         # The legs behind the board, so "Build my own parlay" can use any of them.
         out.append(([board], {"legs": [{"rank": i, "ev": ev, "profile": profiles.get(ev.market.key)}
                                        for i, ev in enumerate(legs, 1)],
@@ -805,14 +824,19 @@ def volume_messages(sections: list, date: str, cfg, title: str = "") -> list:
         from .bets import max_exposure, open_exposure
         from .parlay import exposure
         held, cap = open_exposure(), max_exposure()
-        fresh = [ev for ev in legs if not cap or held.get(exposure(ev), {}).get("n", 0) < cap]
-        pool = fresh if len(fresh) >= 2 else legs
+        fresh = [ev for ev in vol_legs if not cap or held.get(exposure(ev), {}).get("n", 0) < cap]
+        pool = fresh if len(fresh) >= 2 else vol_legs
         heavy = [held[exposure(ev)] for ev in legs if cap and held.get(exposure(ev), {}).get("n", 0) >= cap]
         if heavy and pool is fresh:
             header.description += ("\n\n🧯 **Left out of these parlays** (already in "
                                    f"{cap}+ of your open bets): "
                                    + ", ".join(sorted({h['label'] for h in heavy}))[:500])
-        parlays = build_parlays(pool, sizes=sizes, books=books) + build_sgps(pool, books=books)
+        from .parlay import build_edge_parlays
+        edge_pool = [ev for ev in edge_all if not cap or held.get(exposure(ev), {}).get("n", 0) < cap]
+        edge_sizes = tuple(s for s in (2, 3) if not cfg.max_parlay_legs or s <= cfg.max_parlay_legs)
+        parlays = (build_edge_parlays(edge_pool, sizes=edge_sizes, books=books)
+                   + (build_parlays(pool, sizes=sizes, books=books) + build_sgps(pool, books=books)
+                      if len(pool) >= 2 else []))
         if cfg.max_parlay_legs:
             parlays = [p for p in parlays if len(p.legs) <= cfg.max_parlay_legs]
         if cfg.parlay_min_ev is not None:   # bigger tickets only while they still hold their value
@@ -839,19 +863,21 @@ def volume_messages(sections: list, date: str, cfg, title: str = "") -> list:
             for j, p in enumerate(mine):
                 # One box per parlay, in the book's colour; the card numbers them (#1, #2 ...).
                 url = parlay_link(p)
-                icon = "🔗" if p.kind else "💰" if p.style == "value" else "🔒"
-                kind = p.kind or ("Value" if p.style == "value" else "Safest")
+                icon = "🎯" if p.style == "edge" else "🔗" if p.kind else "💰" if p.style == "value" else "🔒"
+                kind = ("Edge" if p.style == "edge" else p.kind or ("Value" if p.style == "value" else "Safest"))
                 lines = legs_lines(p) + [money_line(p)]
                 if abs(p.prob - p.indep_prob) >= 0.01:
                     lines.append(f"↔️ {_pct(p.indep_prob)} if the legs were independent")
-                if p.kind:
-                    lines.append(f"⚠️ {bname} prices the {p.kind} itself, lower than shown")
+                from .parlay_format import odds_text, sgp_line
+                if sgp_line(p):
+                    lines.append(sgp_line(p))
                 e = discord.Embed(title=f"{emoji} {bname} · {icon} {len(p.legs)}-leg {kind} · "
-                                        f"{fmt_odds(p.american)} · {_pct(p.prob)} hit",
+                                        f"{odds_text(p)} · {_pct(p.prob)} hit",
                                   color=colour, description="\n".join(lines)[:4096])
                 if j == len(mine) - 1:
-                    e.set_footer(text="🔒 safest legs, one per game · 💰 legs priced above fair · 🔗 same-game "
-                                      "ticket · ✅ leg is +EV at this price")
+                    e.set_footer(text="🎯 model picks, biggest edge first · 🔒 safest legs, one per game · "
+                                      "💰 legs priced above fair · 🔗 same-game ticket (≈ book's SGP price) · "
+                                      "✅ leg is +EV at this price")
                 links = [(f"{len(p.legs)}-leg on {bname}", url)] if url else []
                 out.append(([e], {"links": links, "parlays": [p]}))
     notes = discord.Embed(title="🧠 Volume Mode, Honestly", color=PURPLE, description=(

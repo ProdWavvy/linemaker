@@ -50,7 +50,7 @@ from .scan_format import (chart_page, movement_page, odds_page, scan_messages,
                           stats_page, SPORT_NAMES)
 from .freeze import Freezer, grade
 from .market import load_markets
-from .odds import american_to_decimal, expected_value, fair_odds, fmt_money, fmt_odds, implied_probability, parse_odds
+from .odds import american_to_decimal, decimal_to_american, expected_value, fair_odds, fmt_money, fmt_odds, implied_probability, parse_odds
 from .pipeline import run
 from .live import auto_results, board_lines, fetch_feed, odds_template, read_projections, rows_csv, run_live
 from .oddsapi import SPORT_KEYS, OddsAPI, feed_row
@@ -337,6 +337,9 @@ def _bet_go(key: str, i: int):
                 f" **{_money(bet['stake'])}** on the {len(p.legs)}-leg {p.book} parlay at **{fmt_odds(bet['odds'])}**"
                 f"{practice}.")
             tail = ("" if url else "\nNo one-tap slip for this one: open the book and add the legs.") + (
+                f"\n🔗 Same-game legs: ≈{fmt_odds(p.american)} is an estimate of {p.book}'s SGP price. "
+                "If the slip shows a different price, ✏️ it so your record is right."
+                if getattr(p, "sgp_estimated", False) else "") + (
                 "\nIt settles itself after grading (`/record`). Different stake or price? ✏️. "
                 "Didn't place it? ↩️.")
             await interaction.response.send_message(head + tail, view=view, ephemeral=True)
@@ -615,7 +618,7 @@ class CompactView(discord.ui.View):
             for key, detail in auto:
                 nums = detail.get("numbers") or []
                 for i, p in enumerate(detail.get("parlays") or []):
-                    kind = getattr(p, "kind", "") or ("Value" if p.style == "value" else "Safest")
+                    kind = "Edge" if p.style == "edge" else getattr(p, "kind", "") or ("Value" if p.style == "value" else "Safest")
                     leg_text = ", ".join(short_label(ev.best.label) for ev, _o in p.legs)
                     num = f"#{nums[i]} · " if i < len(nums) else ""
                     options.append(discord.SelectOption(
@@ -758,7 +761,9 @@ def parlay_card(legs: list, books: Optional[tuple] = None, boost: float = 0.0) -
         elif sgp["kind"]:
             games = ", ".join(f"{g} ({n} legs)" for g, n in sgp["groups"])
             value += (f"\n🔗 **Works as a {p.book} {sgp['kind']}**: {games}"[:400]
-                      + ". The book prices same-game legs together, so expect a lower price than shown.")
+                      + (f". ≈{fmt_odds(p.american)} is an estimate of its same-game price "
+                         f"(multiplied odds {fmt_odds(decimal_to_american(p.listed_decimal))})"
+                         if getattr(p, "sgp_estimated", False) else ""))
         from .bets import open_exposure
         from .parlay import exposure as _exposure
         held = open_exposure()
@@ -783,8 +788,9 @@ def parlay_card(legs: list, books: Optional[tuple] = None, boost: float = 0.0) -
     notes = ["✅ = leg is +EV at its best price. Hit chance counts same-game legs moving "
              "together. Books' parlay prices can differ slightly from the multiplied odds."]
     if any(sgp_check(legs, b)["groups"] for b in books):
-        notes.insert(0, "Same-game legs: the book prices them as an SGP, usually lower than the "
-                        "multiplied odds shown; check its price on the slip before you bet.")
+        notes.insert(0, "Same-game legs: priced the way the book prices an SGP (their correlation "
+                        "taken out of the payout, plus its SGP margin), so ≈ odds are estimates; "
+                        "check the slip's price before you bet.")
     embed.set_footer(text=" ".join(n.replace("**", "") for n in notes)[:2048])
     return embed, view
 
@@ -892,7 +898,7 @@ def _parlay_bet_card(value: str):
         try:
             p = detail["parlays"][int(i)]
             embed, view = parlay_card([ev for ev, _o in p.legs], (p.book,))
-            kind = getattr(p, "kind", "") or ("Value" if p.style == "value" else "Safest")
+            kind = "Edge" if p.style == "edge" else getattr(p, "kind", "") or ("Value" if p.style == "value" else "Safest")
             embed.title = f"🎰 {len(p.legs)}-Leg {kind} Parlay · {p.book}"
             await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
         except Exception as e:
@@ -979,30 +985,44 @@ SLIP_PAGE = 10   # leg buttons per page (2 rows); then the views, the controls, 
 BOOSTS = (0.0, 0.10, 0.20, 0.25, 0.30, 0.50, 1.00)   # profit boosts the 🚀 button cycles through
 
 
+def _slip_score(p) -> float:
+    """How good a slip is: its hit chance plus half its EV (the volume-leg score, for the whole
+    ticket). Pure EV would chase long shots and same-game stacks; pure hit chance would
+    chase -250 chalk that pays nothing. This keeps the slip likely and fairly priced."""
+    return p.prob + 0.5 * (p.prob * p.decimal - 1)
+
+
 def best_next_leg(picks: list, chosen: list, books) -> Optional[int]:
-    """The leg that makes the slip worth the most (correlated hit chance x payout) at the
-    book that prices it best, among legs the book will take on one ticket."""
-    from .parlay import leg_price, price, sgp_check
+    """The leg that makes the slip best (_slip_score at the book that prices it best) among
+    legs that are fair or better at that book (hit chance x odds >= 0.98, while any are),
+    not a second prop for a player already on the slip, not a leg your open bets already
+    hold LINEMAKER_MAX_EXPOSURE times, and that the book will take on the same ticket.
+    Same-game legs are priced the way the book prices an SGP, so correlation isn't free."""
+    from .bets import max_exposure, open_exposure
+    from .parlay import FAIR_VALUE, exposure, leg_price, price, sgp_check
     from .parlay_math import leg_value
-    best, best_val = None, None
+    held, cap = open_exposure(), max_exposure()
+    have = {exposure(picks[j]["ev"]) for j in chosen}
+    options = []
     for i, d in enumerate(picks):
-        if i in chosen:
+        ev = d["ev"]
+        if i in chosen or exposure(ev) in have:
             continue
-        legs = [picks[j]["ev"] for j in chosen] + [d["ev"]]
+        if cap and held.get(exposure(ev), {}).get("n", 0) >= cap:
+            continue
+        legs = [picks[j]["ev"] for j in chosen] + [ev]
         for book in (books or PARLAY_BOOKS):
-            quotes = [(ev, leg_price(ev, book)) for ev in legs]
+            quotes = [(e, leg_price(e, book)) for e in legs]
             if any(o is None for _e, o in quotes):
                 continue
-            if len(legs) == 1:
-                val = leg_value(*quotes[0])
-            else:
-                if sgp_check(legs, book)["blocked"]:
-                    continue
-                p = price(book, quotes)
-                val = p.prob * p.decimal
-            if best_val is None or val > best_val:
-                best, best_val = i, val
-    return best
+            if len(legs) > 1 and sgp_check(legs, book)["blocked"]:
+                continue
+            fair = leg_value(ev, quotes[-1][1]) >= FAIR_VALUE
+            options.append((fair, _slip_score(price(book, quotes)), i))
+    if not options:
+        return None
+    pool = [o for o in options if o[0]] or options
+    return max(pool, key=lambda o: o[1])[2]
 
 
 def slip_message(key: str, mask: int = 0, page: int = 0, boost_i: int = 0) -> tuple:
@@ -1081,6 +1101,7 @@ def _slip_tap(key: str, mask: str, page: str, action: str, boost: str = "0"):
             return
         PICK_DETAILS[key] = PICK_DETAILS.pop(key)    # in use: keep it from being pruned
         m, pg, n, bi = int(mask, 16), int(page), len(PICK_DETAILS[key]["picks"]), int(boost or 0)
+        note = ""
         if action == "b":
             bi = (bi + 1) % len(BOOSTS)
         elif action == "s":
@@ -1090,6 +1111,9 @@ def _slip_tap(key: str, mask: str, page: str, action: str, boost: str = "0"):
             if nxt is not None:
                 m |= 1 << nxt
                 pg = nxt // SLIP_PAGE
+            else:
+                note = ("➕ No leg left to add: the rest are the same players or games as your slip, "
+                        "already in your open bets, or not offered together at one book.")
         elif action.startswith("t"):
             m ^= 1 << int(action[1:])
         elif action.startswith("p"):
@@ -1099,7 +1123,7 @@ def _slip_tap(key: str, mask: str, page: str, action: str, boost: str = "0"):
         elif action == "clr":
             m = 0
         embed, view = slip_message(key, m, pg, bi)   # builds a View: needs the event loop
-        await interaction.response.edit_message(content=None, embed=embed, view=view)
+        await interaction.response.edit_message(content=note or None, embed=embed, view=view)
         await asyncio.to_thread(save_details)
     return callback
 
