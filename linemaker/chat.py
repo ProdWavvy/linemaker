@@ -19,6 +19,7 @@ import io
 import logging
 import os
 import re
+import threading
 import time
 from collections import defaultdict, deque
 from dataclasses import dataclass, field
@@ -397,6 +398,8 @@ class LinemakerChat:
             if mode == "volume" and kind != "pp":
                 res.edge_legs = edge_legs(rows, date, kind, cfg, game_types,
                                           {ev.market.key: ev.sim for ev in res.evaluated})
+            if mode in ("smart", "volume") and kind in ("props", "games"):
+                track_market_edges(rows, date, {ev.market.key: ev.sim for ev in res.evaluated})
             res.slate = slate
             res.focus = " vs ".join(focus) if focus else ""
             res.source_warning = warning
@@ -867,6 +870,33 @@ def edge_legs(rows: list, date: str, kind: str, cfg, game_types=None, sims: Opti
     return picks
 
 
+def track_market_edges(rows: list, date: str, sims: Optional[dict] = None, wait: bool = False):
+    """Log the market-edge picks (FanDuel/DraftKings beating the sharp consensus) on odds an
+    ask or pre-tip scan already bought: 0 credits, nothing posted, in the background. They're
+    graded apart from the model's picks (⚡ Market-Edge Picks on the grade report, the
+    market_pick columns in its CSV), so the rule shows whether it earns its keep without
+    anyone tapping the button. Closing reads skip them (no credits there either).
+    LINEMAKER_MARKET_TRACKING=off turns it off."""
+    from .pro import market_config, rows_to_markets, run_pro
+    cfg = market_config(max_picks=500)
+    if not rows or not cfg.track or os.environ.get("LINEMAKER_MARKET_TRACKING", "on").lower() in (
+            "off", "0", "no", "false"):
+        return
+    cfg.background = True
+
+    def run():
+        try:
+            res = run_pro(rows_to_markets(rows), date, cfg, None, None, sims=sims)
+            log.info("market edges logged in the background: %d of %d markets (0 credits)",
+                     len(res.picks), len(res.evaluated))
+        except Exception as e:
+            log.warning("market-edge tracking: %s", e)
+    if wait:
+        run()
+    else:
+        threading.Thread(target=run, daemon=True, name="market-edge-tracking").start()
+
+
 def track_game_lines(sport: str, date: str, only: Optional[set] = None) -> int:
     """Price today's not-yet-started moneylines/spreads/totals with the game model just to
     log them for grading and weight tuning (nothing is posted). One /odds call (~3 credits)
@@ -916,6 +946,8 @@ def scan_events(sport: str, date: str, event_ids: set, title: str, only_if_picks
                 lr = run_best(OddsAPI(), [sport], date, _tz(), cfg, None if log_only else Freezer(snaps, date),
                               only=set(event_ids))
             res = lr.result
+            if not log_only:   # the latest pre-tip prices: log their market edges too (0 credits)
+                track_market_edges(lr.rows, date, {ev.market.key: ev.sim for ev in res.evaluated})
     finally:
         if log_only:
             PROP_KEYS.reset(token)
@@ -950,7 +982,8 @@ def played_markets(sport: str, date: str, event_ids: set) -> set:
     from .tracking import load_day
     tdir = os.environ.get("LINEMAKER_TRACKING_DIR", "tracking")
     names = {r.get("market") for r in load_day(tdir, date).values()
-             if r.get("game_id") in event_ids and (r.get("picked") or r.get("volume_pick") or r.get("market_pick"))
+             if r.get("game_id") in event_ids and (r.get("picked") or r.get("volume_pick")
+                                                   or (r.get("market_pick") and not r["market_pick"].get("background")))
              and (r.get("inputs") or {}).get("bet_type") == "prop"}
     from .bets import load_bets
     for b in load_bets():

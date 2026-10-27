@@ -194,12 +194,13 @@ class ProConfig:
 def market_config(**overrides) -> "ProConfig":
     """Market-edge mode: no model at all. The fair price is the 10-book no-vig consensus
     (Pinnacle and other sharp books weighted up); a pick is a FanDuel/DraftKings price that
-    still beats it by LINEMAKER_MARKET_MIN_GAP (default 2 points) with at least
+    still beats it by LINEMAKER_MARKET_MIN_GAP (default 4 points: in the 10/22-10/26 grades,
+    2-4 point gaps lost 9% while 4+ point gaps won) with at least
     LINEMAKER_MARKET_MIN_BOOKS (default 4) complete books behind the consensus. Gaps over 10
     points are left out (usually a stale line about to move)."""
     cfg = ProConfig(
         force_model_weight=0.0, require_model_edge=False, over_min_gap=None, sport_settings=False,
-        min_gap=_env_num("LINEMAKER_MARKET_MIN_GAP", float) or 0.02, max_gap=0.10, min_ev=None,
+        min_gap=_env_num("LINEMAKER_MARKET_MIN_GAP", float) or 0.04, max_gap=0.10, min_ev=None,
         min_odds=_env_num("LINEMAKER_MARKET_ODDS_MIN", int) or 300,
         max_odds=_env_num("LINEMAKER_MARKET_ODDS_MAX", int) or -400, min_prob=None,
         min_books=_env_num("LINEMAKER_MARKET_MIN_BOOKS", int) or 4, pick_tag="market")
@@ -832,7 +833,7 @@ def run_pro(markets: list, slate_date: str, cfg: ProConfig, freezer=None,
         freezer.mark_picks(res.picks)
         freezer.save()
     if tracker is not None:
-        tracker.mark_picks(res.picks, cfg.pick_tag)
+        tracker.mark_picks(res.picks, cfg.pick_tag, background=getattr(cfg, "background", False))
         tracker.save()
     games = {}
     for ev in res.picks:

@@ -143,8 +143,11 @@ def market_picks_embed(main: dict) -> Optional[discord.Embed]:
         lines.append(f"{ {'hit': '✅', 'miss': '❌', 'push': '➖'}[o]} {s.get('label', r.get('subject'))} "
                      f"{fmt_odds(mp['odds']) if mp.get('odds') else ''} · {_miss_by(r, mp['side'])}")
     rec, units, roi = _record_line(rows)
+    quiet = sum(1 for r in picks if r["market_pick"].get("background"))
     head = (f"**{rec}** · {units:+.2f} units" + (f" · ROI **{roi:+.1%}**" if roi is not None else "")
-            + " (books slower than the sharp consensus; no model)")
+            + " (books slower than the sharp consensus; no model)"
+            + (f"\n{quiet} of them were logged in the background from odds already bought (0 credits, "
+               "never shown), to see whether the rule wins before anyone bets it." if quiet else ""))
     body = "\n".join(lines)
     if len(body) > 3500:
         body = body[:3500].rsplit("\n", 1)[0] + "\n…and more in the attached CSV"
@@ -412,7 +415,8 @@ def graded_csv(records: dict) -> str:
     from .tracking import record_segment
     w.writerow(["source", "segment", "sport", "game", "subject", "market", "line", "likelier_side",
                 "likelier_prob", "model_prob", "market_prob", "value_side", "value_gap",
-                "best_odds", "best_book", "actual", "result", "picked", "pick_odds"])
+                "best_odds", "best_book", "actual", "result", "picked", "pick_odds",
+                "market_pick", "market_pick_side", "market_pick_odds", "market_pick_book", "market_pick_result"])
     for kind, recs in records.items():
         for r in recs.values():
             if not r.get("result"):
@@ -420,13 +424,17 @@ def graded_csv(records: dict) -> str:
             fav = _favored(r) or {}
             val = _side(r, r.get("pick_side") or r.get("best_side")) or {}
             pick_side = r.get("pick_side") or r.get("best_side")
+            mp = r.get("market_pick") or {}   # ⚡ market edge: "button" (shown) or "background" (logged only)
+            mside = (_side(r, mp["side"]) or {}) if mp else {}
+            market = (["background" if mp.get("background") else "button", mside.get("label"), mp.get("odds"),
+                       mp.get("book"), _outcome(r, mp["side"])] if mp else ["", "", "", "", ""])
             w.writerow([kind, record_segment(r), r.get("sport"), r.get("game"), r.get("subject"), r.get("market"),
                         _line(r), fav.get("label"), round(fav.get("blended", 0), 4),
                         round(fav.get("model_prob", 0), 4), round(fav.get("market_prob", 0), 4),
                         val.get("label"), round(val.get("gap", 0), 4), val.get("best_odds"),
                         val.get("best_book"), r["result"].get("actual"),
                         _outcome(r, pick_side) if r.get("picked") else _outcome(r, fav.get("side")),
-                        "yes" if r.get("picked") else "", r.get("pick_odds", "")])
+                        "yes" if r.get("picked") else "", r.get("pick_odds", "")] + market)
     return out.getvalue()
 
 

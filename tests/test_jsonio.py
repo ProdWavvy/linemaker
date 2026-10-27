@@ -2,6 +2,7 @@ import json
 import os
 import tempfile
 import unittest
+from unittest import mock
 
 from linemaker.jsonio import load_json, load_or_quarantine, save_json
 
@@ -56,3 +57,41 @@ class KeepModelTest(unittest.TestCase):
         self.assertGreater(before[k]["model_weight"], 0)
         self.assertEqual(after[k]["model_weight"], before[k]["model_weight"])
         self.assertEqual(after[k]["sides"], before[k]["sides"])
+
+
+class BackgroundMarketEdgesTest(unittest.TestCase):
+    ROWS = [{"date": "2026-10-25", "sport": "NBA", "game_id": "g1", "game": "A @ H", "bet_type": "prop",
+             "subject": "P", "market": "points", "line": "20.5", "mean": "26", "stdev": "5",
+             "books": "FanDuel:+100/-120|DraftKings:-130/+110|BetMGM:-135/+115|Caesars:-135/+115|Pinnacle:-140/+120"}]
+
+    def test_min_gap_is_four_points(self):
+        from linemaker.pro import market_config
+        with mock.patch.dict(os.environ, {"LINEMAKER_MARKET_MIN_GAP": ""}):
+            self.assertEqual(market_config().min_gap, 0.04)
+
+    def test_logged_from_bought_odds_and_graded_apart(self):
+        from linemaker.chat import played_markets, track_market_edges
+        from linemaker.grade_report import graded_csv
+        from linemaker.pro import ProConfig, rows_to_markets, run_pro
+        from linemaker.tracking import Tracker, load_day
+        with tempfile.TemporaryDirectory() as d, mock.patch.dict(os.environ, {
+                "LINEMAKER_TRACKING": "on", "LINEMAKER_TRACKING_DIR": d, "LINEMAKER_MARKET_MIN_GAP": ""}):
+            run_pro(rows_to_markets(self.ROWS), "2026-10-25", ProConfig(max_picks=0), None,
+                    Tracker(d, "2026-10-25"))                             # the ask: priced, no model pick
+            before = load_day(d, "2026-10-25")
+            track_market_edges(self.ROWS, "2026-10-25", wait=True)
+            rec = next(iter(load_day(d, "2026-10-25").values()))
+            self.assertEqual(rec["market_pick"]["side"], "A")             # FanDuel's over beat the consensus
+            self.assertTrue(rec["market_pick"]["background"])
+            self.assertEqual(rec["sides"], next(iter(before.values()))["sides"])   # model numbers kept
+            self.assertEqual(played_markets("NBA", "2026-10-25", {"g1"}), set())   # no closing read for it
+            with mock.patch.dict(os.environ, {"LINEMAKER_MARKET_TRACKING": "off"}):
+                os.remove(next(os.path.join(r, f) for r, _d, fs in os.walk(d) for f in fs if f.endswith(".json")))
+                track_market_edges(self.ROWS, "2026-10-25", wait=True)
+                self.assertEqual(load_day(d, "2026-10-25"), {})
+        rec["result"] = {"actual": 25, "winner": "A"}
+        lines = graded_csv({"main": {"k": rec}}).splitlines()
+        head, row = lines[0].split(","), lines[1].split(",")
+        got = dict(zip(head, row))
+        self.assertEqual((got["market_pick"], got["market_pick_odds"], got["market_pick_book"],
+                          got["market_pick_result"]), ("background", "100", "FanDuel", "hit"))

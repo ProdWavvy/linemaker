@@ -181,15 +181,20 @@ class Tracker:
                 self.records[m.key][k] = old[k]
         self._touched.add(m.key)
 
-    def mark_picks(self, picks, tag: str = "model", now: Optional[dt.datetime] = None):
+    def mark_picks(self, picks, tag: str = "model", now: Optional[dt.datetime] = None,
+                   background: bool = False):
+        """background: logged from odds already bought, never shown (see chat.track_market_edges)."""
         now = now or _now()
         for ev in picks:
             if ev.market.key in self._touched:
                 rec = self.records[ev.market.key]
                 if tag != "model":   # market-edge / parlay-leg picks are logged apart from the model's record
-                    rec.setdefault(f"{tag}_pick", {"side": ev.best.side, "time": now.isoformat(timespec="seconds"),
-                                                   "odds": ev.best.best_odds, "book": ev.best.best_book,
-                                                   "market_prob": ev.best.market_prob})
+                    pick = {"side": ev.best.side, "time": now.isoformat(timespec="seconds"),
+                            "odds": ev.best.best_odds, "book": ev.best.best_book,
+                            "market_prob": ev.best.market_prob}
+                    if background:
+                        pick["background"] = True
+                    rec.setdefault(f"{tag}_pick", pick)
                     continue
                 rec["picked"] = True
                 rec["pick_side"] = ev.best.side
