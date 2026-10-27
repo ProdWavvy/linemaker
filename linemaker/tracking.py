@@ -34,7 +34,7 @@ from .oddsapi import norm
 MAX_HISTORY = 60
 
 
-PICK_FIELDS = ("pick_side", "pick_time", "pick_odds", "pick_book", "pick_market_prob")
+PICK_FIELDS = ("pick_side", "pick_time", "pick_odds", "pick_book", "pick_market_prob", "pick_prob", "pick_label")
 
 
 def _now() -> dt.datetime:
@@ -176,6 +176,10 @@ class Tracker:
             for k in self.MODEL_FIELDS:
                 if k in old:
                     self.records[m.key][k] = old[k]
+        elif old:   # a side this read didn't price (the line moved, a one-book ask): keep its last read
+            have = {s.side for s in ev.sides}
+            self.records[m.key]["sides"] += [s for s in old.get("sides", []) if s.get("side") not in have]
+            self.records[m.key]["sides"].sort(key=lambda s: s.get("side", ""))
         for k in PICK_FIELDS + ("market_pick", "volume_pick"):   # the price we picked at, kept for closing-line value
             if old and k in old:
                 self.records[m.key][k] = old[k]
@@ -198,9 +202,10 @@ class Tracker:
                     continue
                 rec["picked"] = True
                 rec["pick_side"] = ev.best.side
-                if "pick_time" not in rec:
+                if "pick_time" not in rec:   # the pick as it was shown: grading reads these
                     rec.update(pick_time=now.isoformat(timespec="seconds"), pick_odds=ev.best.best_odds,
-                               pick_book=ev.best.best_book, pick_market_prob=ev.best.market_prob)
+                               pick_book=ev.best.best_book, pick_market_prob=ev.best.market_prob,
+                               pick_prob=ev.best.blended, pick_label=ev.best.label)
 
     def save(self):
         """Merge into what's on disk now: other scans and live grading may have saved since

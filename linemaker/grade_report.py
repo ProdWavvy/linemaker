@@ -50,9 +50,40 @@ def _side(rec: dict, side: Optional[str]) -> Optional[dict]:
     return next((s for s in rec.get("sides", []) if s.get("side") == side), None)
 
 
+def _flip_label(label: str) -> Optional[str]:
+    for a, b in ((" Over ", " Under "), (" Under ", " Over ")):
+        if a in label:
+            return label.replace(a, b, 1)
+    return None
+
+
 def _favored(rec: dict) -> Optional[dict]:
+    """The likelier side. A record with one side priced (an over-only alternate line) whose
+    chance is under 50% means the other side is the likelier one, so that's returned
+    (its numbers are 1 minus the priced side's)."""
     sides = rec.get("sides") or []
-    return max(sides, key=lambda s: s.get("blended", 0)) if sides else None
+    if not sides:
+        return None
+    best = max(sides, key=lambda s: s.get("blended", 0))
+    label = _flip_label(best.get("label") or "")
+    if len(sides) == 1 and best.get("blended", 0) < 0.5 and label and best.get("side") in ("A", "B"):
+        return {"side": "B" if best["side"] == "A" else "A", "label": label,
+                **{k: 1 - best[k] for k in ("blended", "model_prob", "market_prob") if best.get(k) is not None}}
+    return best
+
+
+def _pick_side(rec: dict, side: Optional[str]) -> dict:
+    """The picked side's label and hit chance as shown when it was picked, even if a later
+    read no longer priced that side."""
+    s = dict(_side(rec, side) or {})
+    if rec.get("pick_label") and side == rec.get("pick_side"):
+        s.update(label=rec["pick_label"], blended=rec.get("pick_prob", s.get("blended")))
+    if "label" not in s:
+        other = next((x for x in rec.get("sides", []) if x.get("side") != side), None)
+        label = _flip_label(other.get("label") or "") if other else None
+        if label:
+            s.update(label=label, **({"blended": 1 - other["blended"]} if other.get("blended") is not None else {}))
+    return s
 
 
 def _outcome(rec: dict, side: str) -> str:
@@ -102,7 +133,7 @@ def picks_embed(main: dict) -> Optional[discord.Embed]:
     picks.sort(key=lambda r: (r.get("sport", ""), r.get("game", "")))
     for r in picks:
         side = r.get("pick_side") or r.get("best_side")
-        s = _side(r, side) or {}
+        s = _pick_side(r, side)
         odds = r.get("pick_odds", s.get("best_odds"))
         o = _outcome(r, side)
         rows.append((o, odds))
@@ -349,12 +380,20 @@ def notes_embed(date: str, records: dict, summary: list, newly: int, remaining) 
             pending.setdefault(r.get("game", "?"), 0)
             pending[r.get("game", "?")] += 1
     if pending:
-        games = sorted(pending, key=lambda g: -pending[g])
-        n, g = sum(pending.values()), len(pending)
-        lines.append(f"⏳ **Not graded yet ({n} market{'s' if n != 1 else ''}, {g} game{'s' if g != 1 else ''}):** "
-                     + ", ".join(games[:6]) + ("…" if len(games) > 6 else "")
-                     + ". Usually a game that isn't final, or a player who didn't play. "
-                     "Run /grade again later and they'll be picked up.")
+        # A game with graded markets is final: what's left there never grades (a player who
+        # didn't play, a stat the box score doesn't list). The rest may not be final yet.
+        final = {r.get("game", "?") for r in main.values() if r.get("result")}
+        waiting = sorted((g for g in pending if g not in final), key=lambda g: -pending[g])
+        if waiting:
+            n = sum(pending[g] for g in waiting)
+            lines.append(f"⏳ **Not graded yet ({n} market{'s' if n != 1 else ''}, {len(waiting)} "
+                         f"game{'s' if len(waiting) != 1 else ''}):** " + ", ".join(waiting[:6])
+                         + ("…" if len(waiting) > 6 else "") + ". Probably not final yet: run /grade "
+                         "again later and they'll be picked up.")
+        done = sum(pending[g] for g in pending if g in final)
+        if done:
+            lines.append(f"🚫 **{done} market{'s' if done != 1 else ''} in finished games won't grade:** "
+                         "players who didn't play, or stats the box score doesn't list. Nothing to do.")
     pushes = [r for r in main.values() if r.get("result") and r["result"].get("winner") is None]
     if pushes:
         lines.append(f"➖ **Pushes:** {len(pushes)} (landed exactly on the line).")
@@ -422,7 +461,7 @@ def graded_csv(records: dict) -> str:
             if not r.get("result"):
                 continue
             fav = _favored(r) or {}
-            val = _side(r, r.get("pick_side") or r.get("best_side")) or {}
+            val = (_pick_side(r, r.get("pick_side")) if r.get("picked") else _side(r, r.get("best_side"))) or {}
             pick_side = r.get("pick_side") or r.get("best_side")
             mp = r.get("market_pick") or {}   # ⚡ market edge: "button" (shown) or "background" (logged only)
             mside = (_side(r, mp["side"]) or {}) if mp else {}

@@ -66,3 +66,51 @@ class GradeReportTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class OneSidedRecordsTest(unittest.TestCase):
+    def test_lost_pick_side_and_likelier_side(self):
+        from linemaker.grade_report import _favored, graded_csv, picks_embed
+        r = rec("Tatum", "PRA", 43.5, "B", 36, 0.64, picked=True, side="B", odds=-106)
+        r["sides"] = [s for s in r["sides"] if s["side"] == "A"]      # a later read priced only the over
+        r["sides"][0]["blended"] = 0.355
+        fav = _favored(r)
+        self.assertEqual((fav["side"], fav["label"]), ("B", "Tatum Under 43.5 PRA"))   # not the 35% over
+        self.assertAlmostEqual(fav["blended"], 0.645)
+        text = picks_embed({"k": r}).description
+        self.assertIn("✅ Tatum Under 43.5 PRA -106 · 64%", text)       # was "Tatum -106 · —"
+        r["pick_label"], r["pick_prob"] = "Tatum Under 43.5 PRA", 0.66   # newer records: as shown when picked
+        self.assertIn("✅ Tatum Under 43.5 PRA -106 · 66%", picks_embed({"k": r}).description)
+        row = dict(zip(*[l.split(",") for l in graded_csv({"main": {"k": r}}).splitlines()]))
+        self.assertEqual((row["likelier_side"], row["value_side"], row["result"]),
+                         ("Tatum Under 43.5 PRA", "Tatum Under 43.5 PRA", "hit"))
+
+    def test_finished_games_left_ungraded_are_called_out(self):
+        from linemaker.grade_report import notes_embed
+        main = {"a": rec("A", "points", 10.5, "A", 12, 0.6, game="X @ Y"),
+                "b": rec("DNP", "points", 10.5, "pending", None, 0.6, game="X @ Y"),
+                "c": rec("Late", "points", 10.5, "pending", None, 0.6, game="C @ D")}
+        with mock.patch("linemaker.autotune.current_summary", return_value=""):
+            text = notes_embed("2026-10-22", {"main": main, "live": {}, "pp": {}}, [], 1, None).description
+        self.assertIn("Not graded yet (1 market, 1 game):** C @ D", text)
+        self.assertIn("1 market in finished games won't grade", text)
+
+
+class KeepPickedSideTest(unittest.TestCase):
+    def test_later_read_without_the_side_keeps_it(self):
+        from linemaker.pro import ProConfig, rows_to_markets, run_pro
+        from linemaker.tracking import Tracker, load_day
+        row = {"date": "2026-10-25", "sport": "NBA", "game_id": "g1", "game": "A @ H", "bet_type": "prop",
+               "subject": "P", "market": "points", "line": "20.5", "mean": "16", "stdev": "4",
+               "books": "FanDuel:+120/-140|DraftKings:+115/-135"}
+        with tempfile.TemporaryDirectory() as d:
+            run_pro(rows_to_markets([row]), "2026-10-25", ProConfig(min_gap=-1.0), None, Tracker(d, "2026-10-25"))
+            first = next(iter(load_day(d, "2026-10-25").values()))
+            self.assertTrue(first["picked"] and first["pick_side"] == "B")
+            self.assertEqual(first["pick_label"], "P Under 20.5 points")
+            later = dict(row, books="FanDuel:+130/|DraftKings:+125/")       # only the over priced now
+            run_pro(rows_to_markets([later]), "2026-10-25", ProConfig(max_picks=0), None, Tracker(d, "2026-10-25"))
+            after = next(iter(load_day(d, "2026-10-25").values()))
+        self.assertEqual([s["side"] for s in after["sides"]], ["A", "B"])   # the under's last read kept
+        self.assertEqual(after["sides"][0]["best_odds"], 130)                # the over from the new read
+        self.assertEqual(after["pick_label"], "P Under 20.5 points")
