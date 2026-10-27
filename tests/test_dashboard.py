@@ -73,3 +73,46 @@ class FreshButtonTest(unittest.TestCase):
             asyncio.run(bot._rescan(key, "fresh_scans", refresh=True)(Inter()))
         self.assertTrue(calls and calls[0]["refresh"])                   # new odds, same ask
         self.assertTrue(followups and followups[0].get("view") is not None)
+
+
+class MarketEdgesCrossSportTest(unittest.TestCase):
+    def test_scans_every_main_league(self):
+        from linemaker import bot
+        scans = [{"sport": "NHL", "kind": "props", "teams": ["Rangers"], "book": "FanDuel", "mode": "smart",
+                  "date": "2026-10-20", "game_parlay_types": []}]
+        with mock.patch.dict(os.environ, {"LINEMAKER_SPORTS": "NBA,NFL,MLB"}):
+            out = bot.cross_sport_scans(scans)
+        self.assertEqual([a["sport"] for a in out], ["NHL", "NBA", "NFL", "MLB"])   # the card's league first
+        self.assertTrue(all(a["mode"] == "market" and a["kind"] == "props" and a["book"] == "FanDuel"
+                            and a["teams"] == [] and "date" not in a for a in out))   # whole slates, today
+
+    def test_button_runs_all_leagues_and_drops_idle_ones(self):
+        import copy
+        from linemaker import bot
+        from tests.test_discord import PicksCardTest
+        res = PicksCardTest._result(None)
+        res.slate = [("Road @ Home", "2026-10-21T23:30:00Z")]
+        idle = copy.copy(res)
+        idle.slate, idle.evaluated, idle.picks = [], [], []
+        key = bot._remember({"market_scans": [{"sport": "NBA", "kind": "props", "teams": ["Knicks"], "book": None,
+                                               "mode": "smart", "date": "2026-10-21"}]})
+        calls = []
+
+        def fake_tool(helper, name, args, ctx):
+            calls.append(args)
+            ctx.setdefault("results", []).append((args["sport"], res if args["sport"] == "NBA" else idle,
+                                                  {"mode": "market", "profiles": {}}))
+        followups = []
+
+        class Inter:
+            response = NS(defer=lambda **k: asyncio.sleep(0))
+            followup = NS(send=lambda **kw: followups.append(kw) or asyncio.sleep(0))
+        with mock.patch.dict(os.environ, {"LINEMAKER_SPORTS": "NBA,NFL,MLB"}), \
+                mock.patch("linemaker.chat.LinemakerChat.run_tool", fake_tool), \
+                mock.patch("linemaker.bot.cards_for", lambda results: calls.append(
+                    [s for s, _r, _e in results]) or [([bot.discord.Embed(title="x")], None)]):
+            asyncio.run(bot._rescan(key, "market_scans", mode="market")(Inter()))
+        self.assertEqual(sorted(a["sport"] for a in calls[:-1]), ["MLB", "NBA", "NFL"])
+        self.assertTrue(all(a["mode"] == "market" and not a["teams"] for a in calls[:-1]))
+        self.assertEqual(calls[-1], ["NBA"])                                # no games today: left off
+        self.assertTrue(followups)

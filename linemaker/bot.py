@@ -922,9 +922,27 @@ def _parlay_bet_card(value: str):
     return callback
 
 
+def cross_sport_scans(scans: list) -> list:
+    """⚡ Market edges: every main league (LINEMAKER_SPORTS, plus any league the card itself
+    was on), whole slates, today, in the card's kind (props, game lines, live) and book.
+    Leagues without games today cost nothing and drop off the card."""
+    leagues = [s.strip().upper() for s in os.environ.get("LINEMAKER_SPORTS", "NBA").split(",") if s.strip()]
+    out, seen = [], set()
+    for a in scans:
+        for sport in dict.fromkeys([a["sport"]] + leagues):   # the card's league first
+            kind = "games" if sport == "UFC" and a["kind"] == "props" else a["kind"]
+            k = (sport, kind, a.get("book"))
+            if k not in seen:
+                seen.add(k)
+                out.append({"sport": sport, "kind": kind, "book": a.get("book"), "mode": "market",
+                            "teams": [], "game_parlay_types": []})
+    return out
+
+
 def _rescan(key: str, field: str, mode: Optional[str] = None, refresh: bool = False):
-    """Re-run a card's scans: ⚡ Market edges (mode=market, the odds already bought) or
-    🔄 Fresh odds (refresh: new odds, same asks). Posts the new card with the same buttons."""
+    """Re-run a card's scans: ⚡ Market edges (mode=market: every main league, on the odds
+    already bought where they're recent) or 🔄 Fresh odds (refresh: new odds, same asks).
+    Leagues run at once. Posts the new card with the same buttons."""
     async def callback(interaction: discord.Interaction):
         detail = PICK_DETAILS.get(key)
         if detail is None or field not in detail:
@@ -933,32 +951,45 @@ def _rescan(key: str, field: str, mode: Optional[str] = None, refresh: bool = Fa
             return
         await interaction.response.defer(thinking=True)
         try:
-            from .chat import LinemakerChat
+            from .chat import LinemakerChat, friendly_error
             helper = bot.chat or _TOOL_HELPER.setdefault("chat", LinemakerChat.__new__(LinemakerChat))
             if not hasattr(helper, "_feed_cache"):
                 helper._feed_cache = {}
-            _spend_as("chat asks")
+            _spend_as("market edges" if mode == "market" else "chat asks")
             ctx = {"files": [], "attached_rows": []}
-            for args in detail[field]:
+            scans = cross_sport_scans(detail[field]) if mode == "market" else detail[field]
+            errors = {}
+
+            async def one(args):
                 run = dict(args, teams=args.get("teams") or None, refresh=refresh)
                 if mode:
                     run["mode"] = mode
-                await asyncio.to_thread(LinemakerChat.run_tool, helper, "find_plays", run, ctx)
-            results = ctx.get("results") or []
+                try:
+                    await asyncio.to_thread(LinemakerChat.run_tool, helper, "find_plays", run, ctx)
+                except Exception as e:
+                    errors[args["sport"]] = friendly_error(args["sport"], e)
+            await asyncio.gather(*(one(a) for a in scans))
+            order = {a["sport"]: i for i, a in reversed(list(enumerate(scans)))}
+            results = sorted(ctx.get("results") or [], key=lambda r: order.get(r[0], 99))
+            if mode == "market":   # leagues with no games today add nothing
+                results = [r for r in results if r[1].slate or r[1].games] or results[:1]
+            note = "\n".join(errors.values())[:2000]
             if not results:
-                await interaction.followup.send("Nothing cleared the gates on this slate right now."
-                                                if mode != "market" else "No market edges found on this slate right now.")
+                await interaction.followup.send(note or ("Nothing cleared the gates on this slate right now."
+                                                         if mode != "market" else "No market edges found right now."))
                 return
             mkey, fkey = card_keys(results)
-            await _send_card(interaction.followup.send, cards_for(results), market_key=mkey, fresh_key=fkey)
+            await _send_card(interaction.followup.send, cards_for(results), text=note,
+                             market_key=mkey, fresh_key=fkey)
         except Exception as e:
             await _report_error(interaction, e)
     return callback
 
 
 def _market_rescan(key: str):
-    """⚡ Market edges: the same scan (league, team, book, live or not) in market-edge mode,
-    on the odds already bought (no extra credits inside the reuse window)."""
+    """⚡ Market edges: every main league in market-edge mode, same kind (props, game lines,
+    live) and book as the card. Odds bought in the last few minutes are reused (0 credits);
+    other leagues are bought."""
     return _rescan(key, "market_scans", mode="market")
 
 
@@ -981,7 +1012,7 @@ def _show_targets(key: str):
 
 
 MORE = (("boards", "Odds & stats", "📊", "lm:board:{}:all", "every pick's odds, hit rates, line moves, key stats"),
-        ("market", "Market edges", "⚡", "lm:mkt:{}", "the same slate against the sharp books"),
+        ("market", "Market edges", "⚡", "lm:mkt:{}", "every main league against the sharp books"),
         ("moneylines", "Moneyline parlay", "💰", "lm:mkparlay:{}", "build one from each game's moneyline"),
         ("notes", "Notes & passes", "ℹ️", "lm:notes:{}", "how this card was made, what was passed on"))
 
