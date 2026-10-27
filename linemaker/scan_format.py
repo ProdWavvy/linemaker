@@ -278,7 +278,7 @@ def books_of(results: list) -> tuple:
 
 def moneyline_pool(results: list, n: int = 25) -> list:
     """Every priced moneyline, one per game, on the side the model thinks wins (not just
-    the gated value plays), likeliest first: the legs for the Parlay moneylines button."""
+    the gated value plays), likeliest first: the legs for the Moneyline parlay button (under More)."""
     import copy
     seen, out = set(), []
     evs = [ev for res in results for ev in res.evaluated if ev.market.bet_type == "moneyline"]
@@ -373,9 +373,19 @@ def scan_messages(sections: list, date: str, cfg, title: str = "") -> list:
                      + "; ".join(gates) + "." + where)
     else:
         intro.append("**Nothing cleared every gate today.** No plays are forced.")
-    intro += [n for n in (getattr(res, "news_note", "") for _s, res, _p in sections) if n]
-    header = discord.Embed(title=f"🎯 {title} · Today's Board ({_day(date)})",
-                           description=_clip("\n\n".join(intro), 4096), color=GOLD if ranked else GREY)
+    news = [n for n in (getattr(res, "news_note", "") for _s, res, _p in sections) if n]
+    # The card leads with the result; how it was built sits behind More → Notes.
+    short = [f"**{len(ranked)} play{'s' if len(ranked) != 1 else ''}** cleared every gate · {scanned}"
+             if ranked else f"**Nothing cleared every gate** · {scanned}. No plays are forced."]
+    if live_props:
+        short.append("🔴 Live props, games in progress: check the line in the app first")
+    elif live:
+        short.append("🔴 Live, games in progress: prices move fast")
+    if market:
+        short.append("⚡ FanDuel/DraftKings prices still beating the sharp books: move fast")
+    header = discord.Embed(title=f"🎯 {title} · {_day(date)}",
+                           description=_clip("\n".join(short + news), 4096), color=GOLD if ranked else GREY)
+    how = discord.Embed(title="📖 How These Were Picked", color=GREY, description=_clip("\n\n".join(intro), 4096))
     header.set_footer(text=odds_age_note(sections))
     messages = []
     embeds = [header]
@@ -414,7 +424,7 @@ def scan_messages(sections: list, date: str, cfg, title: str = "") -> list:
                                           r == 1, ctx, hist)], detail))
 
     notes = _staking_note(ranked, by_game)
-    messages.append((([notes] if notes else []) + [_scoping(sections)], None))
+    messages.append(([how] + ([notes] if notes else []) + [_scoping(sections)], None))
     return messages
 
 
@@ -784,8 +794,19 @@ def volume_messages(sections: list, date: str, cfg, title: str = "") -> list:
         intro.append(f"🎯 **{len(edge_all)} model pick{'s' if len(edge_all) != 1 else ''}** (priced above fair by "
                      "a real edge) are marked 🎯 and get their own Edge parlays: they hit less often than "
                      "the safest legs but pay more, and they're the bot's actual picks.")
-    header = discord.Embed(title=f"🎰 {title} · Today's Board ({_day(date)})",
-                           color=GOLD if legs or edge_all else GREY, description="\n\n".join(intro))
+    where = ", ".join(_scope(sp, res) for sp, res, _e in sections)
+    count = len(legs) + len(extra)
+    short = [(f"**{count} leg{'s' if count != 1 else ''}**" + (f" · 🎯 {len(edge_all)} model pick"
+              f"{'s' if len(edge_all) != 1 else ''}" if edge_all else "") + f" · {where}") if count
+             else f"**No legs cleared the bars** · {where}"]
+    short.append(f"Legs {fmt_odds(cfg.min_odds)} to {fmt_odds(effective_max_odds(cfg))} · "
+                 f"{cfg.min_prob:.0%}+ to hit" + (" · 🎯 Edge parlays first" if edge_all else ""))
+    if not count:
+        short.append("Games already under way are left out: ask for a live ML parlay for those." if ml
+                     else "Try again closer to game time.")
+    header = discord.Embed(title=f"🎰 {title} · {_day(date)}",
+                           color=GOLD if legs or edge_all else GREY, description="\n".join(short))
+    how = discord.Embed(title="📖 How These Parlays Were Built", color=GREY, description=_clip("\n\n".join(intro), 4096))
     news = [getattr(res, "news_note", "") for _s, res, _e in sections]
     if any(news):
         header.description += "\n\n" + "\n".join(n for n in news if n)
@@ -813,7 +834,7 @@ def volume_messages(sections: list, date: str, cfg, title: str = "") -> list:
         board.set_footer(text="Bold % = our hit chance (calibrated to past results) · EV = value at the "
                               "best price · season = hit rate at this line · one leg per player · "
                               "🎯 = a model pick (priced above fair)")
-        # The legs behind the board, so "Build my own parlay" can use any of them.
+        # The legs behind the board, so "Build a parlay" can use any of them.
         out.append(([board], {"legs": [{"rank": i, "ev": ev, "profile": profiles.get(ev.market.key)}
                                        for i, ev in enumerate(legs, 1)],
                               "books": books}))
@@ -846,7 +867,7 @@ def volume_messages(sections: list, date: str, cfg, title: str = "") -> list:
                 f"\n\n**{len(legs)} leg{' only' if len(legs) == 1 else 's'}, no parlay:** "
                 + ("one leg can't make a parlay. " if len(legs) == 1 else
                    "these legs can't go on one ticket together (same game / same player). ")
-                + "Bet a leg straight from 🧾 below, or ask again in a few minutes as prices move.")
+                + "Pick a leg from the menu below to bet it straight, or ask again in a few minutes as prices move.")
         from .parlay_math import leg_value
         try:
             from .parlay_track import log_parlays
@@ -890,7 +911,7 @@ def volume_messages(sections: list, date: str, cfg, title: str = "") -> list:
         "pay more and are +EV, but hit less often. Small stakes either way; fewer legs is safer.\n\n"
         "Hit chances on same-game legs account for them moving together (a shootout lifts "
         "every over at once). Legs from different games can still move together on late news."))
-    out.append(([notes, _scoping([(s, r, ex["profiles"]) for s, r, ex in sections])], None))
+    out.append(([how, notes, _scoping([(s, r, ex["profiles"]) for s, r, ex in sections])], None))
     return out
 
 

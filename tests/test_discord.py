@@ -167,7 +167,7 @@ class ScanFormatTest(unittest.TestCase):
         }
         embeds = scan_embeds([("NBA", res, profiles)], "2026-10-21", ProConfig(track=False))
         titles = [e.title for e in embeds]
-        self.assertTrue(titles[0].startswith("🎯 NBA Value Scan · Today's Board (Oct 21, 2026)"))
+        self.assertTrue(titles[0].startswith("🎯 NBA Value Scan · Oct 21, 2026"))
         self.assertIn("📊 The Board, Ranked by Probability Gap", titles)
         self.assertNotIn("🧠 How to Think About These Long-Term", titles)   # lives in /tips now
         self.assertIn("📌 Staking Note", titles)
@@ -241,15 +241,28 @@ class ButtonPagesTest(unittest.TestCase):
         self.assertIn("estimated defensive rating of 115.0", body)
         self.assertIn("FanDuel opened at -105 on the first scan and is -110 now", body)
 
-    def test_view_has_four_buttons(self):
+    def test_view_has_one_stats_button(self):
         import asyncio
+        from types import SimpleNamespace as NS
+        from linemaker import bot
         from linemaker.bot import PickView
+        res = PicksCardTest()._result()
+        key = bot._remember({"rank": 1, "ev": res.picks[0], "profile": None, "history": None})
 
         async def build():
-            return PickView("abc")
-        view = asyncio.run(build())
-        self.assertEqual([c.label for c in view.children],
-                         ["Odds Comparison", "Hit Rate Chart", "Line Movement", "Key Stats"])
+            return PickView("abc"), PickView(key, bot.PICK_DETAILS[key])
+        bare, view = asyncio.run(build())
+        self.assertEqual([c.label for c in bare.children], ["Stats"])
+        self.assertEqual([c.label for c in view.children], ["I bet this", "Stats"])
+        self.assertEqual({c.row for c in view.children}, {1})            # one row
+
+        class Resp:
+            async def send_message(self, **kw):
+                self.sent = kw
+        it = NS(data={"custom_id": f"lm:pages:{key}"}, response=Resp())
+        self.assertTrue(asyncio.run(bot.route_component(it)))
+        self.assertEqual([e.title.split(" · ")[0] for e in it.response.sent["embeds"]],
+                         ["🏷️ Odds Comparison", "📊 Hit Rate Chart", "📉 Line Movement", "📈 Key Stats"])
 
 
 @unittest.skipIf(discord is None, "discord.py not installed")

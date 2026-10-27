@@ -14,6 +14,16 @@ def total(embeds):
     return sum(_embed_len(e) for e in embeds)
 
 
+def more_buttons(view):
+    """The buttons behind a card's 📂 More."""
+    from linemaker import bot
+    btn = next(c for c in view.children if str(getattr(c, "custom_id", "")).startswith("lm:more:"))
+
+    async def build():
+        return bot.more_view(bot.PICK_DETAILS[btn.custom_id.split(":")[2]]["more"])[1]
+    return asyncio.run(build()).children
+
+
 class CompactCardTest(unittest.TestCase):
     def setUp(self):
         self.res = PicksCardTest._result(None)
@@ -35,7 +45,8 @@ class CompactCardTest(unittest.TestCase):
         select = next(c for c in view.children if hasattr(c, "options"))
         self.assertEqual(len(select.options), len(self.res.picks))
         self.assertIn("hit", select.options[0].description)
-        self.assertTrue(any(getattr(c, "label", "") == "Notes & passes" for c in view.children))
+        self.assertTrue(any(getattr(c, "label", "") == "Notes & passes" for c in more_buttons(view)))
+        self.assertLessEqual(len({c.row for c in view.children}), 3)       # menu + parlay menu + one button row
         # the dropdown opens the full write-up
         detail = bot.PICK_DETAILS[select.options[0].value]
         self.assertTrue(detail["embed"]["title"].startswith("1. "))
@@ -70,12 +81,12 @@ class CompactCardTest(unittest.TestCase):
         key = bot._remember({"market_scans": [{"sport": "NBA", "kind": "props", "teams": ["Knicks"],
                                                 "book": None, "mode": "smart", "date": "2026-10-21"}]})
         asyncio.run(bot._send_card(send, messages, market_key=key))
-        ids = [getattr(c, "custom_id", "") for c in sent[0]["view"].children]
-        self.assertIn(f"lm:mkt:{key}", ids)
+        ids = [getattr(c, "custom_id", "") for c in more_buttons(sent[0]["view"])]
+        self.assertIn(f"lm:mkt:{key}", ids)                         # behind 📂 More
         sent.clear()
         asyncio.run(bot._send_card(send, messages))                # no key: no button
         self.assertFalse(any(str(getattr(c, "custom_id", "")).startswith("lm:mkt:")
-                             for c in sent[0]["view"].children))
+                             for c in more_buttons(sent[0]["view"])))
 
     def test_volume_card_keeps_parlays_and_buttons(self):
         from linemaker import bot
@@ -103,10 +114,13 @@ class CompactCardTest(unittest.TestCase):
         self.assertTrue(menu.options[0].label.startswith("#1 · "))               # same numbers in the menu
         self.assertEqual(menu.row, 1)
         rows = {getattr(c, "label", None): c.row for c in view.children if getattr(c, "label", None)}
-        self.assertEqual(rows.get("Odds"), 3)                                     # views always on row 3
-        self.assertEqual(rows.get("Safest by payout"), 4)                         # tools always on row 4
+        self.assertEqual(rows.get("Safest by payout"), 4)                         # the one button row, last
+        self.assertEqual(sorted(l for l, r in rows.items() if r == 4),
+                         ["Build a parlay", "More", "Safest by payout"])
+        self.assertFalse(any(str(getattr(c, "custom_id", "")).startswith("lm:betgo:") for c in view.children))
+        self.assertIn("Odds & stats", [c.label for c in more_buttons(view)])
         self.assertTrue(any(e.title == "✅ High-Hit-Rate Legs" for e in embeds))     # the board stays
-        build = next(c for c in view.children if getattr(c, "label", "") == "Build my own parlay")
+        build = next(c for c in view.children if getattr(c, "label", "") == "Build a parlay")
         from linemaker import bot as _bot
         pool = _bot.PICK_DETAILS[build.custom_id.split(":")[2]]["picks"]
         self.assertEqual(len(pool), len(res.picks))                  # every leg, not just 2-4
@@ -170,7 +184,7 @@ class ParlayButtonTest(unittest.TestCase):
                                                               for i, ev in enumerate(legs, 1)]}))[1]
             return card, embed, view, picker
         (embeds, cview), embed, view, picker = asyncio.run(build())
-        self.assertTrue(any(getattr(c, "label", "") == "Turn into parlay" for c in cview.children))
+        self.assertTrue(any(getattr(c, "label", "") == "Build a parlay" for c in cview.children))
         self.assertEqual(embed.title, "🎰 Your 3-Leg Parlay")
         self.assertEqual([f.name.split(" · ")[0] for f in embed.fields], ["🟦 FanDuel", "🟩 DraftKings"])
         self.assertRegex(embed.fields[0].name, r"· \d+% hit")              # odds and hit chance up top
@@ -222,8 +236,13 @@ class RestartTest(unittest.TestCase):
             async def press():
                 ok = await bot.route_component(Inter(select.custom_id, [select.options[0].value]))
                 for cid in ids:
-                    if cid.startswith(("lm:notes:", "lm:mkparlay:")):
+                    if cid.startswith(("lm:more:", "lm:mkparlay:")):
                         await bot.route_component(Inter(cid))
+                more = next(kw["view"] for kw in sent if kw.get("view") and any(
+                    str(getattr(c, "custom_id", "")).startswith("lm:notes:") for c in kw["view"].children))
+                for c in more.children:
+                    if c.custom_id.startswith("lm:notes:"):
+                        await bot.route_component(Inter(c.custom_id))
                 return ok
             self.assertTrue(asyncio.run(press()))
         self.assertTrue(sent[0]["embed"].title.startswith("1. "))      # the pick write-up
@@ -297,7 +316,7 @@ class MoneylineParlayTest(unittest.TestCase):
         async def build():
             return bot.compact_card(msgs)
         _embeds, view = asyncio.run(build())
-        btn = next(c for c in view.children if getattr(c, "label", "") == "Parlay moneylines")
+        btn = next(c for c in more_buttons(view) if getattr(c, "label", "") == "Moneyline parlay")
         pool = bot.PICK_DETAILS[btn.custom_id.split(":")[2]]["picks"]
         self.assertEqual(len(pool), len(games))          # one per game
         for d in pool:                                   # the side the model thinks wins
@@ -393,18 +412,22 @@ class LiveSlipTest(unittest.TestCase):
         self.assertEqual(e.title, "🎰 Your 2-Leg Parlay · live slip")
         self.assertFalse(btn(v, ":t0").label.startswith("✅"))
         boards = [c for c in v.children if ":sboard:" in (c.custom_id or "")]
-        self.assertEqual([b.label for b in boards], ["Odds", "Hit Rates", "Line Moves", "Key Stats"])
+        self.assertEqual([b.label for b in boards], ["Leg stats"])          # one button, every view
+        self.assertFalse(any((c.custom_id or "").endswith(":all") and ":slip:" in c.custom_id for c in v.children))
+        self.assertLessEqual(len({c.row for c in v.children}), 4)
 
         class R2:
             async def send_message(self, **kw):
                 self.sent = kw
         it = NS(data={"custom_id": boards[0].custom_id}, response=R2())
         self.assertTrue(asyncio.run(bot.route_component(it)))
-        self.assertEqual(it.response.sent["embed"].title, "🏷️ Odds, Your 2-Leg Slip")
-        self.assertEqual(it.response.sent["embed"].description.count("\n"), 2 + 2)
+        sent = it.response.sent["embeds"]
+        self.assertEqual(len(sent), 4)                                      # odds, hit rates, moves, stats
+        self.assertEqual(sent[0].title, "🏷️ Odds, Your 2-Leg Slip")
+        self.assertEqual(sent[0].description.count("\n"), 2 + 2)
         e, v = tap(btn(v, ":clr").custom_id)
         self.assertFalse(any(":sboard:" in (c.custom_id or "") for c in v.children))
-        self.assertIn("Tap legs below", e.description)
+        self.assertIn("Tap legs to add them", e.description)
         self.assertTrue(all(len(c.custom_id or "") <= 100 and len(c.label or "") <= 80 for c in v.children))
 
     def test_pages_for_25_legs(self):
@@ -437,12 +460,12 @@ class BoardButtonsTest(unittest.TestCase):
                                                                     "history": None})
                                      for i, ev in enumerate(legs, 1)])
         _embeds, view = asyncio.run(build())
-        boards = [c for c in view.children if ":board:" in (getattr(c, "custom_id", "") or "")]
-        self.assertEqual([b.label for b in boards], ["Odds", "Hit Rates", "Line Moves", "Key Stats"])
-        for b in boards:
-            it = NS(data={"custom_id": b.custom_id}, response=Resp())
-            self.assertTrue(asyncio.run(bot.route_component(it)))
-            embed = it.response.sent["embed"]
+        boards = [c for c in more_buttons(view) if ":board:" in (getattr(c, "custom_id", "") or "")]
+        self.assertEqual([b.label for b in boards], ["Odds & stats"])
+        it = NS(data={"custom_id": boards[0].custom_id}, response=Resp())
+        self.assertTrue(asyncio.run(bot.route_component(it)))
+        self.assertEqual(len(it.response.sent["embeds"]), 4)
+        for embed in it.response.sent["embeds"]:
             self.assertIn("Every Pick", embed.title)
             self.assertEqual(embed.description.count("\n"), len(legs) + 2)   # header + one row per pick
 
@@ -552,7 +575,7 @@ class BetDropdownTest(unittest.TestCase):
         n = sum(len(bot.PICK_DETAILS[k]["parlays"]) for k in keys)
         self.assertEqual(len(select.options), n)                          # every parlay on the card
         self.assertGreaterEqual(n, 6)
-        self.assertTrue(any(str(getattr(c, "custom_id", "")).startswith("lm:betgo:") for c in view.children))
+        self.assertLessEqual(len({c.row for c in view.children}), 3)      # betting is in the parlay menu
 
         async def open_one():
             return bot.parlay_card([ev for ev, _o in bot.PICK_DETAILS[select.options[0].value.rsplit(":", 1)[0]]
@@ -594,7 +617,7 @@ class OneLegVolumeTest(unittest.TestCase):
             return bot.compact_card(msgs)
         embeds, view = asyncio.run(build())
         self.assertIn("no parlay", embeds[0].description)
-        sel = next(c for c in view.children if getattr(c, "placeholder", "") and "Bet a leg" in c.placeholder)
+        sel = next(c for c in view.children if getattr(c, "placeholder", "") and "Pick a leg" in c.placeholder)
         detail = bot.PICK_DETAILS[sel.options[0].value]
 
         async def open_leg():

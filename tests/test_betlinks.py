@@ -94,7 +94,7 @@ class BetLinksTest(unittest.TestCase):
         pick, slip = asyncio.run(build())
         urls = [c.url for c in pick.children if getattr(c, "url", None)]
         self.assertEqual(urls, ["https://x.test/a"])
-        self.assertEqual(len(pick.children), 2 + len(bot.BUTTONS))   # link + "I bet this" + info
+        self.assertEqual([c.label for c in pick.children], ["Bet on FanDuel", "I bet this", "Stats"])   # one row
         self.assertEqual([c.label for c in slip.children], ["2-leg on DraftKings"])
 
 

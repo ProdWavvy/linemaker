@@ -18,11 +18,11 @@ ASKS = [
                      "reusing ones from the last few minutes"),
 ]
 ROWS = [
-    "**Row 1** 🔎 See a pick / 🧾 Bet a leg: write-up, Bet, I bet this",
-    "**Row 2** 🧾 Bet a parlay: every parlay on the card, #1, #2 …",
-    "**Row 3** Bet #1 · Bet #2 …: logs it, then opens the slip (↩️ Undo if you don't place it)",
-    "**Row 4** 🏷️ Odds · 📊 Hit Rates · 📉 Line Moves · 📈 Key Stats · 🔄 Fresh odds",
-    "**Row 5** 🎯 Safest by payout · 🎰 Build my own parlay · 💰 Parlay moneylines · ⚡ Market edges · ℹ️ Notes",
+    "**Menu 1** 🔎 Pick a play / leg: its write-up, Bet button and I bet this",
+    "**Menu 2** 🎰 Pick a parlay #1, #2 …: **Bet** logs it and opens the slip (↩️ Undo if you don't place it)",
+    "**Buttons** 🎯 Safest by payout · 🎰 Build a parlay · 🔄 Fresh odds · 📂 More",
+    "**📂 More** 📊 Odds & stats · ⚡ Market edges · 💰 Moneyline parlay · ℹ️ Notes & passes",
+    "**🎰 Build a parlay** tap legs or ➕ Best next leg · 🚀 Boost · Bet · 📊 Leg stats",
 ]
 COMMANDS = [
     ("💰 Money", "`/bankroll` stakes as a share of what you have · `/paper` practice bets · "
@@ -41,7 +41,7 @@ def help_embed() -> discord.Embed:
                       description="Just type in this channel. A few examples:")
     for name, value in ASKS:
         e.add_field(name=name, value=value, inline=False)
-    e.add_field(name="🔘 Buttons on every card (same rows every time)", value="\n".join(ROWS), inline=False)
+    e.add_field(name="🔘 Every card: two menus and one row of buttons", value="\n".join(ROWS), inline=False)
     for name, value in COMMANDS:
         e.add_field(name=name, value=value, inline=False)
     e.set_footer(text=LEGEND)

@@ -13,7 +13,7 @@ class DashboardTest(unittest.TestCase):
         e = help_embed()
         self.assertLessEqual(_embed_len(e), 6000)
         self.assertTrue(all(len(f.value) <= 1024 for f in e.fields))
-        self.assertIn("Bet a parlay", "\n".join(f.value for f in e.fields))
+        self.assertIn("Pick a parlay", "\n".join(f.value for f in e.fields))
 
     def test_today_with_nothing_set(self):
         from linemaker.dashboard import today_embed
