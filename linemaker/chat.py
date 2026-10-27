@@ -395,7 +395,8 @@ class LinemakerChat:
                 from .pp import select_legs
                 res.picks = select_legs(res.picks, cfg.pp_floor)
             if mode == "volume" and kind != "pp":
-                res.edge_legs = edge_legs(rows, date, kind, cfg, game_types)
+                res.edge_legs = edge_legs(rows, date, kind, cfg, game_types,
+                                          {ev.market.key: ev.sim for ev in res.evaluated})
             res.slate = slate
             res.focus = " vs ".join(focus) if focus else ""
             res.source_warning = warning
@@ -404,7 +405,7 @@ class LinemakerChat:
             res.odds_age = slate_age_minutes(sport, date, kind)
             res.news_note = news_note(sport, date, {norm(ev.market.game) for ev in res.picks})
             res.scan_args = {"sport": sport, "kind": kind, "teams": focus, "book": book, "mode": mode,
-                             "date": date}
+                             "date": date, "game_parlay_types": game_types}
             extras = enrich(res, sport, date, cfg.min_prob if mode == "volume" else None)
             extras["mode"] = mode
             from .scan_format import pass_counts
@@ -483,6 +484,10 @@ class LinemakerChat:
         history = self.history[channel_id]
         system = f"{SYSTEM}\n\nToday is {_today()} ({_tz().key})."
         quick = None if attached_csv else quick_plays_request(text)
+        from .dashboard import HELP_WORDS
+        if not attached_csv and text.strip().lower() in HELP_WORDS:
+            reply = "HELP"   # the bot posts the /help card for this reply
+            return Turn(reply, ctx["files"], [])
         if not attached_csv and TIPS_WORDS.fullmatch(text.strip()):
             from .scan_format import TIPS
             reply = "**🧠 How to Think About These Long-Term**\n\n" + "\n\n".join(TIPS)
@@ -843,7 +848,7 @@ def drop_slate(sport: str, date: str, kind: str = "props"):
         pass
 
 
-def edge_legs(rows: list, date: str, kind: str, cfg, game_types=None) -> list:
+def edge_legs(rows: list, date: str, kind: str, cfg, game_types=None, sims: Optional[dict] = None) -> list:
     """The model's own picks on the same odds (no extra credits): legs priced above fair by
     a real edge, for the 🎯 Edge parlays next to the high-hit-rate ones. Not tracked again
     (the parlay mode's run already logged every market)."""
@@ -853,7 +858,7 @@ def edge_legs(rows: list, date: str, kind: str, cfg, game_types=None) -> list:
         from .live import live_settings
         ecfg, _t = live_settings(ecfg, date)
     try:
-        picks = run_pro(rows_to_markets(rows), date, ecfg).picks
+        picks = run_pro(rows_to_markets(rows), date, ecfg, sims=sims).picks
     except Exception as e:
         log.warning("edge legs: %s", e)
         return []

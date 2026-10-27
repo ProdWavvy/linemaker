@@ -881,6 +881,8 @@ def volume_messages(sections: list, date: str, cfg, title: str = "") -> list:
                 links = [(f"{len(p.legs)}-leg on {bname}", url)] if url else []
                 out.append(([e], {"links": links, "parlays": [p]}))
     notes = discord.Embed(title="🧠 Volume Mode, Honestly", color=PURPLE, description=(
+        "🎯 Edge parlays are the model's own picks (each leg priced above fair): the only ones "
+        "built for long-run profit; they hit less often and pay more. "
         "🔒 parlays are built to **hit often**, not because the price is wrong. Parlaying "
         "heavy favorites multiplies the book's margin on every leg, so they're usually slightly "
         "negative EV even when each leg is likely; legs priced 2%+ worse than fair are left out "

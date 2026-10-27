@@ -154,6 +154,11 @@ async def route_component(interaction: discord.Interaction) -> bool:
         handler = _show_targets(key)
     elif kind == "mkt":
         handler = _market_rescan(key)
+    elif kind == "mybet":   # /bets menu: the chosen bet's change / undo buttons
+        values = (interaction.data or {}).get("values") or [key]
+        handler = _my_bet(values[0])
+    elif kind == "fresh":   # 🔄 the same asks with new odds
+        handler = _rescan(key, "fresh_scans", refresh=True)
     elif kind == "betgo":
         handler = _bet_go(key, int(parts[3]) if len(parts) > 3 else 0)
     elif kind == "restake":
@@ -727,7 +732,7 @@ PARLAY_BOOKS = ("FanDuel", "DraftKings")
 
 def parlay_card(legs: list, books: Optional[tuple] = None, boost: float = 0.0) -> tuple:
     """(embed, view) for a parlay you built: price, payout and hit chance at each book,
-    with Bet buttons that load every leg and Log buttons. boost: a profit boost (0.25 = +25%)."""
+    with Bet buttons (log it, then open the slip with every leg). boost: a profit boost (0.25 = +25%)."""
     from .betlinks import parlay_link
     from .odds import fmt_odds as _fo
     from .parlay import custom_parlays, leg_price, sgp_check
@@ -906,12 +911,12 @@ def _parlay_bet_card(value: str):
     return callback
 
 
-def _market_rescan(key: str):
-    """⚡ Market edges: the same scan (league, team, book, live or not) in market-edge mode,
-    on the odds already bought (no extra credits inside the reuse window)."""
+def _rescan(key: str, field: str, mode: Optional[str] = None, refresh: bool = False):
+    """Re-run a card's scans: ⚡ Market edges (mode=market, the odds already bought) or
+    🔄 Fresh odds (refresh: new odds, same asks). Posts the new card with the same buttons."""
     async def callback(interaction: discord.Interaction):
         detail = PICK_DETAILS.get(key)
-        if detail is None or "market_scans" not in detail:
+        if detail is None or field not in detail:
             await interaction.response.send_message("This card is too old. Ask again for fresh picks.",
                                                     ephemeral=True)
             return
@@ -921,22 +926,29 @@ def _market_rescan(key: str):
             helper = bot.chat or _TOOL_HELPER.setdefault("chat", LinemakerChat.__new__(LinemakerChat))
             if not hasattr(helper, "_feed_cache"):
                 helper._feed_cache = {}
+            _spend_as("chat asks")
             ctx = {"files": [], "attached_rows": []}
-            for args in detail["market_scans"]:
-                await asyncio.to_thread(LinemakerChat.run_tool, helper, "find_plays",
-                                        dict(args, mode="market", teams=args.get("teams") or None), ctx)
+            for args in detail[field]:
+                run = dict(args, teams=args.get("teams") or None, refresh=refresh)
+                if mode:
+                    run["mode"] = mode
+                await asyncio.to_thread(LinemakerChat.run_tool, helper, "find_plays", run, ctx)
             results = ctx.get("results") or []
             if not results:
-                await interaction.followup.send("No market edges found on this slate right now.")
+                await interaction.followup.send("Nothing cleared the gates on this slate right now."
+                                                if mode != "market" else "No market edges found on this slate right now.")
                 return
-            from .pro import market_config
-            messages = scan_messages(results, today(), market_config())
-            embeds, view = compact_card(messages)
-            await interaction.followup.send(embeds=embeds, view=view)
-            await asyncio.to_thread(save_details)
+            mkey, fkey = card_keys(results)
+            await _send_card(interaction.followup.send, cards_for(results), market_key=mkey, fresh_key=fkey)
         except Exception as e:
             await _report_error(interaction, e)
     return callback
+
+
+def _market_rescan(key: str):
+    """⚡ Market edges: the same scan (league, team, book, live or not) in market-edge mode,
+    on the odds already bought (no extra credits inside the reuse window)."""
+    return _rescan(key, "market_scans", mode="market")
 
 
 def _show_targets(key: str):
@@ -1129,7 +1141,7 @@ def _slip_tap(key: str, mask: str, page: str, action: str, boost: str = "0"):
 
 
 async def _send_card(send, messages: list, markdown=None, filename=None, text: str = "",
-                     market_key: Optional[str] = None):
+                     market_key: Optional[str] = None, fresh_key: Optional[str] = None):
     """Post a value scan. Compact (default): one message with a pick dropdown. Full: header
     and board, then one message per pick with its buttons, then the notes. Plain embed
     lists are posted as-is."""
@@ -1142,6 +1154,12 @@ async def _send_card(send, messages: list, markdown=None, filename=None, text: s
                 view.add_item(discord.ui.Button(label="Market edges", emoji="⚡", row=4,
                                                 style=discord.ButtonStyle.secondary,
                                                 custom_id=f"lm:mkt:{market_key}"))
+            if fresh_key:   # same ask, new odds (uses credits): with the views, else with the tools
+                row = next((r for r in (3, 4) if sum(1 for c in view.children if c.row == r) < 5), None)
+                if row is not None:
+                    view.add_item(discord.ui.Button(label="Fresh odds", emoji="🔄", row=row,
+                                                    style=discord.ButtonStyle.secondary,
+                                                    custom_id=f"lm:fresh:{fresh_key}"))
             return embeds, view
         embeds, view = build()
         try:
@@ -1435,26 +1453,13 @@ class LinemakerBot(discord.Client):
 
     async def _send_turn(self, message: discord.Message, turn):
         from .chat import split_for_discord
+        if turn.text == "HELP" and not turn.results:   # "help" typed in the channel
+            from .dashboard import help_embed
+            await message.reply(embed=help_embed(), allowed_mentions=discord.AllowedMentions.none())
+            return
         chunks = split_for_discord(turn.text)
         files = [discord.File(io.BytesIO(md.encode()), filename=name) for name, md in turn.files]
-        cards = []
-        if turn.results:
-            if all(getattr(r, "kind", "") == "pp" for _s, r, _ex in turn.results):
-                from .scan_format import pp_messages
-                cards = pp_messages(turn.results, today())
-            elif all((ex or {}).get("mode") == "volume" for _s, _r, ex in turn.results):
-                from .pro import volume_config
-                from .scan_format import volume_messages
-                vcfg = volume_config()
-                if all(getattr(r, "ml_only", False) for _s, r, _e in turn.results):
-                    from .pro import ml_parlay_config
-                    vcfg = ml_parlay_config(turn.results[0][1].game_types)
-                if all(getattr(r, "kind", "") == "live" for _s, r, _e in turn.results):
-                    from .live import live_parlay_gates
-                    live_parlay_gates(vcfg)
-                cards = volume_messages(turn.results, today(), vcfg)
-            else:
-                cards = scan_messages(turn.results, today(), ProConfig())
+        cards = cards_for(turn.results)
         none = discord.AllowedMentions.none()
         # A short reply (the "I'll re-check before tip" note) rides on the card itself.
         inline = cards and not files and card_style() == "compact" and len(chunks) <= 1
@@ -1471,11 +1476,41 @@ class LinemakerBot(discord.Client):
                 fn = message.reply if first else message.channel.send
                 first = False
                 return await fn(allowed_mentions=none, **kw)
-            scans = [r.scan_args for _s, r, _ex in turn.results
-                     if getattr(r, "scan_args", None) and r.scan_args["mode"] != "market"
-                     and r.scan_args["kind"] != "pp"]
-            mkey = _remember({"market_scans": scans}) if scans else None
-            await _send_card(send_cards, cards, text=chunks[0] if inline and chunks else "", market_key=mkey)
+            mkey, fkey = card_keys(turn.results)
+            await _send_card(send_cards, cards, text=chunks[0] if inline and chunks else "",
+                             market_key=mkey, fresh_key=fkey)
+
+
+def cards_for(results: list) -> list:
+    """The card messages for a turn's scan results: PrizePicks, parlay (volume) or picks."""
+    if not results:
+        return []
+    if all(getattr(r, "kind", "") == "pp" for _s, r, _ex in results):
+        from .scan_format import pp_messages
+        return pp_messages(results, today())
+    if all((ex or {}).get("mode") == "volume" for _s, _r, ex in results):
+        from .pro import volume_config
+        from .scan_format import volume_messages
+        vcfg = volume_config()
+        if all(getattr(r, "ml_only", False) for _s, r, _e in results):
+            from .pro import ml_parlay_config
+            vcfg = ml_parlay_config(results[0][1].game_types)
+        if all(getattr(r, "kind", "") == "live" for _s, r, _e in results):
+            from .live import live_parlay_gates
+            live_parlay_gates(vcfg)
+        return volume_messages(results, today(), vcfg)
+    if all((ex or {}).get("mode") == "market" for _s, _r, ex in results):
+        from .pro import market_config
+        return scan_messages(results, today(), market_config())
+    return scan_messages(results, today(), ProConfig())
+
+
+def card_keys(results: list) -> tuple:
+    """(market-edges key, fresh-odds key) for a card's buttons: the scans behind it."""
+    scans = [r.scan_args for _s, r, _ex in results if getattr(r, "scan_args", None)]
+    edges = [a for a in scans if a["mode"] != "market" and a["kind"] != "pp"]
+    return (_remember({"market_scans": edges}) if edges else None,
+            _remember({"fresh_scans": scans}) if scans else None)
 
 
 bot = LinemakerBot()
@@ -1665,6 +1700,7 @@ async def record_cmd(interaction: discord.Interaction, days: Optional[int] = 30,
     await interaction.response.defer(thinking=True)
     try:
         from .bets import settle, summary
+        from .staking import _money
         await asyncio.to_thread(settle)
         s = await asyncio.to_thread(summary, days or None, today(), practice)
         span = (f"last {days} days" if days else "all time") + (" · 🧪 practice bets" if practice else "")
@@ -1686,9 +1722,9 @@ async def record_cmd(interaction: discord.Interaction, days: Optional[int] = 30,
             for b in sorted(s["settled"], key=lambda b: b.get("settled", ""), reverse=True)[:8]:
                 mark = {"won": "✅", "lost": "❌", "push": "➖"}[b["status"]]
                 what = b["legs"][0]["label"] if b["kind"] == "single" else f"{len(b['legs'])}-leg parlay"
-                lines.append(f"{mark} {what} {fmt_odds(b['odds'])} · ${b['stake']:,.0f} → {fmt_money(b.get('profit', 0))}")
+                lines.append(f"{mark} {what} {fmt_odds(b['odds'])} · {_money(b['stake'])} → {fmt_money(b.get('profit', 0))}")
         else:
-            lines.append("No settled bets yet. Tap **📝 I bet this** on a pick (or **Log parlay**) "
+            lines.append("No settled bets yet. Tap **Bet** on a parlay (it logs it for you) or **📝 I bet this** on a pick "
                          "after you place it, and it settles automatically after grading.")
         from .bets import clv_summary
         c = await asyncio.to_thread(clv_summary, days or None, today())
@@ -1699,12 +1735,74 @@ async def record_cmd(interaction: discord.Interaction, days: Optional[int] = 30,
         if s["open"]:
             lines += ["", f"**Open ({len(s['open'])}):** " + "; ".join(
                 (b["legs"][0]["label"] if b["kind"] == "single" else f"{len(b['legs'])}-leg parlay")
-                + f" ${b['stake']:,.0f}" for b in s["open"][:10])]
+                + f" {_money(b['stake'])}" for b in s["open"][:10])]
         embed = discord.Embed(title=f"🧾 Your Bets · {span}", description="\n".join(lines)[:4000],
                               color=0x2ECC71 if s["profit"] >= 0 else 0xE74C3C)
         await interaction.followup.send(embed=embed)
     except Exception as e:
         await _report_error(interaction, e)
+
+
+@bot.tree.command(name="help", description="What to ask, what the buttons do, and every command")
+async def help_cmd(interaction: discord.Interaction):
+    from .dashboard import help_embed
+    await interaction.response.send_message(embed=help_embed(), ephemeral=True)
+
+
+@bot.tree.command(name="today", description="Today at a glance: bankroll, open bets, credits, injury news")
+async def today_cmd(interaction: discord.Interaction):
+    from .dashboard import today_embed
+    try:
+        await interaction.response.send_message(embed=await asyncio.to_thread(today_embed, today()), ephemeral=True)
+    except Exception as e:
+        await _report_error(interaction, e)
+
+
+@bot.tree.command(name="bets", description="Your open bets: change the stake or odds, or undo one")
+async def bets_cmd(interaction: discord.Interaction):
+    from .bets import load_bets
+    from .staking import _money
+    open_ = [b for b in load_bets() if b.get("status") == "open"]
+    if not open_:
+        await interaction.response.send_message("No open bets. Bets you log with **Bet** or **I bet this** "
+                                                "show up here until they settle.", ephemeral=True)
+        return
+    open_.sort(key=lambda b: b.get("placed", ""), reverse=True)
+
+    def what(b):
+        return b["legs"][0]["label"] if b["kind"] == "single" else f"{len(b['legs'])}-leg parlay"
+    lines = [f"{'🧪 ' if b.get('paper') else ''}**{what(b)}** {fmt_odds(b['odds'])} · {_money(b['stake'])} · "
+             f"{b.get('book', '')} · {b.get('placed', '')[5:16].replace('T', ' ')}" for b in open_[:15]]
+    embed = discord.Embed(title=f"🧾 Open Bets ({len(open_)})", color=0x2ECC71, description="\n".join(lines)[:4000])
+    embed.set_footer(text="🧪 = practice bet · pick one below to change its stake / odds or undo it")
+    view = discord.ui.View(timeout=None)
+    options = [discord.SelectOption(label=f"{what(b)} {fmt_odds(b['odds'])} · {_money(b['stake'])}"[:100],
+                                    description=(", ".join(l.get("label", "") for l in b["legs"]))[:100] or None,
+                                    value=b["id"]) for b in open_[:25]]
+    view.add_item(discord.ui.Select(placeholder="Pick a bet to change or undo", options=options,
+                                    custom_id=f"lm:mybet:{options[0].value}"))
+    await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
+
+
+def _my_bet(bet_id: str):
+    async def callback(interaction: discord.Interaction):
+        from .bets import load_bets
+        from .staking import _money
+        bet = next((b for b in load_bets() if b["id"] == bet_id), None)
+        if bet is None or bet.get("status") != "open":
+            await interaction.response.send_message("That bet is settled or no longer logged.", ephemeral=True)
+            return
+        legs = "\n".join(f"• {l.get('label', '')} ({fmt_odds(l['odds'])})" if l.get("odds") is not None
+                         else f"• {l.get('label', '')}" for l in bet["legs"])
+        view = discord.ui.View(timeout=None)
+        view.add_item(discord.ui.Button(label="Change stake / odds", emoji="✏️", style=discord.ButtonStyle.secondary,
+                                        custom_id=f"lm:restake:{bet_id}"))
+        view.add_item(discord.ui.Button(label="Undo (didn't place it)", emoji="↩️", style=discord.ButtonStyle.danger,
+                                        custom_id=f"lm:unlog:{bet_id}"))
+        await interaction.response.send_message(
+            f"{'🧪 Practice · ' if bet.get('paper') else ''}**{_money(bet['stake'])}** at **{fmt_odds(bet['odds'])}** "
+            f"on {bet.get('book', '')}\n{legs}", view=view, ephemeral=True)
+    return callback
 
 
 @bot.tree.command(name="tips", description="How to think about these bets long-term")

@@ -5,6 +5,7 @@ Each CSV row is one market. Two-way: side A is the Over (props/totals) or the su
 A = subject win, D = draw, B = opponent win.
 """
 import csv
+import functools
 import json
 import os
 from dataclasses import dataclass, field, replace
@@ -125,6 +126,7 @@ def _default_bet_books() -> Optional[tuple]:
     return tuple(b.strip() for b in raw.split(",") if b.strip())
 
 
+@functools.lru_cache(maxsize=512)
 def book_key(name: str) -> str:
     return "".join(ch for ch in name.lower() if ch.isalnum())
 
@@ -693,7 +695,9 @@ def book_prices(m: ProMarket, side: str) -> dict:
 
 
 def run_pro(markets: list, slate_date: str, cfg: ProConfig, freezer=None,
-            tracker=None) -> ProResult:
+            tracker=None, sims: Optional[dict] = None) -> ProResult:
+    """sims: {market key: SimResult} already run on these same projections (a second pass
+    over one slate reuses them instead of simulating every line again)."""
     res = ProResult(slate_date=slate_date)
     if tracker is None and cfg.track:
         from .tracking import Tracker
@@ -716,6 +720,8 @@ def run_pro(markets: list, slate_date: str, cfg: ProConfig, freezer=None,
             sim, frozen_at, changed = freezer.projection(m, cfg)
             if changed:
                 res.passes.append((label, "inputs changed after freeze — frozen projection kept"))
+        if sim is None and sims:
+            sim = sims.get(m.key)
         ev = evaluate(m, cfg, sim)
         if ev is not None:
             ev.phase = cfg.phase       # pre / live: picks where it's tracked, weighed, calibrated
