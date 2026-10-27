@@ -139,3 +139,25 @@ class SpendLabelTest(unittest.TestCase):
             oddsapi.fetch_slate(Api(), "NBA", "2099-01-01", ZoneInfo("UTC"), props=True, game_lines=False)
             oddsapi.SPEND_SOURCE.reset(tok)
         self.assertEqual(seen, ["pre-tip scans & closing reads"] * 4)
+
+
+class ClosingReadKeysTest(unittest.TestCase):
+    def test_buys_only_played_markets(self):
+        from linemaker import chat
+        from linemaker.jsonio import save_json
+        seen = []
+
+        def fake_run_best(*a, **k):
+            seen.append(oddsapi.PROP_KEYS.get())
+            return NS(result=NS(evaluated=[]))
+        from types import SimpleNamespace as NS
+        with tempfile.TemporaryDirectory() as d, mock.patch.dict(os.environ, {"LINEMAKER_TRACKING_DIR": d}), \
+                mock.patch("linemaker.live.run_best", fake_run_best):
+            save_json(os.path.join(d, "NBA-props", "2026-10-27.json"), {
+                "k": {"sport": "NBA", "game_id": "e1", "market": "rebounds", "picked": True, "inputs": {"bet_type": "prop"}},
+                "j": {"sport": "NBA", "game_id": "e1", "market": "points", "picked": False, "inputs": {"bet_type": "prop"}}})
+            chat.scan_events("NBA", "2026-10-27", {"e1"}, "NBA closing read", True, True)
+        self.assertEqual(len(seen), 1)
+        self.assertIn("player_rebounds", seen[0])
+        self.assertNotIn("player_points", seen[0])
+        self.assertIsNone(oddsapi.PROP_KEYS.get())                       # reset after the read
