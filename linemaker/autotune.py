@@ -383,11 +383,11 @@ def calibrate_p(p: float, a: float, b: float) -> float:
 
 
 # Starting corrections for a segment's league until its own fit clears the noise test (the
-# fit wins once it exists). From the graded 10/25 slate, one row per player-stat-side,
-# shrunk by n / (n + 500) like the fit: favourite props hit less often than both the model
-# and the books said (NBA "85%" landed 78%, NFL "85%" 80%), mostly low alt-line overs
-# sunk by a player's dud night. LINEMAKER_CALIBRATION_PRIORS=off drops them.
-CALIBRATION_PRIORS = {"pre props": {"NBA": [-0.139, 0.973, 758], "NFL": [-0.067, 0.985, 978]}}
+# fit wins once it exists). From the graded 10/25 + 10/26 slates (NBA 16 games, NFL 13),
+# one row per player-stat-side, shrunk by n / (n + 500) like the fit: favourite props hit a
+# little less often than the model and the books said (NBA "85%" landed 81%, NFL 81%),
+# mostly low alt-line overs sunk by a dud night. LINEMAKER_CALIBRATION_PRIORS=off drops them.
+CALIBRATION_PRIORS = {"pre props": {"NBA": [-0.144, 1.024, 1781], "NFL": [-0.067, 0.984, 1083]}}
 
 
 def _prior(phase: str, bet_type: str, sport: str):
