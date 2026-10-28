@@ -188,8 +188,9 @@ FAIR_VALUE = 0.98   # legs worth less than this (2%+ under fair) are left out wh
 
 
 def _held_players(used: Optional[dict], book: str):
-    """The players already in a parlay shown for this book (None: no spreading)."""
-    return None if used is None else used.setdefault(_key(book), set())
+    """The players already in a parlay on the card, at either book (None: no spreading):
+    place a FanDuel and a DraftKings parlay and they still don't share a player."""
+    return None if used is None else used.setdefault("card", set())
 
 
 def _fresh(priced: list, taken) -> list:

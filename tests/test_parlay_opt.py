@@ -334,8 +334,11 @@ class SpreadAcrossCardTest(unittest.TestCase):
         for i, ev in enumerate(legs):
             ev.best.gap = 0.15 - i * 0.01
         used = {}
-        built = (parlay.build_edge_parlays(legs, sizes=(2, 3), books=("FanDuel",), used=used)
-                 + parlay.build_parlays(legs, sizes=(2, 3, 4), books=("FanDuel",), used=used))
+        for ev in legs:
+            ev.market.books = [("FanDuel", [-150, 120]), ("DraftKings", [-150, 120])]
+        built = (parlay.build_edge_parlays(legs, sizes=(2, 3), books=("FanDuel", "DraftKings"), used=used)
+                 + parlay.build_parlays(legs, sizes=(2, 3), books=("FanDuel", "DraftKings"), used=used))
+        self.assertEqual({p.book for p in built}, {"FanDuel", "DraftKings"})
         players = [ev.market.subject for p in built for ev, _o in p.legs]
         self.assertTrue(built)
         self.assertEqual(len(players), len(set(players)))                 # nobody twice on the card

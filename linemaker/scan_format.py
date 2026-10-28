@@ -863,6 +863,13 @@ def volume_messages(sections: list, date: str, cfg, title: str = "") -> list:
         # so placing several of them doesn't stack one player's risk.
         spread = os.environ.get("LINEMAKER_SPREAD_PARLAYS", "on").lower() not in ("off", "0", "no", "false")
         parlays = (build({}) if spread else []) or build(None)
+        if spread:   # a thin slate: the first book took every player; the other gets its own set
+            for book in books:
+                if not any(p.book == book for p in parlays):
+                    own = {}
+                    parlays += (build_edge_parlays(edge_pool, sizes=edge_sizes, books=(book,), used=own)
+                                + (build_parlays(pool, sizes=sizes, books=(book,), used=own)
+                                   + build_sgps(pool, books=(book,), used=own) if len(pool) >= 2 else []))
         if cfg.max_parlay_legs:
             parlays = [p for p in parlays if len(p.legs) <= cfg.max_parlay_legs]
         if cfg.parlay_min_ev is not None:   # bigger tickets only while they still hold their value
