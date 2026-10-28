@@ -345,10 +345,25 @@ def _bet_go(key: str, i: int):
         try:
             from .betlinks import book_home, parlay_link
             from .bets import add_bet, find_open, leg_from_eval
+            from .parlay_format import short_label
             from .staking import _money, suggested_dollars
             p = detail["parlays"][i]
             legs = [leg_from_eval(ev, odds=o, book=p.book) for ev, o in p.legs]
             bet = find_open(p.book, legs)
+            swapped = []
+            if bet is None and detail.get("pool"):   # a player on it is already in an open bet: swap him
+                from .parlay import swap_held
+                new, notes = await asyncio.to_thread(swap_held, p, detail["pool"])
+                if new is None:
+                    await interaction.response.send_message(
+                        "🧯 Not logged: the players on this parlay are already in your open bets and there's "
+                        "no fresh leg to swap in (" + "; ".join(notes)[:400] + "). Pick another parlay.",
+                        ephemeral=True)
+                    return
+                if notes:
+                    p, swapped = new, notes
+                    legs = [leg_from_eval(ev, odds=o, book=p.book) for ev, o in p.legs]
+                    bet = find_open(p.book, legs)
             again = bet is not None
             from .staking import bankroll, paper_on
             if bet is None:
@@ -374,7 +389,12 @@ def _bet_go(key: str, i: int):
                 view.add_item(discord.ui.Button(label=f"{p.book} won't parlay it", emoji="⛔",
                                                 style=discord.ButtonStyle.secondary, custom_id=f"lm:nopar:{key}:{i}"))
             practice = " as a 🧪 **practice bet** (paper mode: no real money; `/record practice:True`)" if bet.get("paper") else ""
-            head = ("Already logged" if again else "📝 Logged") + (
+            if swapped:
+                head0 = ("🔄 **Changed before logging** (already in your open bets): " + "; ".join(swapped)
+                         + "\n" + "\n".join(f"• {short_label(ev.best.label)} ({fmt_odds(o)})" for ev, o in p.legs) + "\n")
+            else:
+                head0 = ""
+            head = head0 + ("Already logged" if again else "📝 Logged") + (
                 f" **{_money(bet['stake'])}** on the {len(p.legs)}-leg {p.book} parlay at **{fmt_odds(bet['odds'])}**"
                 f"{practice}.")
             tail = ("" if url else "\nNo one-tap slip for this one: open the book and add the legs.") + (
@@ -845,7 +865,8 @@ class CompactView(discord.ui.View):
 PARLAY_BOOKS = ("FanDuel", "DraftKings")
 
 
-def parlay_card(legs: list, books: Optional[tuple] = None, boost: float = 0.0) -> tuple:
+def parlay_card(legs: list, books: Optional[tuple] = None, boost: float = 0.0,
+                pool: Optional[list] = None) -> tuple:
     """(embed, view) for a parlay you built: price, payout and hit chance at each book,
     with Bet buttons (log it, then open the slip with every leg). boost: a profit boost (0.25 = +25%)."""
     from .betlinks import parlay_link
@@ -898,7 +919,8 @@ def parlay_card(legs: list, books: Optional[tuple] = None, boost: float = 0.0) -
             value += (f"\n🧾 {p.book} didn't send slip ids for every leg, so there's no one-tap slip: "
                       "Bet logs it and opens the book; add the legs above.")
         embed.add_field(name=header(p), value=value[:1024], inline=False)
-        key = _remember({"parlays": [p]})
+        # pool: a card's parlay (not your own slip) swaps out players you've bet since (_bet_go)
+        key = _remember({"parlays": [p], **({"pool": pool} if pool else {})})
         view.add_item(bet_button(key, 0, p))
     if not built:
         embed.add_field(name="Can't price this one",
@@ -996,7 +1018,7 @@ def targets_card(picks: list, books, found: Optional[dict] = None) -> tuple:
                              "from the smaller ones.")
             name, value = block(p, extra)
             e.add_field(name=name, value=value, inline=False)
-            k = _remember({"parlays": [p]})
+            k = _remember({"parlays": [p], "pool": [d["ev"] for d in picks]})
             if len(view.children) < 25:   # one row per book: FanDuel's ladder, then DraftKings'
                 view.add_item(bet_button(k, 0, p, label=f"Bet {p.american:+d} {book}",
                                          row=min(books.index(book), 4)))
@@ -1026,7 +1048,7 @@ def _parlay_bet_card(value: str):
                     "in (" + "; ".join(notes)[:500] + "). Pick another parlay, or ask again for new ones.",
                     ephemeral=True)
                 return
-            embed, view = parlay_card([ev for ev, _o in new.legs], (new.book,))
+            embed, view = parlay_card([ev for ev, _o in new.legs], (new.book,), pool=detail.get("pool"))
             kind = "Edge" if new.style == "edge" else getattr(new, "kind", "") or ("Value" if new.style == "value" else "Safest")
             embed.title = f"🎰 {len(new.legs)}-Leg {kind} Parlay · {new.book}"
             if notes:   # one bet per player: what changed since the card was posted

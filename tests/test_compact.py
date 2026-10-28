@@ -801,3 +801,34 @@ class UnderParlayTest(unittest.TestCase):
         with mock.patch.dict(os.environ, {"LINEMAKER_NO_PARLAY": "DraftKings:NBA|steals"}):
             self.assertTrue(parlay.sgp_check([a, over], "DraftKings")["blocked"])    # steals: by market name
             self.assertFalse(parlay.sgp_check([b, over], "DraftKings")["blocked"])   # other unders still fine
+
+
+class SwapAtBetTest(unittest.TestCase):
+    def test_bet_on_an_open_card_swaps_a_player_already_bet(self):
+        import tempfile
+        from types import SimpleNamespace
+        from linemaker import bets, bot, parlay
+        from tests.test_parlay_opt import leg
+        a, b, c, d = (leg(f"g{i}", f"P{i}", "points", p=0.75 - i * 0.02, odds=-150, key=f"NBA|g{i}|P{i}|points|10.5")
+                      for i in range(4))
+        first = parlay.price("FanDuel", [(a, -150), (b, -150)])
+        second = parlay.price("DraftKings", [(a, -150), (c, -150)])          # both cards open: shares P0
+        for ev in (a, b, c, d):
+            ev.market.books = [("FanDuel", [-150, 120]), ("DraftKings", [-150, 120])]
+        k1 = bot._remember({"parlays": [first], "pool": [a, b, c, d]})
+        k2 = bot._remember({"parlays": [second], "pool": [a, b, c, d]})
+        replies = []
+
+        class Resp:
+            async def send_message(self, text, view=None, ephemeral=False):
+                replies.append(text)
+        inter = SimpleNamespace(user="me", response=Resp())
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(os.environ, {
+                "LINEMAKER_TRACKING_DIR": tmp, "LINEMAKER_MAX_EXPOSURE": "1"}):
+            asyncio.run(bot._bet_go(k1, 0)(inter))
+            asyncio.run(bot._bet_go(k2, 0)(inter))
+            logged = bets.load_bets()
+        self.assertEqual(len(logged), 2)
+        players = [l["label"].split()[0] for l in logged[1]["legs"]]
+        self.assertNotIn("P0", players)                                     # swapped out at Bet
+        self.assertIn("Changed before logging", replies[1])
