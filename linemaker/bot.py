@@ -486,9 +486,8 @@ def _no_parlay_menu(key: str, i: int):
                                         custom_id=f"lm:noparsel:{key}:{i}"))
         await interaction.response.send_message(
             f"On the {p.book} slip, the leg it won't parlay is usually the one marked with a warning. "
-            "Pick it and I'll keep that market out of your "
-            f"{p.book} parlays (still fine as a straight bet). I'll also remove the logged bet.",
-            view=view, ephemeral=True)
+            "Pick it and I'll record it (nothing gets blocked) so we can find the pattern later. "
+            "I'll also remove the logged bet.", view=view, ephemeral=True)
     return callback
 
 
@@ -500,18 +499,19 @@ def _no_parlay_pick(key: str, i: int, value: str):
             return
         try:
             from .bets import find_open, leg_from_eval, remove_bet
-            from .parlay import mark_no_parlay
+            from .parlay import record_refusal, refusal_counts
             p = detail["parlays"][i]
             bet = find_open(p.book, [leg_from_eval(ev, odds=o, book=p.book) for ev, o in p.legs])
             removed = bool(bet) and remove_bet(bet["id"])
             msg = []
             if value != "x":
-                ev = p.legs[int(value)][0]
-                src = await asyncio.to_thread(mark_no_parlay, ev, p.book)
-                what = src.split("|", 1)[1].replace("player_", "").replace("batter_", "").replace("_", " ")
-                msg.append(f"⛔ Got it: {p.book} won't parlay **{ev.market.sport} {what}**. From now on "
-                           f"that market stays out of {p.book} parlays (Safest by payout, Best next leg "
-                           "and the auto-parlays); it's still offered as a straight bet.")
+                ev, odds = p.legs[int(value)]
+                entry = await asyncio.to_thread(record_refusal, ev, p.book, [e for e, _o in p.legs], odds)
+                what = entry["market"].split("|", 1)[1].replace("player_", "").replace("batter_", "").replace("_", " ")
+                n = refusal_counts(p.book).get(entry["market"], 1)
+                msg.append(f"📋 Recorded: {p.book} wouldn't parlay **{ev.best.label}** ({ev.market.sport} {what}). "
+                           f"That's {n} time{'s' if n != 1 else ''} for this market. Nothing is blocked; "
+                           "these are kept so we can work out the rule later.")
             msg.append("↩️ Removed the logged bet." if removed else "Nothing was logged for it.")
             await interaction.response.send_message("\n".join(msg), ephemeral=True)
         except Exception as e:

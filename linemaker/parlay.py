@@ -98,38 +98,22 @@ def leg_price(ev, book: str):
 
 # ---- markets a book won't put in a parlay ---------------------------------------------
 # The books mark some markets "can't be parlayed" (DraftKings does it per market and it
-# changes); the odds feed doesn't say which. You report one from a Bet reply (⛔), and that
-# market stays out of the book's parlays from then on. Straight bets are unaffected.
-# LINEMAKER_NO_PARLAY adds more by hand: "DraftKings:NBA|player_steals,FanDuel:NFL|anytime td".
+# changes); the odds feed doesn't say which. A ⛔ report from a Bet reply is only recorded
+# (cache/parlay_refusals.json: book, market, side, line, odds, the other legs) so the
+# pattern can be worked out later; nothing is blocked by it. LINEMAKER_NO_PARLAY blocks
+# markets by hand if that's ever wanted: "DraftKings:NBA|player_steals,FanDuel:NFL|anytime td".
 
-def _no_parlay_path() -> str:
-    return os.path.join(os.environ.get("LINEMAKER_CACHE_DIR", "cache"), "no_parlay.json")
-
-
-_NO_PARLAY_CACHE = {}
+def _refusals_path() -> str:
+    return os.path.join(os.environ.get("LINEMAKER_CACHE_DIR", "cache"), "parlay_refusals.json")
 
 
 def no_parlay_markets() -> dict:
-    """{book key: {"SPORT|market key", ...}} from your reports and LINEMAKER_NO_PARLAY."""
-    from .jsonio import load_json
-    path = _no_parlay_path()
-    try:
-        stamp = (path, os.path.getmtime(path), os.environ.get("LINEMAKER_NO_PARLAY", ""))
-    except OSError:
-        stamp = (path, None, os.environ.get("LINEMAKER_NO_PARLAY", ""))
-    if stamp in _NO_PARLAY_CACHE:
-        return _NO_PARLAY_CACHE[stamp]
-    try:
-        saved = load_json(path) if os.path.exists(path) else {}
-    except (OSError, ValueError):
-        saved = {}
-    out = {b: set(v) for b, v in (saved if isinstance(saved, dict) else {}).items()}
+    """{book key: {"SPORT|market", ...}} from LINEMAKER_NO_PARLAY (empty unless set)."""
+    out = {}
     for item in os.environ.get("LINEMAKER_NO_PARLAY", "").split(","):
         book, _, market = item.strip().partition(":")
         if book and market:
             out.setdefault(_key(book), set()).add(market.strip())
-    _NO_PARLAY_CACHE.clear()
-    _NO_PARLAY_CACHE[stamp] = out
     return out
 
 
@@ -139,6 +123,40 @@ def leg_source(ev, book: str) -> str:
     from .betlinks import leg
     e = leg(ev.market, ev.best.side, book) or {}
     return f"{ev.market.sport}|{e.get('mk') or ev.market.market}"
+
+
+def load_refusals() -> list:
+    from .jsonio import load_json
+    path = _refusals_path()
+    try:
+        data = load_json(path) if os.path.exists(path) else []
+    except (OSError, ValueError):
+        data = []
+    return data if isinstance(data, list) else []
+
+
+def record_refusal(ev, book: str, legs: list, odds=None) -> dict:
+    """Log that `book` wouldn't parlay this leg (with the rest of the slip), nothing more."""
+    import datetime as _dt
+    from .jsonio import save_json
+    m = ev.market
+    entry = {"time": _dt.datetime.now().isoformat(timespec="seconds"), "book": book,
+             "market": leg_source(ev, book), "label": ev.best.label, "side": ev.best.side,
+             "line": getattr(m, "line", None), "odds": odds, "game": m.game, "commence": getattr(m, "commence", ""),
+             "with": [e.best.label for e in legs if e is not ev]}
+    data = load_refusals() + [entry]
+    os.makedirs(os.path.dirname(_refusals_path()) or ".", exist_ok=True)
+    save_json(_refusals_path(), data[-500:])
+    return entry
+
+
+def refusal_counts(book: str = "") -> dict:
+    """{"SPORT|market": times refused} (for one book, or all)."""
+    out = {}
+    for r in load_refusals():
+        if not book or _key(r.get("book", "")) == _key(book):
+            out[r["market"]] = out.get(r["market"], 0) + 1
+    return out
 
 
 def is_prop_under(ev) -> bool:
@@ -159,17 +177,6 @@ def no_parlay(ev, book: str, blocked: Optional[dict] = None) -> bool:
     blocked = no_parlay_markets() if blocked is None else blocked
     mine = blocked.get(_key(book)) or set()
     return bool(mine) and (leg_source(ev, book) in mine or f"{ev.market.sport}|{ev.market.market}" in mine)
-
-
-def mark_no_parlay(ev, book: str) -> str:
-    """Remember that this book refused this leg's market in a parlay. Returns what was saved."""
-    from .jsonio import save_json
-    src = leg_source(ev, book)
-    data = {b: sorted(v) for b, v in no_parlay_markets().items()}
-    data[_key(book)] = sorted(set(data.get(_key(book), [])) | {src})
-    os.makedirs(os.path.dirname(_no_parlay_path()) or ".", exist_ok=True)
-    save_json(_no_parlay_path(), data)
-    return src
 
 
 def parlay_leg_price(ev, book: str, blocked: Optional[dict] = None):

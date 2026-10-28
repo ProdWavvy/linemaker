@@ -756,12 +756,19 @@ class NoParlayTest(unittest.TestCase):
             self.assertEqual([o.label for o in menu.options][-1], "Not sure which one")
             asyncio.run(bot.route_component(SimpleNamespace(
                 data={"custom_id": menu.custom_id, "values": ["0"]}, response=Resp())))
-            self.assertIn("won't parlay **NBA steals**", replies[-1][0])
+            self.assertIn("(NBA steals)", replies[-1][0])
+            self.assertIn("Nothing is blocked", replies[-1][0])
             self.assertEqual(bets.load_bets(), [])                              # the logged bet is gone
-            self.assertEqual(parlay.no_parlay_markets(), {"draftkings": {"NBA|player_steals"}})
-            built = parlay.build_parlays([steals, points, other], sizes=(2,), books=("DraftKings",), value=False)
-            self.assertTrue(built and all(steals not in [ev for ev, _o in b.legs] for b in built))
-            self.assertTrue(parlay.sgp_check([steals, points], "DraftKings")["blocked"])
+            rec = parlay.load_refusals()[0]
+            self.assertEqual((rec["book"], rec["market"], rec["with"]),
+                             ("DraftKings", "NBA|player_steals", [points.best.label]))
+            self.assertEqual(parlay.refusal_counts("DraftKings"), {"NBA|player_steals": 1})
+            self.assertEqual(parlay.no_parlay_markets(), {})                    # recorded, not blocked
+            self.assertFalse(parlay.sgp_check([steals, points], "DraftKings")["blocked"])
+            with mock.patch.dict(os.environ, {"LINEMAKER_NO_PARLAY": "DraftKings:NBA|player_steals"}):
+                built = parlay.build_parlays([steals, points, other], sizes=(2,), books=("DraftKings",), value=False)
+                self.assertTrue(built and all(steals not in [ev for ev, _o in b.legs] for b in built))
+                self.assertTrue(parlay.sgp_check([steals, points], "DraftKings")["blocked"])
             self.assertFalse(parlay.sgp_check([steals, points], "FanDuel")["blocked"])   # FanDuel unaffected
             self.assertFalse(parlay.sgp_check([steals], "DraftKings")["blocked"])        # straight bet fine
 
