@@ -176,6 +176,8 @@ async def route_component(interaction: discord.Interaction) -> bool:
     elif kind == "noparsel":
         values = (interaction.data or {}).get("values") or ["x"]
         handler = _no_parlay_pick(key, int(parts[3]), values[0])
+    elif kind == "tbet":
+        handler = _targets_bet(key, parts[3])
     elif kind == "bboard":
         handler = _board_bet(key, int(parts[3]))
     elif kind == "pbet":   # lm:pbet:<key>:<i>; the dropdown sends the chosen parlay as key:i
@@ -957,15 +959,17 @@ def target_parlays(picks: list, books) -> dict:
     on one chalk leg."""
     from .parlay import TARGETS, best_for_target, exposure
     legs = [d["ev"] for d in picks]
-    from .bets import open_exposure
+    from .bets import max_exposure, open_exposure
     held = {k: v["n"] for k, v in open_exposure().items()}   # what your open tickets already ride on
+    cap = max_exposure()
+    free = [ev for ev in legs if not cap or held.get(exposure(ev), 0) < cap]   # never a player you've bet
     out = {}
     for b in tuple(books or PARLAY_BOOKS):
         used = dict(held)
         for t in TARGETS:
             p = out[(t, b)] = best_for_target(legs, b, t, used=used)
             if p is None:   # not enough separate legs left: the best one anyway, flagged on the card
-                p = out[(t, b)] = best_for_target(legs, b, t)
+                p = out[(t, b)] = best_for_target(free, b, t)
                 if p is not None:
                     p.reuses = True
             for ev, _o in (p.legs if p else []):
@@ -973,7 +977,7 @@ def target_parlays(picks: list, books) -> dict:
     return out
 
 
-def targets_card(picks: list, books, found: Optional[dict] = None) -> tuple:
+def targets_card(picks: list, books, found: Optional[dict] = None, tkey: Optional[str] = None) -> tuple:
     """(embeds, view): an intro, then one box per payout target with each book's safest parlay.
     A parlay that's already the answer for a smaller payout isn't repeated: that box says
     which payouts it covers."""
@@ -1033,8 +1037,10 @@ def targets_card(picks: list, books, found: Optional[dict] = None) -> tuple:
             e.add_field(name=name, value=value, inline=False)
             k = _remember({"parlays": [p], "pool": [d["ev"] for d in picks]})
             if len(view.children) < 25:   # one row per book: FanDuel's ladder, then DraftKings'
-                view.add_item(bet_button(k, 0, p, label=f"Bet {p.american:+d} {book}",
-                                         row=min(books.index(book), 4)))
+                b = bet_button(k, 0, p, label=f"Bet {p.american:+d} {book}", row=min(books.index(book), 4))
+                if tkey:   # live: the card redraws itself after the bet (_targets_bet)
+                    b.custom_id = f"lm:tbet:{tkey}:{k}"
+                view.add_item(b)
         embeds.append(e)
     embeds[-1].set_footer(text="Hit chances are calibrated to past results and count legs from one "
                                "game moving together. Rolling over: every step has to hit.")
@@ -1358,8 +1364,52 @@ def _show_targets(key: str):
         try:
             await interaction.response.defer(ephemeral=True, thinking=True)   # the search can take a few seconds
             found = await asyncio.to_thread(target_parlays, detail["picks"], detail.get("books"))
-            embeds, view = targets_card(detail["picks"], detail.get("books"), found)
+            tkey = _remember({"picks": detail["picks"], "books": detail.get("books"), "placed": []})
+            embeds, view = targets_card(detail["picks"], detail.get("books"), found, tkey)
             await interaction.followup.send(embeds=embeds, view=view, ephemeral=True)
+            await asyncio.to_thread(save_details)
+        except Exception as e:
+            await _report_error(interaction, e)
+    return callback
+
+
+def _targets_bet(tkey: str, k: str):
+    """Bet on a Safest-by-payout ticket: log it, then search the payouts again without the
+    players you now hold and redraw the same (private) card, like the parlay board."""
+    async def callback(interaction: discord.Interaction):
+        d, pd = PICK_DETAILS.get(tkey), PICK_DETAILS.get(k)
+        if d is None or pd is None:
+            await interaction.response.send_message("This card is too old. Tap Safest by payout again.",
+                                                    ephemeral=True)
+            return
+        try:
+            from .betlinks import parlay_link
+            from .parlay import swap_held
+            from .parlay_format import short_label
+            from .staking import _money
+            await interaction.response.defer()   # the new search takes a few seconds
+            p, notes = await asyncio.to_thread(swap_held, pd["parlays"][0], pd.get("pool") or [])
+            if p is None:
+                await interaction.followup.send("🧯 Not logged: its players are already in your open bets.",
+                                                ephemeral=True)
+                return
+            bet, again = await asyncio.to_thread(log_parlay, p, str(interaction.user))
+            if not again:
+                d["placed"].append(f"✅ {p.book} {fmt_odds(bet['odds'])} · {_money(bet['stake'])}: "
+                                   + ", ".join(short_label(ev.best.label) for ev, _o in p.legs))
+            found = await asyncio.to_thread(target_parlays, d["picks"], d.get("books"))
+            embeds, view = targets_card(d["picks"], d.get("books"), found, tkey)
+            embeds[0].description = (embeds[0].description or "") + (
+                "\n\n**Logged from this card** (the payouts below now leave these players out):\n"
+                + "\n".join(d["placed"][-8:]))[:3500]
+            url = parlay_link(p)
+            if url and len(url) <= 512 and len(view.children) < 25:
+                view.add_item(discord.ui.Button(label=f"Open the slip on {p.book}", url=url, row=4,
+                                                emoji="🟦" if p.book == "FanDuel" else "🟩"))
+            note = (f"{'Already logged' if again else '📝 Logged'} **{_money(bet['stake'])}** on the "
+                    f"{len(p.legs)}-leg {p.book} at **{fmt_odds(bet['odds'])}**"
+                    + (f" (🔄 {'; '.join(notes)})" if notes else "") + ". Open the slip below; ✏️ / ↩️ / 🎁 in /bets.")
+            await interaction.edit_original_response(content=note[:2000], embeds=embeds[:10], view=view)
             await asyncio.to_thread(save_details)
         except Exception as e:
             await _report_error(interaction, e)
@@ -1849,36 +1899,91 @@ class LinemakerBot(discord.Client):
         if not text and not csv_text:
             return
         from .chat import split_for_discord
+        dest = await self._private_thread(message, text)   # None: answer right here
+        where_to = dest or message.channel
+
+        async def say(msg):
+            await (dest.send(msg) if dest else message.reply(msg))
         try:
-            async with message.channel.typing():
+            async with where_to.typing():
                 turn = await asyncio.wait_for(
-                    self.chat.respond(message.channel.id, message.author.display_name,
+                    self.chat.respond(where_to.id, message.author.display_name,
                                       text or "Price the attached projections.", csv_text),
                     timeout=CHAT_TIMEOUT)
         except asyncio.TimeoutError:
             log.warning("chat timed out after %ss", CHAT_TIMEOUT)
-            await message.reply(f"⏱️ That took longer than {CHAT_TIMEOUT}s, so I stopped. The "
-                                "console log shows which step was slow. Try again, or use "
-                                "`/picks` directly.")
+            await say(f"⏱️ That took longer than {CHAT_TIMEOUT}s, so I stopped. The "
+                      "console log shows which step was slow. Try again, or use "
+                      "`/picks` directly.")
             return
         except Exception as e:
             log.exception("chat failed")
-            await message.reply(f"⚠️ Something went wrong: {type(e).__name__}: {e}")
+            await say(f"⚠️ Something went wrong: {type(e).__name__}: {e}")
             return
         try:
-            await self._send_turn(message, turn)
+            await self._send_turn(message, turn, dest)
         except Exception as e:
             # Never type and go silent: say what broke (the full trace is in /logs).
             log.exception("sending the answer failed")
             try:
-                await message.reply(f"⚠️ I found the plays but couldn't post the card "
-                                    f"({type(e).__name__}: {str(e)[:300]}). Tell Claude; "
-                                    "`/logs search:sending` has the details.")
+                await say(f"⚠️ I found the plays but couldn't post the card "
+                          f"({type(e).__name__}: {str(e)[:300]}). Tell Claude; "
+                          "`/logs search:sending` has the details.")
             except Exception:
                 pass
 
-    async def _send_turn(self, message: discord.Message, turn):
+    async def _private_thread(self, message: discord.Message, text: str):
+        """Typed asks in the channel are answered in the asker's own private thread for the day
+        (only they and the server's admins see it), so the channel stays clean: their message
+        is tidied away and a pointer to the thread deletes itself after 30 seconds.
+        LINEMAKER_PRIVATE_THREADS=off answers in the channel; LINEMAKER_TIDY_ASKS=off keeps
+        the typed message. None when answering where it was asked (a thread, a DM, or the
+        bot can't make threads there)."""
+        if (message.guild is None or isinstance(message.channel, discord.Thread)
+                or os.environ.get("LINEMAKER_PRIVATE_THREADS", "on").lower() in ("off", "0", "no", "false")):
+            return None
+        from .alerts import load_state, save_state
+        threads = load_state("private_threads.json", {})
+        mine = threads.get(str(message.author.id)) or {}
+        thread = None
+        if mine.get("date") == today():
+            try:
+                thread = self.get_channel(mine["id"]) or await self.fetch_channel(mine["id"])
+                if getattr(thread, "archived", False):
+                    await thread.edit(archived=False)
+            except (discord.HTTPException, KeyError):
+                thread = None
+        if thread is None:
+            try:
+                thread = await message.channel.create_thread(
+                    name=f"🔒 {message.author.display_name} · {dt.date.fromisoformat(today()):%b %d}"[:100],
+                    type=discord.ChannelType.private_thread, invitable=False, auto_archive_duration=1440)
+                await thread.add_user(message.author)
+            except (discord.HTTPException, AttributeError) as e:
+                log.warning("can't open a private thread in #%s (%s): answering in the channel. Give the bot "
+                            "Create Private Threads + Send Messages in Threads.", getattr(message.channel, "name", "?"), e)
+                return None
+            threads[str(message.author.id)] = {"date": today(), "id": thread.id}
+            save_state("private_threads.json", threads)
+        await thread.send(f"> {text[:300]}" if text else "> (attached projections)",
+                          allowed_mentions=discord.AllowedMentions.none())
+        try:
+            await message.channel.send(f"🔒 {message.author.mention}, answered privately in {thread.mention}",
+                                       delete_after=30, allowed_mentions=discord.AllowedMentions.none())
+        except discord.HTTPException:
+            pass
+        if os.environ.get("LINEMAKER_TIDY_ASKS", "on").lower() not in ("off", "0", "no", "false"):
+            try:
+                await message.delete()
+            except discord.HTTPException:
+                pass   # needs Manage Messages; the ask just stays in the channel
+        return thread
+
+    async def _send_turn(self, message: discord.Message, turn, dest=None):
+        """dest: the private thread to answer in (replies there instead of to the message)."""
         from .chat import split_for_discord
+        if dest is not None:
+            return await _thread_send(dest, turn)
         if turn.text == "HELP" and not turn.results:   # "help" typed in the channel
             from .dashboard import help_embed
             await message.reply(embed=help_embed(), allowed_mentions=discord.AllowedMentions.none())
@@ -1905,6 +2010,28 @@ class LinemakerBot(discord.Client):
             mkey, fkey = card_keys(turn.results)
             await _send_card(send_cards, cards, text=chunks[0] if inline and chunks else "",
                              market_key=mkey, fresh_key=fkey)
+
+
+async def _thread_send(dest, turn):
+    from .chat import split_for_discord
+    none = discord.AllowedMentions.none()
+    if turn.text == "HELP" and not turn.results:
+        from .dashboard import help_embed
+        await dest.send(embed=help_embed(), allowed_mentions=none)
+        return
+    chunks = split_for_discord(turn.text)
+    files = [discord.File(io.BytesIO(md.encode()), filename=name) for name, md in turn.files]
+    cards = cards_for(turn.results)
+    inline = cards and not files and card_style() == "compact" and len(chunks) <= 1
+    if not inline:
+        for i, chunk in enumerate(chunks):
+            await dest.send(chunk, files=files if i == len(chunks) - 1 else [], allowed_mentions=none)
+    if cards:
+        async def send_cards(**kw):
+            return await dest.send(allowed_mentions=none, **kw)
+        mkey, fkey = card_keys(turn.results)
+        await _send_card(send_cards, cards, text=chunks[0] if inline and chunks else "",
+                         market_key=mkey, fresh_key=fkey)
 
 
 def cards_for(results: list) -> list:

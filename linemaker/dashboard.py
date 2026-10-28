@@ -39,7 +39,8 @@ LEGEND = ("🎯 model pick / Edge parlay (priced above fair) · 🔒 safest legs
 
 def help_embed() -> discord.Embed:
     e = discord.Embed(title="🤖 Linemaker · How to Use It", color=TEAL,
-                      description="Just type in this channel. A few examples:")
+                      description="Just type in this channel: I answer in your own private thread "
+                                  "for the day (🔒 only you see it), and keep the channel clean. A few examples:")
     for name, value in ASKS:
         e.add_field(name=name, value=value, inline=False)
     e.add_field(name="🔘 Every card: two menus and one row of buttons", value="\n".join(ROWS), inline=False)

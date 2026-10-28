@@ -116,3 +116,51 @@ class MarketEdgesCrossSportTest(unittest.TestCase):
         self.assertTrue(all(a["mode"] == "market" and not a["teams"] for a in calls[:-1]))
         self.assertEqual(calls[-1], ["NBA"])                                # no games today: left off
         self.assertTrue(followups)
+
+
+class PrivateThreadTest(unittest.TestCase):
+    def test_ask_goes_to_one_private_thread_a_day(self):
+        import tempfile
+        import discord
+        from linemaker import bot as B
+        made, deleted, pointers = [], [], []
+
+        class Thread:
+            id, mention, archived = 555, "<#555>", False
+            sent = []
+
+            async def send(self, *a, **kw):
+                self.sent.append((a, kw))
+
+            async def add_user(self, u):
+                pass
+
+        class Channel:
+            name = "bets"
+
+            async def create_thread(self, **kw):
+                made.append(kw)
+                return Thread()
+
+            async def send(self, text, **kw):
+                pointers.append((text, kw))
+
+        class Msg:
+            guild = object()
+            channel = Channel()
+            author = NS(id=7, display_name="Wavvy", mention="@Wavvy")
+
+            async def delete(self):
+                deleted.append(True)
+
+        fake = NS(get_channel=lambda i: Thread(), fetch_channel=None)
+        with tempfile.TemporaryDirectory() as d, mock.patch.dict(os.environ, {"LINEMAKER_CACHE_DIR": d,
+                                                                             "LINEMAKER_PRIVATE_THREADS": "on"}):
+            t1 = asyncio.run(B.LinemakerBot._private_thread(fake, Msg(), "best nba props parlay"))
+            t2 = asyncio.run(B.LinemakerBot._private_thread(fake, Msg(), "fresh nba props"))
+        self.assertEqual(t1.id, 555)
+        self.assertEqual(t2.id, 555)
+        self.assertEqual(len(made), 1)                                           # one thread a day
+        self.assertEqual(made[0]["type"], discord.ChannelType.private_thread)
+        self.assertEqual(deleted, [True, True])                                  # the asks tidied away
+        self.assertEqual(pointers[0][1]["delete_after"], 30)

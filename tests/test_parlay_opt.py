@@ -361,3 +361,40 @@ class SwapHeldTest(unittest.TestCase):
         gone, why = parlay.swap_held(p, [a, b], held, 1)                 # nothing fresh to swap in
         self.assertIsNone(gone)
         self.assertIn("dropped", why[0])
+
+
+class LiveTargetsTest(unittest.TestCase):
+    def test_bet_redraws_without_that_player(self):
+        import asyncio
+        import os
+        import tempfile
+        from types import SimpleNamespace
+        from linemaker import bets, bot
+        legs = [leg(f"g{i}", f"P{i}", "points", p=0.62, odds=-120, key=f"NBA|g{i}|P{i}|points|10.5") for i in range(8)]
+        picks = [{"rank": i, "ev": ev} for i, ev in enumerate(legs, 1)]
+        edits, follow = [], []
+
+        class Resp:
+            async def defer(self, **kw):
+                pass
+        inter = SimpleNamespace(user="me", response=Resp(),
+                                edit_original_response=lambda **kw: edits.append(kw) or asyncio.sleep(0),
+                                followup=SimpleNamespace(send=lambda *a, **kw: follow.append(a) or asyncio.sleep(0)))
+        with tempfile.TemporaryDirectory() as tmp, \
+                mock.patch.dict(os.environ, {"LINEMAKER_TRACKING_DIR": tmp, "LINEMAKER_MAX_EXPOSURE": "1",
+                                             "LINEMAKER_TARGET_MAX_USES": "1", "LINEMAKER_TARGET_MAX_SHARED": "0"}), \
+                mock.patch.object(parlay, "leg_price", side_effect=lambda ev, b: ev.best.best_odds):
+            async def go():
+                tkey = bot._remember({"picks": picks, "books": ("FanDuel",), "placed": []})
+                found = bot.target_parlays(picks, ("FanDuel",))
+                _e, view = bot.targets_card(picks, ("FanDuel",), found, tkey)
+                b = next(c for c in view.children if str(getattr(c, "custom_id", "")).startswith("lm:tbet:"))
+                await bot.route_component(SimpleNamespace(data={"custom_id": b.custom_id}, **vars(inter)))
+            asyncio.run(go())
+            logged = bets.load_bets()
+        self.assertEqual(len(logged), 1)
+        held = {l["label"].split()[0] for l in logged[0]["legs"]}
+        redrawn = edits[-1]["embeds"]
+        self.assertIn("Logged from this card", redrawn[0].description)
+        later = " ".join(f.value for e in redrawn[1:] for f in e.fields)
+        self.assertFalse(any(f"• {p} " in later for p in held))             # those players left the payouts
