@@ -1557,6 +1557,7 @@ class LinemakerBot(discord.Client):
         from .oddsapi import _spend, local_today
         if _spend(local_today()).get("start_remaining") is None:   # restarted before today's check
             asyncio.get_running_loop().create_task(_refresh_budget())
+        asyncio.get_running_loop().create_task(_catch_up_bets())
         if self.home is not None:
             ch = self.get_channel(self.home)
             if ch is None:
@@ -2267,6 +2268,20 @@ async def budget_loop():
     await _refresh_budget()
 
 
+async def _catch_up_bets():
+    """Older live bets still open: grade their days again from ESPN (free) and settle them."""
+    try:
+        from .bets import settle, stale_days
+        from .grading import regrade_live
+        for d in stale_days(today()):
+            await asyncio.to_thread(regrade_live, d)
+        n = await asyncio.to_thread(settle)
+        if n:
+            log.info("caught up: settled %d older bet(s)", n)
+    except Exception as e:
+        log.warning("catch-up settle: %s", e)
+
+
 async def _refresh_budget():
     from .oddsapi import days_to_reset, refresh_day_budget
     try:
@@ -2574,6 +2589,20 @@ async def daily_grade():
     try:
         before = graded_keys(day_records(day))
         summary, remaining, tracked = await asyncio.to_thread(grade_day, day, [], True)
+        try:   # older live bets still open (read after midnight, or graded before the box score)
+            from .bets import settle, stale_days
+            from .grading import regrade_live
+            older = stale_days(today())
+            if older:
+                api = OddsAPI() if os.environ.get("ODDS_API_KEY") else None
+                for d in older:
+                    await asyncio.to_thread(regrade_live, d, api)
+                caught = await asyncio.to_thread(settle)
+                if caught:
+                    summary.append(f"- 🧾 Settled **{caught}** older live bet{'s' if caught != 1 else ''} "
+                                   f"({', '.join(older)})")
+        except Exception as e:
+            log.warning("catch-up grading: %s", e)
         embeds, table = await asyncio.to_thread(grade_report, day, summary, before, remaining)
     except Exception:
         log.exception("daily grade failed")

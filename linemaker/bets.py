@@ -119,13 +119,39 @@ def _record(leg: dict, cache: dict) -> Optional[dict]:
     folder = os.path.join(_dir(), "live") if leg.get("live") else (
         os.path.join(_dir(), leg["folder"]) if leg.get("folder") else _dir())
     from .tracking import load_day
-    k = (folder, leg["date"])
-    if k not in cache:
-        try:
-            cache[k] = load_day(folder, leg["date"])
-        except (OSError, ValueError):
-            cache[k] = {}
-    return cache[k].get(leg["key"])
+    days = [leg["date"]]
+    if leg.get("live"):   # read after midnight: logged in the next day's live file
+        days.append((dt.date.fromisoformat(leg["date"]) + dt.timedelta(days=1)).isoformat())
+    found = None
+    for day in days:
+        k = (folder, day)
+        if k not in cache:
+            try:
+                cache[k] = load_day(folder, day)
+            except (OSError, ValueError):
+                cache[k] = {}
+        rec = cache[k].get(leg["key"])
+        if rec is not None and (found is None or (rec.get("result") and not found.get("result"))):
+            found = rec
+    return found
+
+
+def stale_days(today: str, max_days: int = 7) -> list:
+    """Days (before yesterday) whose live reads still hold legs of open bets: graded again
+    each morning until they settle, for up to max_days."""
+    today_d = dt.date.fromisoformat(today)
+    out = set()
+    for b in load_bets():
+        if b.get("status") != "open":
+            continue
+        for l in b.get("legs", []):
+            if not l.get("live") or not l.get("date"):
+                continue
+            d = dt.date.fromisoformat(l["date"])
+            for day in (d, d + dt.timedelta(days=1)):
+                if day < today_d - dt.timedelta(days=1) and (today_d - day).days <= max_days:
+                    out.add(day.isoformat())
+    return sorted(out)
 
 
 def leg_outcome(leg: dict, cache: dict) -> Optional[str]:

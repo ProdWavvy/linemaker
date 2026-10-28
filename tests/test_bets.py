@@ -137,3 +137,30 @@ class BonusBetTest(unittest.TestCase):
             self.assertEqual(done[b1["id"]]["profit"], 0)        # a missed bonus bet loses nothing of yours
             self.assertEqual(done[b2["id"]]["profit"], 30.0)     # a win pays the profit only
             self.assertEqual(bets.summary(None)["staked"], 0)    # none of your money was risked
+
+
+class LateLiveBetTest(unittest.TestCase):
+    def test_after_midnight_live_bet_settles_from_next_days_file(self):
+        from types import SimpleNamespace as NS
+        from linemaker import grading
+        from linemaker.tracking import load_day
+        with tempfile.TemporaryDirectory() as d, mock.patch.dict(os.environ, {"LINEMAKER_TRACKING_DIR": d}), \
+                mock.patch.object(grading, "TRACKING", d):
+            seg = os.path.join(d, "live", "NBA-games")
+            os.makedirs(seg)
+            rec = {"sport": "NBA", "game_id": "e1", "game": "Golden State Warriors @ Denver Nuggets",
+                   "commence": "2026-10-25T02:00:00Z", "subject": "Golden State Warriors", "market": "spread",
+                   "threshold": -26.5, "inputs": {"bet_type": "spread", "line": 26.5},
+                   "sides": [], "result": None}
+            with open(os.path.join(seg, "2026-10-25.json"), "w") as f:   # read at 12:39 AM: next day's file
+                json.dump({"k1": rec}, f)
+            bets.add_bet([{"key": "k1", "side": "A", "label": "Golden State Warriors +26.5", "odds": -880,
+                           "date": "2026-10-24", "live": True, "sport": "NBA", "bet_type": "spread"}],
+                         101, 4.17, "DraftKings", "me")
+            self.assertEqual(bets.stale_days("2026-10-28"), ["2026-10-24", "2026-10-25"])
+            board = {("golden state warriors", "denver nuggets"): NS(state="post", away_score=110, home_score=118)}
+            with mock.patch("linemaker.live_model.live_states", lambda sport, day: board if day == "2026-10-24" else {}):
+                self.assertEqual(grading.regrade_live("2026-10-25"), 1)       # ESPN final, by the game's own date
+            self.assertIsNotNone(load_day(os.path.join(d, "live"), "2026-10-25")["k1"]["result"])
+            self.assertEqual(bets.settle(), 1)
+            self.assertEqual(bets.load_bets()[0]["status"], "won")            # lost by 8 with +26.5

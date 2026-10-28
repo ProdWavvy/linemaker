@@ -10,6 +10,71 @@ SNAPSHOTS = os.environ.get("LINEMAKER_SNAPSHOTS", "snapshots")
 TRACKING = os.environ.get("LINEMAKER_TRACKING_DIR", "tracking")
 
 
+def _by_game_date(records: dict, date: str) -> dict:
+    """{local game date: records}. A live read taken after midnight sits in the next day's
+    file, but its box score is under the day the game started."""
+    from zoneinfo import ZoneInfo
+    from .oddsapi import _local_date
+    tz = ZoneInfo(os.environ.get("LINEMAKER_TZ", "America/New_York"))
+    out = {}
+    for k, r in records.items():
+        try:
+            d = _local_date(r["commence"], tz) if r.get("commence") else date
+        except (TypeError, ValueError):
+            d = date
+        out.setdefault(d, {})[k] = r
+    return out
+
+
+def live_prop_results(records: dict, date: str) -> list:
+    from .boxscores import prop_results
+    return [row for d, recs in _by_game_date(records, date).items() for row in prop_results(recs, d)]
+
+
+def espn_game_results(records: dict, date: str, states=None) -> list:
+    """Final scores from ESPN's scoreboard (free, any date) -> results rows for game-line
+    records, for games older than The Odds API's 3-day /scores window."""
+    from .live_model import live_states
+    from .oddsapi import GAME_LINE_TYPES, norm, results_from_scores
+    states = states or live_states
+    rows = []
+    for d, recs in _by_game_date(records, date).items():
+        lines = {k: r for k, r in recs.items() if r.get("inputs", {}).get("bet_type") in GAME_LINE_TYPES}
+        finals = []
+        for sport in sorted({r.get("sport", "").upper() for r in lines.values()}):
+            try:
+                board = states(sport, d)
+            except Exception:
+                continue   # no ESPN scoreboard for this league
+            for r in lines.values():
+                if r.get("sport", "").upper() != sport or " @ " not in r.get("game", ""):
+                    continue
+                away, home = r["game"].split(" @ ", 1)
+                st = board.get((norm(away), norm(home)))
+                if st is not None and st.state == "post":
+                    finals.append({"id": r["game_id"], "completed": True,
+                                   "scores": [{"name": away, "score": st.away_score},
+                                              {"name": home, "score": st.home_score}]})
+        rows += results_from_scores(finals, lines)
+    return rows
+
+
+def regrade_live(date: str, api=None) -> int:
+    """Grade one day's live reads again (catching up on bets that are still open)."""
+    from .tracking import apply_results_day, load_day
+    live_base = os.path.join(TRACKING, "live")
+    live = load_day(live_base, date)
+    if not live:
+        return 0
+    rows = live_prop_results(live, date) + espn_game_results(live, date)
+    if api is not None:
+        try:
+            rows = auto_results(api, live) + rows
+        except Exception:
+            pass   # final scores older than 3 days aren't available; props still grade
+    return apply_results_day(live_base, date, rows)
+
+
 def grade_day(date: str, rows: list, auto: bool):
     """Score the day's picks and attach results to every tracked market, phase by phase
     (pre-game, live, PrizePicks), each league and kind in its own file.
@@ -33,7 +98,7 @@ def grade_day(date: str, rows: list, auto: bool):
             rows += [r for r in auto_results(api, source) if (r["game_id"], r["subject"], r["market"]) not in have]
         live = load_day(live_base, date)
         if live:   # in-game reads: graded from the same final scores and box scores
-            live_rows = auto_results(api, live) + prop_results(live, date)
+            live_rows = auto_results(api, live) + live_prop_results(live, date)
             n_live = apply_results_day(live_base, date, live_rows)
             if n_live:
                 summary_live.append(f"- 🔴 Live reads graded: **{n_live}**")
