@@ -376,3 +376,18 @@ class MarketModeTest(unittest.TestCase):
         self.assertEqual(quick_mode("sharp plays tonight"), "market")
         self.assertEqual(quick_mode("best nba props"), "smart")
         self.assertEqual(quick_plays_request("+ev nhl"), ["NHL"])
+
+
+class PicksPerPlayerTest(unittest.TestCase):
+    def test_at_most_two_picks_per_player(self):
+        from linemaker.pro import ProConfig, rows_to_markets, run_pro
+        base = {"date": "2026-10-21", "sport": "NBA", "game_id": "g", "game": "A @ H", "bet_type": "prop",
+                "subject": "Big Man", "stdev": "3", "books": "FanDuel:+100/-120|DraftKings:+100/-120"}
+        rows = [dict(base, market=m, line=l, mean=mu) for m, l, mu in
+                (("points", "10.5", "16"), ("rebounds", "6.5", "11"), ("pts + reb", "17.5", "26"), ("assists", "2.5", "6"))]
+        rows.append(dict(base, subject="Other Guy", market="points", line="10.5", mean="16"))
+        res = run_pro(rows_to_markets(rows), "2026-10-21", ProConfig(track=False, min_gap=0.0, n_sims=2000))
+        mine = [ev for ev in res.picks if ev.market.subject == "Big Man"]
+        self.assertEqual(len(mine), 2)
+        self.assertTrue(any(ev.market.subject == "Other Guy" for ev in res.picks))
+        self.assertTrue(any("same player already on the board" in why for _l, why in res.passes))

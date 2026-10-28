@@ -811,16 +811,18 @@ def run_pro(markets: list, slate_date: str, cfg: ProConfig, freezer=None,
             seen[k] = ev.best.label
             kept.append(ev)
         quals = kept
-    if cfg.one_per_player:
-        seen, kept = {}, []
-        for ev in quals:   # a player's legs rise and fall together: keep his best one
-            k = (ev.market.game_id, ev.market.subject) if ev.market.bet_type == "prop" else id(ev)
-            if k in seen:
-                res.passes.append((ev.best.label, f"same player already on the board ({seen[k]})"))
-                continue
-            seen[k] = ev.best.label
-            kept.append(ev)
-        quals = kept
+    # A player's props rise and fall together (more minutes than projected sinks every under),
+    # so a few per player: 10/27 had 70 of 102 picks on 16 players, one of them 0-9.
+    per_player = 1 if cfg.one_per_player else (_env_num("LINEMAKER_MAX_PICKS_PER_PLAYER", int) or 2)
+    seen, kept = {}, []
+    for ev in quals:   # best-ranked first
+        k = (ev.market.game_id, ev.market.subject) if ev.market.bet_type == "prop" else id(ev)
+        if len(seen.setdefault(k, [])) >= per_player:
+            res.passes.append((ev.best.label, f"same player already on the board ({seen[k][0]})"))
+            continue
+        seen[k].append(ev.best.label)
+        kept.append(ev)
+    quals = kept
     sports = {ev.market.sport for ev in quals}
     limit = sport_cfg(cfg, sports.pop(), per_sport).max_picks if len(sports) == 1 else cfg.max_picks
     for ev in quals[limit:]:
