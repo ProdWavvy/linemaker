@@ -146,10 +146,10 @@ def is_prop_under(ev) -> bool:
 
 
 def no_under_parlay_books() -> set:
-    """LINEMAKER_NO_UNDER_PARLAYS (default DraftKings): books that won't put a player-prop
-    under in a parlay (DraftKings refused NBA and MLB unders on O/U props; it has cut most
-    unders since the NBA's integrity rules). Blank = every book takes them."""
-    raw = os.environ.get("LINEMAKER_NO_UNDER_PARLAYS", "DraftKings")
+    """LINEMAKER_NO_UNDER_PARLAYS: books that won't put any player-prop under in a parlay.
+    Off by default: DraftKings took points and assists unders in parlays on 10/27; what it
+    refused were single markets (steals, walks), which LINEMAKER_NO_PARLAY covers."""
+    raw = os.environ.get("LINEMAKER_NO_UNDER_PARLAYS", "")
     return {_key(b) for b in raw.split(",") if b.strip()}
 
 

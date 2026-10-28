@@ -778,8 +778,7 @@ class UnderParlayTest(unittest.TestCase):
         over = leg("g3", "C", "points", p=0.7, odds=-200)
         over.market.books = [("FanDuel", [-200, 160]), ("DraftKings", [-205, 165])]
         a, b = under("g1", "Mikal Bridges", "steals"), under("g2", "Yandy Diaz", "walks")
-        with mock.patch.dict(os.environ, {"LINEMAKER_NO_UNDER_PARLAYS": "", "LINEMAKER_NO_PARLAY": ""}):
-            os.environ.pop("LINEMAKER_NO_UNDER_PARLAYS")          # the default: DraftKings
+        with mock.patch.dict(os.environ, {"LINEMAKER_NO_UNDER_PARLAYS": "DraftKings", "LINEMAKER_NO_PARLAY": ""}):
             self.assertIn("player-prop unders", " ".join(parlay.sgp_check([a, over], "DraftKings")["blocked"]))
             self.assertFalse(parlay.sgp_check([a, over], "FanDuel")["blocked"])
             self.assertIsNone(parlay.parlay_leg_price(a, "DraftKings"))
@@ -790,4 +789,7 @@ class UnderParlayTest(unittest.TestCase):
             same = under("g1", "Mikal Bridges", "blocks")
             self.assertIn("two unders on one player", " ".join(parlay.sgp_check([a, same], "FanDuel")["blocked"]))
         with mock.patch.dict(os.environ, {"LINEMAKER_NO_UNDER_PARLAYS": "", "LINEMAKER_NO_PARLAY": ""}):
-            self.assertFalse(parlay.sgp_check([a, over], "DraftKings")["blocked"])   # blank: every book takes them
+            self.assertFalse(parlay.sgp_check([a, over], "DraftKings")["blocked"])   # blank (default): every book takes them
+        with mock.patch.dict(os.environ, {"LINEMAKER_NO_PARLAY": "DraftKings:NBA|steals"}):
+            self.assertTrue(parlay.sgp_check([a, over], "DraftKings")["blocked"])    # steals: by market name
+            self.assertFalse(parlay.sgp_check([b, over], "DraftKings")["blocked"])   # other unders still fine
