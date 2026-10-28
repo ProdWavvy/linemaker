@@ -119,3 +119,21 @@ class MaxFavoriteTest(unittest.TestCase):
             self.assertTrue(all(ev.best.best_odds >= -250 for ev in res.picks))
             smart = run_pro(rows_to_markets(rows), "2026-10-26", ProConfig(track=False, min_gap=-1.0))
             self.assertTrue(all(ev.best.best_odds >= -250 for ev in smart.picks))
+
+
+class BonusBetTest(unittest.TestCase):
+    def test_bonus_miss_costs_nothing_win_pays_profit(self):
+        import tempfile
+        from linemaker import bets
+        with tempfile.TemporaryDirectory() as d, mock.patch.dict(os.environ, {"LINEMAKER_TRACKING_DIR": d}):
+            legs = [{"key": "NBA|g1|A|points|10.5", "label": "A Over 10.5 points", "odds": -110, "side": "A"}]
+            b1 = bets.add_bet(legs, 300, 10, "FanDuel", "me")
+            b2 = bets.add_bet([dict(legs[0], key="NBA|g2|B|points|10.5")], 300, 10, "FanDuel", "me")
+            bets.update_bet(b1["id"], bonus=True)
+            bets.update_bet(b2["id"], bonus=True)
+            with mock.patch("linemaker.bets.leg_outcome", side_effect=lambda l, c: "lost" if "g1" in l["key"] else "won"):
+                self.assertEqual(bets.settle(), 2)
+            done = {b["id"]: b for b in bets.load_bets()}
+            self.assertEqual(done[b1["id"]]["profit"], 0)        # a missed bonus bet loses nothing of yours
+            self.assertEqual(done[b2["id"]]["profit"], 30.0)     # a win pays the profit only
+            self.assertEqual(bets.summary(None)["staked"], 0)    # none of your money was risked

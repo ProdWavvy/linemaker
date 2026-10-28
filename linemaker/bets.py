@@ -91,6 +91,11 @@ def open_exposure() -> dict:
     return out
 
 
+def risked(bet: dict) -> float:
+    """Your own money on the bet: a bonus bet (the book's money) risks nothing."""
+    return 0.0 if bet.get("bonus") else bet["stake"]
+
+
 def max_exposure() -> int:
     """Open bets one player / game may be in before new parlays leave it out (0 = off)."""
     try:
@@ -152,8 +157,8 @@ def settle() -> int:
             bet["settled"] = dt.datetime.now().isoformat(timespec="seconds")
             n += 1
             continue
-        if "lost" in outcomes:
-            bet["status"], bet["profit"] = "lost", -bet["stake"]
+        if "lost" in outcomes:   # a bonus bet loses nothing of yours; a win pays the profit only
+            bet["status"], bet["profit"] = "lost", -risked(bet)
         elif None in outcomes:
             continue
         elif all(o == "push" for o in outcomes):
@@ -183,7 +188,7 @@ def summary(days: Optional[int] = 30, today: Optional[str] = None, paper: bool =
     rows = [b for b in load_bets() if bool(b.get("paper")) == paper
             and (not start or dt.date.fromisoformat(b["placed"][:10]) >= start)]
     done = [b for b in rows if b["status"] != "open"]
-    staked = sum(b["stake"] for b in done)
+    staked = sum(risked(b) for b in done)
     profit = sum(b.get("profit", 0.0) for b in done)
     by_kind, by_sport = {}, {}
     for b in done:
@@ -193,12 +198,12 @@ def summary(days: Optional[int] = 30, today: Optional[str] = None, paper: bool =
         s["n"] += 1
         s["won"] += b["status"] == "won"
         s["profit"] += b.get("profit", 0.0)
-        s["staked"] += b["stake"]
+        s["staked"] += risked(b)
         k = by_kind.setdefault(b["kind"], {"n": 0, "won": 0, "profit": 0.0, "staked": 0.0})
         k["n"] += 1
         k["won"] += b["status"] == "won"
         k["profit"] += b.get("profit", 0.0)
-        k["staked"] += b["stake"]
+        k["staked"] += risked(b)
     return {"open": [b for b in rows if b["status"] == "open"], "settled": done,
             "won": sum(b["status"] == "won" for b in done), "lost": sum(b["status"] == "lost" for b in done),
             "push": sum(b["status"] == "push" for b in done), "staked": staked, "profit": profit,

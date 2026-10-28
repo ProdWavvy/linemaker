@@ -718,6 +718,7 @@ class AutoLogTest(unittest.TestCase):
             self.assertIn("Already logged", replies[1][0])
             ids = [c.custom_id for c in replies[0][1].children if getattr(c, "custom_id", None)]
             self.assertIn(f"lm:unlog:{logged[0]['id']}", ids)
+            self.assertIn(f"lm:bonus:{logged[0]['id']}", ids)                # 🎁 it's a bonus bet
             asyncio.run(bot._unlog(logged[0]["id"])(inter))
             self.assertEqual(bets.load_bets(), [])
 

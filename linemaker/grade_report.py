@@ -296,7 +296,8 @@ def bets_embed(date: str, settled_now: int) -> Optional[discord.Embed]:
                      f"{fmt_money(sum(b.get('profit', 0) for b in practice))} (not real money)")
     done = [b for b in mine if b["status"] != "open"]
     profit = sum(b.get("profit", 0) for b in done)
-    staked = sum(b["stake"] for b in done)
+    from .bets import risked
+    staked = sum(risked(b) for b in done)
     if done:
         w = sum(b["status"] == "won" for b in done)
         l = sum(b["status"] == "lost" for b in done)

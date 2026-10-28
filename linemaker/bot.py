@@ -169,6 +169,8 @@ async def route_component(interaction: discord.Interaction) -> bool:
         handler = _restake(key)
     elif kind == "unlog":
         handler = _unlog(key)
+    elif kind == "bonus":
+        handler = _bonus(key)
     elif kind == "nopar":
         handler = _no_parlay_menu(key, int(parts[3]))
     elif kind == "noparsel":
@@ -366,6 +368,8 @@ def _bet_go(key: str, i: int):
                                             custom_id=f"lm:restake:{bet['id']}"))
             view.add_item(discord.ui.Button(label="Undo (didn't place it)", emoji="↩️",
                                             style=discord.ButtonStyle.danger, custom_id=f"lm:unlog:{bet['id']}"))
+            view.add_item(discord.ui.Button(label="It's a bonus bet", emoji="🎁", style=discord.ButtonStyle.secondary,
+                                            custom_id=f"lm:bonus:{bet['id']}"))
             if len(p.legs) > 1:
                 view.add_item(discord.ui.Button(label=f"{p.book} won't parlay it", emoji="⛔",
                                                 style=discord.ButtonStyle.secondary, custom_id=f"lm:nopar:{key}:{i}"))
@@ -378,7 +382,7 @@ def _bet_go(key: str, i: int):
                 "If the slip shows a different price, ✏️ it so your record is right."
                 if getattr(p, "sgp_estimated", False) else "") + (
                 "\nIt settles itself after grading (`/record`). Different stake or price? ✏️. "
-                "Didn't place it? ↩️." + (f" {p.book} says a leg can't be parlayed? ⛔." if len(p.legs) > 1 else ""))
+                "Didn't place it? ↩️. Used a bonus bet? 🎁." + (f" {p.book} says a leg can't be parlayed? ⛔." if len(p.legs) > 1 else ""))
             await interaction.response.send_message(head + tail, view=view, ephemeral=True)
         except Exception as e:
             await _report_error(interaction, e)
@@ -409,6 +413,47 @@ class StakeModal(discord.ui.Modal):
         await interaction.response.send_message(
             f"✏️ Updated: **${stake:,.2f}** at **{fmt_odds(odds)}**." if bet else "That bet isn't logged anymore.",
             ephemeral=True)
+
+
+class BonusModal(discord.ui.Modal):
+    """🎁 A bonus bet: the book's money, so a miss costs you nothing and a win pays the profit."""
+
+    def __init__(self, bet: dict):
+        super().__init__(title="Log it as a bonus bet", timeout=600)
+        self.bet_id = bet["id"]
+        self.amount = discord.ui.TextInput(label="Bonus bet amount ($)", default=f"{bet['stake']:g}", max_length=12)
+        self.odds = discord.ui.TextInput(label="Odds you got (American)", default=fmt_odds(bet["odds"]), max_length=8)
+        self.add_item(self.amount)
+        self.add_item(self.odds)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        from .bets import update_bet
+        try:
+            amount = float(str(self.amount.value).replace("$", "").replace(",", "").strip())
+            odds = int(str(self.odds.value).replace("+", "").strip())
+            if amount <= 0 or abs(odds) < 100:
+                raise ValueError
+        except ValueError:
+            await interaction.response.send_message("Amount should be a number like 10 and odds like +300.",
+                                                    ephemeral=True)
+            return
+        bet = update_bet(self.bet_id, stake=round(amount, 2), odds=odds, bonus=True)
+        win = amount * ((odds / 100) if odds > 0 else (100 / -odds))
+        await interaction.response.send_message(
+            (f"🎁 Logged as a **${amount:,.2f} bonus bet** at **{fmt_odds(odds)}**: if it hits you're up "
+             f"**${win:,.2f}**, if it misses your bankroll doesn't drop.") if bet else "That bet isn't logged anymore.",
+            ephemeral=True)
+
+
+def _bonus(bet_id: str):
+    async def callback(interaction: discord.Interaction):
+        from .bets import load_bets
+        bet = next((b for b in load_bets() if b["id"] == bet_id), None)
+        if bet is None:
+            await interaction.response.send_message("That bet isn't logged anymore.", ephemeral=True)
+            return
+        await interaction.response.send_modal(BonusModal(bet))
+    return callback
 
 
 def _restake(bet_id: str):
@@ -1847,7 +1892,8 @@ async def record_cmd(interaction: discord.Interaction, days: Optional[int] = 30,
             for b in sorted(s["settled"], key=lambda b: b.get("settled", ""), reverse=True)[:8]:
                 mark = {"won": "✅", "lost": "❌", "push": "➖"}[b["status"]]
                 what = b["legs"][0]["label"] if b["kind"] == "single" else f"{len(b['legs'])}-leg parlay"
-                lines.append(f"{mark} {what} {fmt_odds(b['odds'])} · {_money(b['stake'])} → {fmt_money(b.get('profit', 0))}")
+                lines.append(f"{mark} {'🎁 ' if b.get('bonus') else ''}{what} {fmt_odds(b['odds'])} · "
+                             f"{_money(b['stake'])}{' bonus' if b.get('bonus') else ''} → {fmt_money(b.get('profit', 0))}")
         else:
             lines.append("No settled bets yet. Tap **Bet** on a parlay (it logs it for you) or **📝 I bet this** on a pick "
                          "after you place it, and it settles automatically after grading.")
@@ -1924,8 +1970,11 @@ def _my_bet(bet_id: str):
                                         custom_id=f"lm:restake:{bet_id}"))
         view.add_item(discord.ui.Button(label="Undo (didn't place it)", emoji="↩️", style=discord.ButtonStyle.danger,
                                         custom_id=f"lm:unlog:{bet_id}"))
+        if not bet.get("bonus"):
+            view.add_item(discord.ui.Button(label="It's a bonus bet", emoji="🎁", style=discord.ButtonStyle.secondary,
+                                            custom_id=f"lm:bonus:{bet_id}"))
         await interaction.response.send_message(
-            f"{'🧪 Practice · ' if bet.get('paper') else ''}**{_money(bet['stake'])}** at **{fmt_odds(bet['odds'])}** "
+            f"{'🧪 Practice · ' if bet.get('paper') else ''}{'🎁 Bonus · ' if bet.get('bonus') else ''}**{_money(bet['stake'])}** at **{fmt_odds(bet['odds'])}** "
             f"on {bet.get('book', '')}\n{legs}", view=view, ephemeral=True)
     return callback
 

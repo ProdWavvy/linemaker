@@ -72,7 +72,7 @@ def today_embed(date: str) -> discord.Embed:
         today = [b for b in mine if b["status"] != "open" and (b.get("settled") or "")[:10] == date]
         if not open_ and not today:
             continue
-        line = f"🧾 **{label} bets:** {len(open_)} open (${sum(b['stake'] for b in open_):,.2f} out)"
+        line = f"🧾 **{label} bets:** {len(open_)} open (${sum(0 if b.get('bonus') else b['stake'] for b in open_):,.2f} out)"
         if today:
             w = sum(b["status"] == "won" for b in today)
             l = sum(b["status"] == "lost" for b in today)
