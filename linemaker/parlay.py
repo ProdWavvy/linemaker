@@ -141,7 +141,21 @@ def leg_source(ev, book: str) -> str:
     return f"{ev.market.sport}|{e.get('mk') or ev.market.market}"
 
 
+def is_prop_under(ev) -> bool:
+    return getattr(ev.market, "bet_type", "") == "prop" and ev.best.side == "B" and " Under " in (ev.best.label or "")
+
+
+def no_under_parlay_books() -> set:
+    """LINEMAKER_NO_UNDER_PARLAYS (default DraftKings): books that won't put a player-prop
+    under in a parlay (DraftKings refused NBA and MLB unders on O/U props; it has cut most
+    unders since the NBA's integrity rules). Blank = every book takes them."""
+    raw = os.environ.get("LINEMAKER_NO_UNDER_PARLAYS", "DraftKings")
+    return {_key(b) for b in raw.split(",") if b.strip()}
+
+
 def no_parlay(ev, book: str, blocked: Optional[dict] = None) -> bool:
+    if is_prop_under(ev) and _key(book) in no_under_parlay_books():
+        return True
     blocked = no_parlay_markets() if blocked is None else blocked
     mine = blocked.get(_key(book)) or set()
     return bool(mine) and (leg_source(ev, book) in mine or f"{ev.market.sport}|{ev.market.market}" in mine)
@@ -292,8 +306,17 @@ def sgp_check(legs: list, book: str) -> dict:
                            f"{seen[('side', '', 'spread')].best.label} (moneyline with spread on one "
                            "game: usually not allowed)")
     if len(legs) > 1:   # markets you've told the bot this book won't parlay
-        blocked += [f"{ev.best.label} ({book} doesn't allow this market in parlays)"
+        blocked += [f"{ev.best.label} ({book} doesn't allow "
+                    + ("player-prop unders" if is_prop_under(ev) and _key(book) in no_under_parlay_books()
+                       else "this market") + " in parlays)"
                     for ev in legs if no_parlay(ev, book)]
+        # NBA integrity rule (2025-26): no parlay with two unders on the same player, any book.
+        unders = {}
+        for ev in legs:
+            if is_prop_under(ev) and ev.market.sport in ("NBA", "WNBA"):
+                unders.setdefault(ev.market.subject, []).append(ev)
+        blocked += [f"{' + '.join(e.best.label for e in evs)} (the NBA bars two unders on one player "
+                    "in a parlay)" for evs in unders.values() if len(evs) > 1]
     one, multi = SGP_NAMES.get(book, ("SGP", "SGP+"))
     kind = ""
     if groups:

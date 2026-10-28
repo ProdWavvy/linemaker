@@ -763,3 +763,31 @@ class NoParlayTest(unittest.TestCase):
             self.assertTrue(parlay.sgp_check([steals, points], "DraftKings")["blocked"])
             self.assertFalse(parlay.sgp_check([steals, points], "FanDuel")["blocked"])   # FanDuel unaffected
             self.assertFalse(parlay.sgp_check([steals], "DraftKings")["blocked"])        # straight bet fine
+
+
+class UnderParlayTest(unittest.TestCase):
+    def test_draftkings_takes_no_prop_unders_in_parlays(self):
+        from linemaker import parlay
+        from tests.test_parlay_opt import leg
+
+        def under(game, subject, market):
+            ev = leg(game, subject, market, side="B", p=0.7, odds=-200)
+            ev.best.label = f"{subject} Under 1.5 {market}"
+            ev.market.books = [("FanDuel", [160, -200]), ("DraftKings", [165, -205])]
+            return ev
+        over = leg("g3", "C", "points", p=0.7, odds=-200)
+        over.market.books = [("FanDuel", [-200, 160]), ("DraftKings", [-205, 165])]
+        a, b = under("g1", "Mikal Bridges", "steals"), under("g2", "Yandy Diaz", "walks")
+        with mock.patch.dict(os.environ, {"LINEMAKER_NO_UNDER_PARLAYS": "", "LINEMAKER_NO_PARLAY": ""}):
+            os.environ.pop("LINEMAKER_NO_UNDER_PARLAYS")          # the default: DraftKings
+            self.assertIn("player-prop unders", " ".join(parlay.sgp_check([a, over], "DraftKings")["blocked"]))
+            self.assertFalse(parlay.sgp_check([a, over], "FanDuel")["blocked"])
+            self.assertIsNone(parlay.parlay_leg_price(a, "DraftKings"))
+            self.assertEqual(parlay.parlay_leg_price(a, "FanDuel"), -200)
+            built = parlay.build_parlays([a, b, over], sizes=(2,), books=("DraftKings", "FanDuel"), value=False)
+            self.assertFalse(any(p.book == "DraftKings" for p in built))   # only one DK leg left: no DK parlay
+            self.assertTrue(any(p.book == "FanDuel" for p in built))
+            same = under("g1", "Mikal Bridges", "blocks")
+            self.assertIn("two unders on one player", " ".join(parlay.sgp_check([a, same], "FanDuel")["blocked"]))
+        with mock.patch.dict(os.environ, {"LINEMAKER_NO_UNDER_PARLAYS": "", "LINEMAKER_NO_PARLAY": ""}):
+            self.assertFalse(parlay.sgp_check([a, over], "DraftKings")["blocked"])   # blank: every book takes them
