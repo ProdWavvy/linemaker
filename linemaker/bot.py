@@ -1105,6 +1105,57 @@ def parlay_board(key: str) -> tuple:
     return embed, view
 
 
+def card_boxes(key: str, embeds: list) -> list:
+    """The posted card's embeds with each parlay box redrawn from the live board: ✅ logged,
+    the swapped legs, or crossed out. Other embeds (header, board, notes) stay as they are."""
+    from .bets import load_bets
+    from .scan_format import parlay_box
+    from .staking import _money
+    d = PICK_DETAILS[key]
+    nums = d.get("numbers") or []
+    open_ids = {b["id"]: b for b in load_bets() if b.get("status") == "open"}
+    out = []
+    for e in embeds:
+        import re
+        m = re.match(r"(?:✅ |🧯 )?#(\d+) · ", e.title or "")
+        n = m.group(1) if m else None
+        j = next((i for i, x in enumerate(nums) if n and str(x) == n), None)
+        if j is None:
+            out.append(e)
+            continue
+        if j in (d.get("placed") or {}) and d["placed"][j] in open_ids:
+            b = open_ids[d["placed"][j]]
+            p = (d.get("logged") or {}).get(j) or d["parlays"][j]
+            box = parlay_box(p, note=f"✅ **Logged** {_money(b['stake'])} at {fmt_odds(b['odds'])}")
+            box.title = f"✅ #{n} · " + box.title
+        elif j in (d.get("current") or {}):
+            p = d["current"][j]
+            swapped = [ev.best.label for ev, _o in p.legs] != [ev.best.label for ev, _o in d["parlays"][j].legs]
+            box = parlay_box(p, int(n),
+                             note="🔄 **Updated:** swapped out players you've already bet" if swapped else "")
+        else:
+            box = discord.Embed(title=f"🧯 #{n} · no longer available", color=0x95A5A6,
+                                description="Its players are already in your bets and nothing fresh was left to swap in.")
+        if e.footer and e.footer.text:
+            box.set_footer(text=e.footer.text)
+        out.append(box)
+    return out
+
+
+async def update_card(key: str):
+    """Redraw the posted card's parlay boxes after a bet from its board (best effort)."""
+    d = PICK_DETAILS.get(key) or {}
+    ref = d.get("card_msg")
+    if not ref:
+        return
+    try:
+        channel = bot.get_channel(ref[0]) or await bot.fetch_channel(ref[0])
+        msg = await channel.fetch_message(ref[1])
+        await msg.edit(embeds=card_boxes(key, msg.embeds))
+    except Exception as e:
+        log.warning("couldn't redraw the card: %s", e)
+
+
 def log_parlay(p, user: str) -> tuple:
     """(bet, already) — log a parlay at the suggested stake, or find it if it's logged."""
     from .bets import add_bet, find_open, leg_from_eval
@@ -1136,6 +1187,7 @@ def _board_bet(key: str, j: int):
                 return
             bet, again = await asyncio.to_thread(log_parlay, p, str(interaction.user))
             d.setdefault("placed", {})[j] = bet["id"]
+            d.setdefault("logged", {})[j] = p
             d["last"], d["last_parlay"] = j, p
             embed, view = parlay_board(key)
             note = (f"{'Already logged' if again else '📝 Logged'} **{_money(bet['stake'])}** on "
@@ -1145,6 +1197,7 @@ def _board_bet(key: str, j: int):
                     + ". Open the slip below; the other parlays just updated.")
             await interaction.response.edit_message(content=note, embed=embed, view=view)
             await asyncio.to_thread(save_details)
+            await update_card(key)
         except Exception as e:
             await _report_error(interaction, e)
     return callback
@@ -1162,6 +1215,10 @@ def _parlay_bet_card(value: str):
             return
         if detail.get("board") in PICK_DETAILS:   # every parlay on the card, live
             try:
+                msg = getattr(interaction, "message", None)
+                if msg is not None and getattr(msg, "id", None):   # the posted card, redrawn after each bet
+                    PICK_DETAILS[detail["board"]]["card_msg"] = (getattr(interaction, "channel_id", None)
+                                                                or msg.channel.id, msg.id)
                 embed, view = parlay_board(detail["board"])
                 await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
                 await asyncio.to_thread(save_details)

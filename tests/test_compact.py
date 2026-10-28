@@ -870,3 +870,36 @@ class ParlayBoardTest(unittest.TestCase):
             self.assertFalse(any(c_.custom_id.endswith(":0") for c_ in edits[-1]["view"].children
                                  if getattr(c_, "custom_id", None)))             # no second Bet on #1
             self.assertEqual(len(bets.load_bets()), 1)
+
+    def test_posted_card_boxes_redrawn(self):
+        import tempfile
+        from types import SimpleNamespace
+        import discord
+        from linemaker import bot, parlay
+        from tests.test_parlay_opt import leg
+        evs = [leg(f"g{i}", f"P{i}", "points", p=0.75 - i * 0.02, odds=-150, key=f"NBA|g{i}|P{i}|points|10.5")
+               for i in range(5)]
+        for ev in evs:
+            ev.market.books = [("FanDuel", [-150, 120]), ("DraftKings", [-150, 120])]
+        first = parlay.price("FanDuel", [(evs[0], -150), (evs[1], -150)])
+        second = parlay.price("DraftKings", [(evs[0], -150), (evs[2], -150)])
+        key = bot._remember({"parlays": [first, second], "numbers": [1, 2], "pool": evs})
+        posted = [discord.Embed(title="🎰 header"), discord.Embed(title="#1 · 🟦 FanDuel · 🔒 2-leg"),
+                  discord.Embed(title="#2 · 🟩 DraftKings · 🔒 2-leg")]
+
+        class Resp:
+            async def edit_message(self, **kw):
+                pass
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(os.environ, {
+                "LINEMAKER_TRACKING_DIR": tmp, "LINEMAKER_MAX_EXPOSURE": "1"}):
+            async def go():
+                bot.parlay_board(key)
+                await bot._board_bet(key, 0)(SimpleNamespace(response=Resp(), user="me"))
+                return bot.card_boxes(key, posted)
+            out = asyncio.run(go())
+        self.assertEqual(out[0].title, "🎰 header")                               # the rest untouched
+        self.assertTrue(out[1].title.startswith("✅ #1 · "))
+        self.assertIn("Logged", out[1].description)
+        self.assertTrue(out[2].title.startswith("#2 · "))
+        self.assertIn("Updated", out[2].description)
+        self.assertNotIn("P0", out[2].description.split("Updated")[1].split("💵")[0])

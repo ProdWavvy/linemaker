@@ -896,17 +896,7 @@ def volume_messages(sections: list, date: str, cfg, title: str = "") -> list:
             for j, p in enumerate(mine):
                 # One box per parlay, in the book's colour; the card numbers them (#1, #2 ...).
                 url = parlay_link(p)
-                icon = "🎯" if p.style == "edge" else "🔗" if p.kind else "💰" if p.style == "value" else "🔒"
-                kind = ("Edge" if p.style == "edge" else p.kind or ("Value" if p.style == "value" else "Safest"))
-                lines = legs_lines(p) + [money_line(p)]
-                if abs(p.prob - p.indep_prob) >= 0.01:
-                    lines.append(f"↔️ {_pct(p.indep_prob)} if the legs were independent")
-                from .parlay_format import odds_text, sgp_line
-                if sgp_line(p):
-                    lines.append(sgp_line(p))
-                e = discord.Embed(title=f"{emoji} {bname} · {icon} {len(p.legs)}-leg {kind} · "
-                                        f"{odds_text(p)} · {_pct(p.prob)} hit",
-                                  color=colour, description="\n".join(lines)[:4096])
+                e = parlay_box(p)
                 if j == len(mine) - 1:
                     e.set_footer(text="🎯 model picks, biggest edge first · 🔒 safest legs, one per game · "
                                       "💰 legs priced above fair · 🔗 same-game ticket (≈ book's SGP price) · "
@@ -927,6 +917,22 @@ def volume_messages(sections: list, date: str, cfg, title: str = "") -> list:
         "every over at once). Legs from different games can still move together on late news."))
     out.append(([how, notes, _scoping([(s, r, ex["profiles"]) for s, r, ex in sections])], None))
     return out
+
+
+def parlay_box(p, num: Optional[int] = None, note: str = "") -> discord.Embed:
+    """One parlay's box on a card (also how the card is redrawn after you bet from it)."""
+    from .parlay_format import legs_lines, money_line, odds_text, sgp_line
+    bname, _tag, emoji, colour = _style(p.book)
+    icon = "🎯" if p.style == "edge" else "🔗" if p.kind else "💰" if p.style == "value" else "🔒"
+    kind = ("Edge" if p.style == "edge" else p.kind or ("Value" if p.style == "value" else "Safest"))
+    lines = ([note] if note else []) + legs_lines(p) + [money_line(p)]
+    if abs(p.prob - p.indep_prob) >= 0.01:
+        lines.append(f"↔️ {_pct(p.indep_prob)} if the legs were independent")
+    if sgp_line(p):
+        lines.append(sgp_line(p))
+    title = f"{emoji} {bname} · {icon} {len(p.legs)}-leg {kind} · {odds_text(p)} · {_pct(p.prob)} hit"
+    return discord.Embed(title=(f"#{num} · {title}" if num else title)[:256], color=colour,
+                         description="\n".join(lines)[:4096])
 
 
 def pp_messages(sections: list, date: str, title: str = "") -> list:
