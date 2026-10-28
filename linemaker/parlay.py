@@ -187,6 +187,23 @@ def parlay_leg_price(ev, book: str, blocked: Optional[dict] = None):
 FAIR_VALUE = 0.98   # legs worth less than this (2%+ under fair) are left out when possible
 
 
+def _held_players(used: Optional[dict], book: str):
+    """The players already in a parlay shown for this book (None: no spreading)."""
+    return None if used is None else used.setdefault(_key(book), set())
+
+
+def _fresh(priced: list, taken) -> list:
+    """Legs whose player isn't in another parlay on the card (game lines always allowed)."""
+    if taken is None:
+        return priced
+    return [x for x in priced if x[0].market.bet_type != "prop" or exposure(x[0]) not in taken]
+
+
+def _take(taken, chosen) -> None:
+    if taken is not None:
+        taken.update(exposure(ev) for ev, _o in chosen if ev.market.bet_type == "prop")
+
+
 def _one_per_game(priced: list, size: int) -> list:
     chosen, games = [], set()
     for ev, odds in priced:
@@ -199,11 +216,14 @@ def _one_per_game(priced: list, size: int) -> list:
     return []
 
 
-def build_parlays(legs: list, sizes=(2, 3, 4), books=PARLAY_BOOKS, value: bool = True) -> list:
+def build_parlays(legs: list, sizes=(2, 3, 4), books=PARLAY_BOOKS, value: bool = True,
+                  used: Optional[dict] = None) -> list:
     """Per book and size, one leg per game:
       safest  the likeliest legs, skipping legs priced 2%+ worse than fair while enough remain
       value   the legs that beat their price by the most (hit chance x odds above 1), only
               when the whole parlay is +EV; usually a bigger payout for the same number of legs
+    used: {book: players already in a parlay on the card}, shared across builders, so a
+    player shows up in one parlay per book (place several and one player can't sink them all).
     """
     from .parlay_math import leg_value
     out = []
@@ -213,20 +233,23 @@ def build_parlays(legs: list, sizes=(2, 3, 4), books=PARLAY_BOOKS, value: bool =
         by_prob = sorted(priced, key=lambda x: x[0].best.blended, reverse=True)
         fair = [x for x in by_prob if leg_value(*x) >= FAIR_VALUE]
         by_value = sorted([x for x in priced if leg_value(*x) > 1.0], key=lambda x: leg_value(*x), reverse=True)
+        taken = _held_players(used, book)
         for size in sizes:
-            chosen = _one_per_game(fair, size) or _one_per_game(by_prob, size)
+            chosen = _one_per_game(_fresh(fair, taken), size) or _one_per_game(_fresh(by_prob, taken), size)
             if chosen:
                 out.append(price(book, chosen))
+                _take(taken, chosen)
             if value:
-                best = _one_per_game(by_value, size)
+                best = _one_per_game(_fresh(by_value, taken), size)
                 if best and {id(e) for e, _o in best} != {id(e) for e, _o in chosen}:
                     p = price(book, best, style="value")
                     if p.prob * p.decimal > 1:
                         out.append(p)
+                        _take(taken, best)
     return out
 
 
-def build_edge_parlays(legs: list, sizes=(2, 3), books=PARLAY_BOOKS) -> list:
+def build_edge_parlays(legs: list, sizes=(2, 3), books=PARLAY_BOOKS, used: Optional[dict] = None) -> list:
     """🎯 Edge parlays: the model's own picks (legs priced above fair by a real edge), one per
     game, biggest edge first, only legs that are +EV at that book and only when the whole
     ticket is +EV. They hit less often than the safest ones and pay more."""
@@ -236,12 +259,14 @@ def build_edge_parlays(legs: list, sizes=(2, 3), books=PARLAY_BOOKS) -> list:
         priced = [(ev, parlay_leg_price(ev, book)) for ev in legs]
         priced = sorted([(ev, o) for ev, o in priced if o is not None and leg_value(ev, o) > 1.0],
                         key=lambda x: x[0].best.gap, reverse=True)
+        taken = _held_players(used, book)
         for size in sizes:
-            chosen = _one_per_game(priced, size)
+            chosen = _one_per_game(_fresh(priced, taken), size)
             if chosen:
                 p = price(book, chosen, style="edge")
                 if p.prob * p.decimal > 1:
                     out.append(p)
+                    _take(taken, chosen)
     return out
 
 
@@ -342,7 +367,8 @@ def _game_group(evs: list, book: str, size: int) -> list:
     return group if len(group) == size else []
 
 
-def build_sgps(legs: list, books=PARLAY_BOOKS, sgp_size: int = 3, sgpx_size: int = 4) -> list:
+def build_sgps(legs: list, books=PARLAY_BOOKS, sgp_size: int = 3, sgpx_size: int = 4,
+               used: Optional[dict] = None) -> list:
     """Auto same-game parlays at each book: the likeliest 3-leg SGP from one game, and an
     SGPx / SGP+ of the two likeliest 2-leg game groups (or one group plus the best legs from
     other games). Legs that clash (two lines of one stat, both sides, ML + spread) are
@@ -350,11 +376,16 @@ def build_sgps(legs: list, books=PARLAY_BOOKS, sgp_size: int = 3, sgpx_size: int
     SGP price is lower than the multiplied odds."""
     out = []
     for book in books:
-        by_game = {}
-        for ev in sorted(legs, key=lambda e: e.best.blended, reverse=True):
-            odds = parlay_leg_price(ev, book)
-            if odds is not None:
-                by_game.setdefault(ev.market.game_id, []).append(ev)
+        taken = _held_players(used, book)
+
+        def games_now():
+            by_game = {}
+            for ev in sorted(legs, key=lambda e: e.best.blended, reverse=True):
+                odds = parlay_leg_price(ev, book)
+                if odds is not None and _fresh([(ev, odds)], taken):
+                    by_game.setdefault(ev.market.game_id, []).append(ev)
+            return by_game
+        by_game = games_now()
         odds_of = {id(ev): parlay_leg_price(ev, book) for evs in by_game.values() for ev in evs}
 
         def make(chosen, kind):
@@ -369,7 +400,10 @@ def build_sgps(legs: list, books=PARLAY_BOOKS, sgp_size: int = 3, sgpx_size: int
         one, multi = SGP_NAMES.get(book, ("SGP", "SGP+"))
         sgps = [g for g in (_game_group(evs, book, sgp_size) for evs in by_game.values()) if g]
         if sgps:
-            out.append(make(max(sgps, key=score), one))
+            best = max(sgps, key=score)
+            out.append(make(best, one))
+            _take(taken, [(ev, None) for ev in best])
+            by_game = games_now()
         pairs = sorted((g for g in (_game_group(evs, book, 2) for evs in by_game.values()) if g),
                        key=score, reverse=True)
         if pairs:
@@ -384,6 +418,7 @@ def build_sgps(legs: list, books=PARLAY_BOOKS, sgp_size: int = 3, sgpx_size: int
             chosen += singles[:sgpx_size - len(chosen)]
             if len(chosen) == sgpx_size and len({ev.market.game_id for ev in chosen}) > 1:
                 out.append(make(chosen, multi))
+                _take(taken, [(ev, None) for ev in chosen])
     return out
 
 
@@ -395,6 +430,57 @@ def exposure(ev) -> tuple:
     result (a team's moneyline, spread and the total lose together)."""
     m = ev.market
     return (m.game_id, m.subject) if m.bet_type == "prop" else (m.game_id, "game line")
+
+
+def swap_held(p, pool: list, held: Optional[dict] = None, cap: Optional[int] = None):
+    """(parlay, notes) for a card's parlay opened after you've placed others: each player
+    already in `cap`+ open bets is swapped for the best leg of the pool (same style: biggest
+    edge / best value / likeliest) that isn't held or already on the ticket, from another
+    game (from the same game for a same-game group). A leg with no replacement is dropped
+    while 2+ legs remain. (None, notes) when the ticket can't be rebuilt; (p, []) unchanged."""
+    from .bets import max_exposure, open_exposure
+    from .parlay_math import leg_value
+    held = open_exposure() if held is None else held
+    cap = max_exposure() if cap is None else cap
+    if not cap:
+        return p, []
+
+    def is_held(ev):
+        return ev.market.bet_type == "prop" and held.get(exposure(ev), {}).get("n", 0) >= cap
+    if not any(is_held(ev) for ev, _o in p.legs):
+        return p, []
+    score = {"edge": lambda ev, o: ev.best.gap, "value": lambda ev, o: leg_value(ev, o)}.get(
+        p.style, lambda ev, o: ev.best.blended)
+    keep = [(ev, o) for ev, o in p.legs if not is_held(ev)]
+    notes = []
+    for ev, _o in p.legs:
+        if not is_held(ev):
+            continue
+        same_game = sum(e.market.game_id == ev.market.game_id for e, _x in p.legs) > 1
+        taken = {exposure(e) for e, _x in keep} | {e.market.key for e, _x in keep}
+        games = {e.market.game_id for e, _x in keep}
+        best = None
+        for cand in pool:
+            o = parlay_leg_price(cand, p.book)
+            if (o is None or is_held(cand) or exposure(cand) in taken or cand.market.key in taken
+                    or (p.style in ("edge", "value") and leg_value(cand, o) <= 1.0)):
+                continue
+            if same_game:
+                if cand.market.game_id != ev.market.game_id or sgp_check([e for e, _x in keep] + [cand], p.book)["blocked"]:
+                    continue
+            elif cand.market.game_id in games:
+                continue
+            if best is None or score(cand, o) > score(*best):
+                best = (cand, o)
+        if best:
+            keep.append(best)
+            notes.append(f"{ev.best.label} → {best[0].best.label}")
+        else:
+            notes.append(f"{ev.best.label} dropped (no fresh leg to swap in)")
+    if len(keep) < 2:
+        return None, notes
+    same_game_left = sgp_check([e for e, _x in keep], p.book)["groups"]
+    return price(p.book, keep, kind=p.kind if same_game_left else "", style=p.style), notes
 
 
 def _ladder_limits() -> tuple:

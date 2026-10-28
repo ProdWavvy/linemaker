@@ -1,4 +1,5 @@
 import os
+import os
 import unittest
 from unittest import mock
 
@@ -39,7 +40,8 @@ class LiveParlaySizeTest(unittest.TestCase):
                          "books": "FanDuel:-250/+200|DraftKings:-250/+200" if strong else
                                   "FanDuel:-350/+260|DraftKings:-350/+260"})
         res = run_pro(rows_to_markets(rows), "2026-10-25", cfg)
-        msgs = volume_messages([("NBA", res, {"profiles": {}, "context": {}, "history": {}})], "2026-10-25", cfg)
+        with mock.patch.dict(os.environ, {"LINEMAKER_SPREAD_PARLAYS": "off"}):   # nested sizes on 8 players
+            msgs = volume_messages([("NBA", res, {"profiles": {}, "context": {}, "history": {}})], "2026-10-25", cfg)
         parlays = [p for _e, d in msgs if d and "parlays" in d for p in d["parlays"]]
         sizes = {len(p.legs) for p in parlays}
         self.assertTrue(any(n > 3 for n in sizes), sizes)                       # no hard 3-leg cap

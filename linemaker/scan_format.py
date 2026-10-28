@@ -855,9 +855,14 @@ def volume_messages(sections: list, date: str, cfg, title: str = "") -> list:
         from .parlay import build_edge_parlays
         edge_pool = [ev for ev in edge_all if not cap or held.get(exposure(ev), {}).get("n", 0) < cap]
         edge_sizes = tuple(s for s in (2, 3) if not cfg.max_parlay_legs or s <= cfg.max_parlay_legs)
-        parlays = (build_edge_parlays(edge_pool, sizes=edge_sizes, books=books)
-                   + (build_parlays(pool, sizes=sizes, books=books) + build_sgps(pool, books=books)
-                      if len(pool) >= 2 else []))
+        def build(used):
+            return (build_edge_parlays(edge_pool, sizes=edge_sizes, books=books, used=used)
+                    + (build_parlays(pool, sizes=sizes, books=books, used=used) + build_sgps(pool, books=books, used=used)
+                       if len(pool) >= 2 else []))
+        # Each player in one parlay per book (LINEMAKER_SPREAD_PARLAYS=off: the old nested ladders),
+        # so placing several of them doesn't stack one player's risk.
+        spread = os.environ.get("LINEMAKER_SPREAD_PARLAYS", "on").lower() not in ("off", "0", "no", "false")
+        parlays = (build({}) if spread else []) or build(None)
         if cfg.max_parlay_legs:
             parlays = [p for p in parlays if len(p.legs) <= cfg.max_parlay_legs]
         if cfg.parlay_min_ev is not None:   # bigger tickets only while they still hold their value
@@ -900,7 +905,9 @@ def volume_messages(sections: list, date: str, cfg, title: str = "") -> list:
                                       "💰 legs priced above fair · 🔗 same-game ticket (≈ book's SGP price) · "
                                       "✅ leg is +EV at this price")
                 links = [(f"{len(p.legs)}-leg on {bname}", url)] if url else []
-                out.append(([e], {"links": links, "parlays": [p]}))
+                # pool: the card's legs, so a parlay opened after you've placed others can swap
+                # out players already in your open bets (bot.swap_held).
+                out.append(([e], {"links": links, "parlays": [p], "pool": legs}))
     notes = discord.Embed(title="🧠 Volume Mode, Honestly", color=PURPLE, description=(
         "🎯 Edge parlays are the model's own picks (each leg priced above fair): the only ones "
         "built for long-run profit; they hit less often and pay more. "

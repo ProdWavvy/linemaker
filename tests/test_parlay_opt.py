@@ -325,3 +325,36 @@ class ParlaySystemFixTest(unittest.TestCase):
             done = list(parlay_track._load("2026-10-24").values())[0]
         self.assertAlmostEqual(done["profit"], round(p.decimal - 1, 4), places=3)
         self.assertLess(done["profit"], p.listed_decimal - 1)
+
+
+class SpreadAcrossCardTest(unittest.TestCase):
+    def test_each_player_in_one_parlay_per_book(self):
+        from linemaker import parlay
+        legs = [leg(f"g{i}", f"P{i}", "points", p=0.75 - i * 0.01, odds=-150) for i in range(9)]
+        for i, ev in enumerate(legs):
+            ev.best.gap = 0.15 - i * 0.01
+        used = {}
+        built = (parlay.build_edge_parlays(legs, sizes=(2, 3), books=("FanDuel",), used=used)
+                 + parlay.build_parlays(legs, sizes=(2, 3, 4), books=("FanDuel",), used=used))
+        players = [ev.market.subject for p in built for ev, _o in p.legs]
+        self.assertTrue(built)
+        self.assertEqual(len(players), len(set(players)))                 # nobody twice on the card
+        nested = parlay.build_parlays(legs, sizes=(2, 3), books=("FanDuel",), value=False)
+        self.assertEqual(nested[0].legs[0][0], nested[1].legs[0][0])     # without used: the old ladder
+
+
+class SwapHeldTest(unittest.TestCase):
+    def test_player_in_an_open_bet_is_swapped_out(self):
+        from linemaker import parlay
+        a, b, c, d = (leg(f"g{i}", f"P{i}", "points", p=0.75 - i * 0.02, odds=-150) for i in range(4))
+        p = parlay.price("FanDuel", [(a, -150), (b, -150)])
+        held = {parlay.exposure(a): {"n": 1, "label": "P0"}}
+        new, notes = parlay.swap_held(p, [a, b, c, d], held, 1)
+        self.assertEqual([ev.market.subject for ev, _o in new.legs], ["P1", "P2"])   # P0 → the best fresh leg
+        self.assertIn("→ P2 points A", notes[0])
+        same, none = parlay.swap_held(p, [a, b, c, d], {}, 1)
+        self.assertIs(same, p)
+        self.assertEqual(none, [])
+        gone, why = parlay.swap_held(p, [a, b], held, 1)                 # nothing fresh to swap in
+        self.assertIsNone(gone)
+        self.assertIn("dropped", why[0])

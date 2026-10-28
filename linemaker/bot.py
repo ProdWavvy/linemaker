@@ -1018,9 +1018,20 @@ def _parlay_bet_card(value: str):
             return
         try:
             p = detail["parlays"][int(i)]
-            embed, view = parlay_card([ev for ev, _o in p.legs], (p.book,))
-            kind = "Edge" if p.style == "edge" else getattr(p, "kind", "") or ("Value" if p.style == "value" else "Safest")
-            embed.title = f"🎰 {len(p.legs)}-Leg {kind} Parlay · {p.book}"
+            from .parlay import swap_held
+            new, notes = await asyncio.to_thread(swap_held, p, detail.get("pool") or [])
+            if new is None:
+                await interaction.response.send_message(
+                    "🧯 This parlay's players are already in your open bets and there's no fresh leg to swap "
+                    "in (" + "; ".join(notes)[:500] + "). Pick another parlay, or ask again for new ones.",
+                    ephemeral=True)
+                return
+            embed, view = parlay_card([ev for ev, _o in new.legs], (new.book,))
+            kind = "Edge" if new.style == "edge" else getattr(new, "kind", "") or ("Value" if new.style == "value" else "Safest")
+            embed.title = f"🎰 {len(new.legs)}-Leg {kind} Parlay · {new.book}"
+            if notes:   # one bet per player: what changed since the card was posted
+                embed.description = ("🔄 **Swapped (already in your open bets):** " + "; ".join(notes)
+                                     + "\n\n" + (embed.description or ""))[:4096]
             await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
         except Exception as e:
             await _report_error(interaction, e)
@@ -1940,12 +1951,26 @@ async def bets_cmd(interaction: discord.Interaction):
         return
     open_.sort(key=lambda b: b.get("placed", ""), reverse=True)
 
+    from .parlay_format import short_label
+
     def what(b):
         return b["legs"][0]["label"] if b["kind"] == "single" else f"{len(b['legs'])}-leg parlay"
-    lines = [f"{'🧪 ' if b.get('paper') else ''}**{what(b)}** {fmt_odds(b['odds'])} · {_money(b['stake'])} · "
-             f"{b.get('book', '')} · {b.get('placed', '')[5:16].replace('T', ' ')}" for b in open_[:15]]
-    embed = discord.Embed(title=f"🧾 Open Bets ({len(open_)})", color=0x2ECC71, description="\n".join(lines)[:4000])
-    embed.set_footer(text="🧪 = practice bet · pick one below to change its stake / odds or undo it")
+
+    def leg_line(l):
+        return f"  • {short_label(l.get('label', ''))}" + (f" ({fmt_odds(l['odds'])})" if l.get("odds") is not None else "")
+    blocks, size = [], 0
+    for b in open_:   # every bet with its legs, newest first, as many as fit
+        block = "\n".join([f"{'🧪 ' if b.get('paper') else ''}{'🎁 ' if b.get('bonus') else ''}**{what(b)}** "
+                           f"{fmt_odds(b['odds'])} · {_money(b['stake'])} · {b.get('book', '')} · "
+                           f"{b.get('placed', '')[5:16].replace('T', ' ')}"]
+                          + ([leg_line(l) for l in b["legs"]] if b["kind"] != "single" else []))
+        if size + len(block) > 3900:
+            blocks.append(f"…and {len(open_) - len(blocks)} more (in the menu below)")
+            break
+        blocks.append(block)
+        size += len(block) + 2
+    embed = discord.Embed(title=f"🧾 Open Bets ({len(open_)})", color=0x2ECC71, description="\n\n".join(blocks)[:4096])
+    embed.set_footer(text="🧪 practice · 🎁 bonus bet · pick one below to change its stake / odds or undo it")
     view = discord.ui.View(timeout=None)
     options = [discord.SelectOption(label=f"{what(b)} {fmt_odds(b['odds'])} · {_money(b['stake'])}"[:100],
                                     description=(", ".join(l.get("label", "") for l in b["legs"]))[:100] or None,
