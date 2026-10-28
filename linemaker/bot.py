@@ -176,6 +176,8 @@ async def route_component(interaction: discord.Interaction) -> bool:
     elif kind == "noparsel":
         values = (interaction.data or {}).get("values") or ["x"]
         handler = _no_parlay_pick(key, int(parts[3]), values[0])
+    elif kind == "bboard":
+        handler = _board_bet(key, int(parts[3]))
     elif kind == "pbet":   # lm:pbet:<key>:<i>; the dropdown sends the chosen parlay as key:i
         values = (interaction.data or {}).get("values") or [f"{key}:{parts[3] if len(parts) > 3 else 0}"]
         handler = _parlay_bet_card(values[0])
@@ -763,7 +765,22 @@ class CompactView(discord.ui.View):
                        for d in list(legs)[:25]]
             self.add_item(discord.ui.Select(placeholder="🧾 Pick a leg to bet it on its own",
                                             options=options, row=0, custom_id=f"lm:pick:{options[0].value}"))
-        auto = [(_remember(d), d) for _e, d in parlays if "parlays" in d]
+        boxes = [d for _e, d in parlays if "parlays" in d]
+        if boxes:   # the live board behind the parlay menu: every parlay, in card order
+            board = {"parlays": [], "numbers": [], "pool": []}
+            seen = set()
+            for d in boxes:
+                board["parlays"] += d["parlays"]
+                n = len(d["parlays"])
+                board["numbers"] += (list(d.get("numbers") or []) + [None] * n)[:n]
+                for ev in d.get("pool") or []:
+                    if id(ev) not in seen:
+                        seen.add(id(ev))
+                        board["pool"].append(ev)
+            bkey = _remember(board)
+            for d in boxes:
+                d["board"] = bkey
+        auto = [(_remember(d), d) for d in boxes]
         if auto:
             from .parlay_format import short_label
             options = []
@@ -1028,6 +1045,111 @@ def targets_card(picks: list, books, found: Optional[dict] = None) -> tuple:
     return embeds[:10], view
 
 
+def parlay_board(key: str) -> tuple:
+    """(embed, view) for every auto-parlay on a card, live like the Build-a-parlay slip: each
+    has a Bet button, and after every bet the rest are rebuilt so no player repeats (one
+    already in an open bet, or on a parlay above, is swapped for a fresh leg or dropped)."""
+    from .bets import load_bets, max_exposure, open_exposure
+    from .betlinks import parlay_link
+    from .parlay import exposure, swap_held
+    from .parlay_format import short_label
+    from .staking import _money
+    d = PICK_DETAILS[key]
+    parlays, pool, nums = d["parlays"], d.get("pool") or [], d.get("numbers") or []
+    open_ids = {b["id"]: b for b in load_bets() if b.get("status") == "open"}
+    placed = {j: b for j, b in (d.get("placed") or {}).items() if b in open_ids}   # undone bets drop off
+    d["placed"] = placed
+    cap = max_exposure() or 1
+    held = {k: dict(v) for k, v in open_exposure().items()}
+    current, blocks = {}, []
+    for j, p in enumerate(parlays):
+        num = f"#{nums[j]}" if j < len(nums) and nums[j] else f"#{j + 1}"
+        if j in placed:
+            b = open_ids[placed[j]]
+            blocks.append(f"✅ **{num} logged** · {b.get('book', '')} {fmt_odds(b['odds'])} · {_money(b['stake'])}\n"
+                          + "\n".join(f"  • {short_label(l.get('label', ''))}" for l in b["legs"]))
+            continue
+        new, notes = swap_held(p, pool, held, cap)
+        if new is None:
+            blocks.append(f"🧯 ~~{num}~~ its players are in your bets now, nothing fresh to swap in")
+            continue
+        current[j] = new
+        for ev, _o in new.legs:   # the next parlays can't reuse these players
+            if ev.market.bet_type == "prop":
+                held[exposure(ev)] = {"n": cap, "label": ev.best.label}
+        kind = "Edge" if new.style == "edge" else new.kind or ("Value" if new.style == "value" else "Safest")
+        head = (f"{'🟦' if new.book == 'FanDuel' else '🟩'} **{num}** · {len(new.legs)}-leg {kind} · "
+                f"**{fmt_odds(new.american)}** · {new.prob:.0%} hit")
+        blocks.append("\n".join([head] + [f"  • {short_label(ev.best.label)} ({fmt_odds(o)})" for ev, o in new.legs]
+                                + ([f"  🔄 {'; '.join(notes)}"] if notes else [])))
+    d["current"] = current
+    embed = discord.Embed(title="🎰 Today's Parlays · tap Bet", color=0xF1C40F,
+                          description="\n\n".join(blocks)[:4096])
+    embed.set_footer(text="Bet logs it at your suggested stake. After each bet the others update so no "
+                          "player is on two of your tickets. ✏️ / ↩️ / 🎁 for a logged bet: /bets")
+    view = discord.ui.View(timeout=None)
+    for n, j in enumerate(list(current)[:20]):
+        p = current[j]
+        num = f"#{nums[j]}" if j < len(nums) and nums[j] else f"#{j + 1}"
+        view.add_item(discord.ui.Button(label=f"Bet {num} {fmt_odds(p.american)}", row=n // 5,
+                                        emoji="🟦" if p.book == "FanDuel" else "🟩", style=discord.ButtonStyle.success,
+                                        custom_id=f"lm:bboard:{key}:{j}"))
+    last = d.get("last")
+    if last in placed:   # the slip for the one just logged
+        b = open_ids[placed[last]]
+        lp = d.get("last_parlay")
+        url = parlay_link(lp) if lp is not None else None
+        if url and len(url) <= 512:
+            view.add_item(discord.ui.Button(label=f"Open the slip on {b.get('book', '')}", url=url, row=4,
+                                            emoji="🟦" if b.get("book") == "FanDuel" else "🟩"))
+    return embed, view
+
+
+def log_parlay(p, user: str) -> tuple:
+    """(bet, already) — log a parlay at the suggested stake, or find it if it's logged."""
+    from .bets import add_bet, find_open, leg_from_eval
+    from .staking import bankroll, paper_on, suggested_dollars
+    legs = [leg_from_eval(ev, odds=o, book=p.book) for ev, o in p.legs]
+    bet = find_open(p.book, legs)
+    if bet is not None:
+        return bet, True
+    stake = suggested_dollars(p.prob, p.american, parlay=True) or (0.10 if bankroll() else 2.5)
+    return add_bet(legs, p.american, stake, p.book, user, auto=True, paper=paper_on(),
+                   what=f"{len(p.legs)}-leg {getattr(p, 'kind', '') or 'parlay'}"), False
+
+
+def _board_bet(key: str, j: int):
+    async def callback(interaction: discord.Interaction):
+        d = PICK_DETAILS.get(key)
+        if d is None or not d.get("parlays"):
+            await interaction.response.send_message("This card is too old. Ask again for fresh parlays.",
+                                                    ephemeral=True)
+            return
+        try:
+            from .staking import _money
+            parlay_board(key)   # today's versions, against your bets right now
+            p = d["current"].get(j)
+            if p is None:
+                embed, view = parlay_board(key)
+                await interaction.response.edit_message(content="That parlay isn't available anymore.",
+                                                        embed=embed, view=view)
+                return
+            bet, again = await asyncio.to_thread(log_parlay, p, str(interaction.user))
+            d.setdefault("placed", {})[j] = bet["id"]
+            d["last"], d["last_parlay"] = j, p
+            embed, view = parlay_board(key)
+            note = (f"{'Already logged' if again else '📝 Logged'} **{_money(bet['stake'])}** on "
+                    f"{len(p.legs)}-leg {p.book} at **{fmt_odds(bet['odds'])}**"
+                    + (" (≈ the book's same-game price: ✏️ it in /bets if the slip differs)"
+                       if getattr(p, "sgp_estimated", False) else "")
+                    + ". Open the slip below; the other parlays just updated.")
+            await interaction.response.edit_message(content=note, embed=embed, view=view)
+            await asyncio.to_thread(save_details)
+        except Exception as e:
+            await _report_error(interaction, e)
+    return callback
+
+
 def _parlay_bet_card(value: str):
     """One auto-parlay from a card, privately: its price at the book, a one-tap Bet button
     (the slip opens with every leg) and Log."""
@@ -1037,6 +1159,14 @@ def _parlay_bet_card(value: str):
         if detail is None or not detail.get("parlays"):
             await interaction.response.send_message("This card is too old. Ask again for fresh parlays.",
                                                     ephemeral=True)
+            return
+        if detail.get("board") in PICK_DETAILS:   # every parlay on the card, live
+            try:
+                embed, view = parlay_board(detail["board"])
+                await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
+                await asyncio.to_thread(save_details)
+            except Exception as e:
+                await _report_error(interaction, e)
             return
         try:
             p = detail["parlays"][int(i)]

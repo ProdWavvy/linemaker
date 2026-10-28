@@ -20,7 +20,7 @@ ASKS = [
 ]
 ROWS = [
     "**Menu 1** 🔎 Pick a play / leg: its write-up, Bet button and I bet this",
-    "**Menu 2** 🎰 Pick a parlay #1, #2 …: **Bet** logs it and opens the slip (↩️ Undo if you don't place it)",
+    "**Menu 2** 🎰 Pick a parlay: every parlay with its own **Bet**; after each bet the rest update so no player repeats",
     "**Buttons** 🎯 Safest by payout · 🎰 Build a parlay · 🔄 Fresh odds · 📂 More",
     "**📂 More** 📊 Odds & stats · ⚡ Market edges · 💰 Moneyline parlay · ℹ️ Notes & passes",
     "**🎰 Build a parlay** tap legs or ➕ Best next leg · 🚀 Boost · Bet · 📊 Leg stats",

@@ -832,3 +832,41 @@ class SwapAtBetTest(unittest.TestCase):
         players = [l["label"].split()[0] for l in logged[1]["legs"]]
         self.assertNotIn("P0", players)                                     # swapped out at Bet
         self.assertIn("Changed before logging", replies[1])
+
+
+class ParlayBoardTest(unittest.TestCase):
+    def test_betting_one_updates_the_others(self):
+        import tempfile
+        from types import SimpleNamespace
+        from linemaker import bets, bot, parlay
+        from tests.test_parlay_opt import leg
+        evs = [leg(f"g{i}", f"P{i}", "points", p=0.75 - i * 0.02, odds=-150, key=f"NBA|g{i}|P{i}|points|10.5")
+               for i in range(5)]
+        for ev in evs:
+            ev.market.books = [("FanDuel", [-150, 120]), ("DraftKings", [-150, 120])]
+        a, b, c = evs[:3]
+        first = parlay.price("FanDuel", [(a, -150), (b, -150)])
+        second = parlay.price("DraftKings", [(a, -150), (c, -150)])          # shares P0 with #1
+        key = bot._remember({"parlays": [first, second], "numbers": [1, 2], "pool": evs})
+        edits = []
+
+        class Resp:
+            async def edit_message(self, **kw):
+                edits.append(kw)
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(os.environ, {
+                "LINEMAKER_TRACKING_DIR": tmp, "LINEMAKER_MAX_EXPOSURE": "1"}):
+            async def show():
+                return bot.parlay_board(key)
+            embed, view = asyncio.run(show())
+            self.assertIn("P0 points A", embed.description.split("#2")[1])        # before: P0 on both
+            bet1 = next(c_ for c_ in view.children if c_.custom_id.endswith(":0"))
+            asyncio.run(bot.route_component(SimpleNamespace(data={"custom_id": bet1.custom_id},
+                                                            response=Resp(), user="me")))
+            after = edits[-1]["embed"].description
+            self.assertIn("✅ **#1 logged**", after)
+            legs2 = [l for l in after.split("#2")[1].splitlines() if l.strip().startswith("•")]
+            self.assertEqual(legs2, ["  • P2 points A (-150)", "  • P3 points A (-150)"])   # P0 swapped out of #2
+            self.assertIn("🔄", after)
+            self.assertFalse(any(c_.custom_id.endswith(":0") for c_ in edits[-1]["view"].children
+                                 if getattr(c_, "custom_id", None)))             # no second Bet on #1
+            self.assertEqual(len(bets.load_bets()), 1)
