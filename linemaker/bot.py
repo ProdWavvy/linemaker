@@ -1532,6 +1532,8 @@ class LinemakerBot(discord.Client):
             h, m = grade_at.split(":")
             daily_grade.change_interval(time=dt.time(int(h), int(m), tzinfo=TZ))
             daily_grade.start()
+        if not budget_loop.is_running():
+            budget_loop.start()
 
     def alert_channel_id(self) -> Optional[int]:
         raw = os.environ.get("LINEMAKER_CHANNEL_ID") or self.home
@@ -1552,6 +1554,9 @@ class LinemakerBot(discord.Client):
         log.info("logged in as %s (chat %s)", self.user,
                  f"on: {self.chat.provider}" if self.chat else "off")
         asyncio.get_running_loop().create_task(_warm_up())
+        from .oddsapi import _spend, local_today
+        if _spend(local_today()).get("start_remaining") is None:   # restarted before today's check
+            asyncio.get_running_loop().create_task(_refresh_budget())
         if self.home is not None:
             ch = self.get_channel(self.home)
             if ch is None:
@@ -2254,6 +2259,22 @@ async def _warm_up():
             await asyncio.to_thread(warm_up, sport, today())
         except Exception as e:
             log.warning("warm-up %s: %s", sport, e)
+
+
+@tasks.loop(time=dt.time(0, 2, tzinfo=TZ))
+async def budget_loop():
+    """Just after midnight: today's credit budget from every key's balance (free check)."""
+    await _refresh_budget()
+
+
+async def _refresh_budget():
+    from .oddsapi import days_to_reset, refresh_day_budget
+    try:
+        budget = await asyncio.to_thread(refresh_day_budget)
+        if budget is not None:
+            log.info("credit budget for %s: %s a day (%s day(s) to the refill)", today(), budget, days_to_reset())
+    except Exception as e:
+        log.warning("midnight budget check: %s", e)
 
 
 def _alert_sports(override: str = "") -> list:

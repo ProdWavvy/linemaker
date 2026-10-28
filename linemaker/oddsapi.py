@@ -457,15 +457,46 @@ def days_to_reset(today: Optional[dt.date] = None) -> int:
     return max((nxt - today).days, 1)
 
 
+def set_day_start(remaining: int, day: Optional[str] = None) -> dict:
+    """Record what the account has as the day begins (the midnight check), which today's
+    budget is worked out from. Kept as is if a paid call already set it today."""
+    day = day or local_today()
+    path = _spend_path(day)
+    from .jsonio import path_lock, save_json
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    with path_lock(path):
+        v = _spend(day)
+        if v.get("start_remaining") is None or not v.get("total"):
+            v["start_remaining"] = int(remaining)
+            v.setdefault("remaining", int(remaining))
+            save_json(path, v)
+    return v
+
+
+def refresh_day_budget() -> Optional[int]:
+    """Just after midnight: every key's balance from the free /sports endpoint, recorded as
+    today's starting balance, so the new budget is set before anything spends. Returns it."""
+    rows = key_quotas()
+    left = [r[2] for r in rows if r[2] is not None]
+    if not left:
+        return None
+    set_day_start(sum(left))
+    return daily_budget()
+
+
 def daily_budget() -> Optional[int]:
     """Credits for today. LINEMAKER_DAILY_CREDITS=auto (default): what the account had when
-    today began, spread evenly over the days left until the credits refill, so the month
-    never runs dry; a number fixes it; blank = no budget."""
+    today began (checked just after midnight, or the first call's balance), spread evenly
+    over the days left until the credits refill, so the month never runs dry; a number
+    fixes it; blank = no budget."""
     raw = os.environ.get("LINEMAKER_DAILY_CREDITS", "auto").strip().lower()
     if raw == "auto":
         start = _spend(local_today()).get("start_remaining")
+        if start is None:   # not checked yet today: yesterday's last balance
+            yesterday = (dt.date.fromisoformat(local_today()) - dt.timedelta(days=1)).isoformat()
+            start = _spend(yesterday).get("remaining")
         if start is None:
-            return 700   # until the first call today reports the balance
+            return 700
         return max(int(start / days_to_reset()), 50)
     try:
         return int(raw) if raw else None

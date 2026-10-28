@@ -161,3 +161,22 @@ class ClosingReadKeysTest(unittest.TestCase):
         self.assertIn("player_rebounds", seen[0])
         self.assertNotIn("player_points", seen[0])
         self.assertIsNone(oddsapi.PROP_KEYS.get())                       # reset after the read
+
+
+class MidnightBudgetTest(unittest.TestCase):
+    def test_budget_set_after_midnight_from_every_key(self):
+        import tempfile
+        from linemaker import oddsapi
+        with tempfile.TemporaryDirectory() as d, mock.patch.dict(os.environ, {
+                "LINEMAKER_CACHE_DIR": d, "LINEMAKER_DAILY_CREDITS": "auto", "LINEMAKER_CREDIT_RESET_DAY": "21"}), \
+                mock.patch.object(oddsapi, "local_today", return_value="2026-10-28"):
+            yesterday = oddsapi._spend_path("2026-10-27")
+            with open(yesterday, "w") as f:
+                json.dump({"total": 300, "remaining": 13042, "start_remaining": 13342}, f)
+            self.assertEqual(oddsapi.daily_budget(), 13042 // 24)          # before the check: yesterday's balance
+            with mock.patch.object(oddsapi, "key_quotas", return_value=[(1, "…a", 12000, 0, None, True),
+                                                                        (2, "…b", 1000, 0, None, False),
+                                                                        (3, "…c", None, None, "401", False)]):
+                self.assertEqual(oddsapi.refresh_day_budget(), 13000 // 24)   # both keys, the dead one skipped
+            oddsapi.record_spend(40, 12960)                                   # a paid call later keeps it
+            self.assertEqual(oddsapi._spend("2026-10-28")["start_remaining"], 13000)
