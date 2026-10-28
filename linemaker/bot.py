@@ -787,13 +787,9 @@ class CompactView(discord.ui.View):
             for key, detail in auto:
                 nums = detail.get("numbers") or []
                 for i, p in enumerate(detail.get("parlays") or []):
-                    kind = "Edge" if p.style == "edge" else getattr(p, "kind", "") or ("Value" if p.style == "value" else "Safest")
-                    leg_text = ", ".join(short_label(ev.best.label) for ev, _o in p.legs)
-                    num = f"#{nums[i]} · " if i < len(nums) else ""
-                    options.append(discord.SelectOption(
-                        label=f"{num}{p.book} · {len(p.legs)}-leg {kind} · {fmt_odds(p.american)}"[:100],
-                        description=f"{p.prob:.0%} hit · {leg_text}"[:70], value=f"{key}:{i}",
-                        emoji="🟦" if p.book == "FanDuel" else "🟩"))
+                    label, desc = parlay_option_text(p, nums[i] if i < len(nums) else None)
+                    options.append(discord.SelectOption(label=label, description=desc, value=f"{key}:{i}",
+                                                        emoji="🟦" if p.book == "FanDuel" else "🟩"))
             if options:
                 self.add_item(discord.ui.Select(placeholder="🎰 Pick a parlay #1, #2 ... to bet it (logs it for you)",
                                                 options=options[:25], row=1,
@@ -1105,6 +1101,38 @@ def parlay_board(key: str) -> tuple:
     return embed, view
 
 
+def parlay_option_text(p, num=None, prefix: str = "") -> tuple:
+    """(label, description) for a parlay in a card's parlay menu."""
+    from .parlay_format import short_label
+    kind = "Edge" if p.style == "edge" else getattr(p, "kind", "") or ("Value" if p.style == "value" else "Safest")
+    leg_text = ", ".join(short_label(ev.best.label) for ev, _o in p.legs)
+    head = f"{prefix}#{num} · " if num else prefix
+    return (f"{head}{p.book} · {len(p.legs)}-leg {kind} · {fmt_odds(p.american)}"[:100],
+            f"{p.prob:.0%} hit · {leg_text}"[:100])
+
+
+def card_menu(key: str, view) -> None:
+    """The posted card's parlay menu relabelled from the live board (same order as the board)."""
+    from .bets import load_bets
+    d = PICK_DETAILS[key]
+    nums = d.get("numbers") or []
+    open_ids = {b["id"] for b in load_bets() if b.get("status") == "open"}
+    menu = next((c for c in view.children if str(getattr(c, "custom_id", "")).startswith("lm:pbet:")), None)
+    if menu is None:
+        return
+    for j, opt in enumerate(menu.options[:len(d["parlays"])]):
+        num = nums[j] if j < len(nums) else None
+        if j in (d.get("placed") or {}) and d["placed"][j] in open_ids:
+            p = (d.get("logged") or {}).get(j) or d["parlays"][j]
+            opt.label, opt.description = parlay_option_text(p, num, prefix="✅ ")
+            opt.description = ("Logged · " + opt.description)[:100]
+        elif j in (d.get("current") or {}):
+            opt.label, opt.description = parlay_option_text(d["current"][j], num)
+        else:
+            opt.label = f"🧯 #{num} · no longer available"[:100] if num else "🧯 no longer available"
+            opt.description = "Its players are already in your bets"
+
+
 def card_boxes(key: str, embeds: list) -> list:
     """The posted card's embeds with each parlay box redrawn from the live board: ✅ logged,
     the swapped legs, or crossed out. Other embeds (header, board, notes) stay as they are."""
@@ -1151,7 +1179,9 @@ async def update_card(key: str):
     try:
         channel = bot.get_channel(ref[0]) or await bot.fetch_channel(ref[0])
         msg = await channel.fetch_message(ref[1])
-        await msg.edit(embeds=card_boxes(key, msg.embeds))
+        view = discord.ui.View.from_message(msg, timeout=None)
+        card_menu(key, view)
+        await msg.edit(embeds=card_boxes(key, msg.embeds), view=view)
     except Exception as e:
         log.warning("couldn't redraw the card: %s", e)
 

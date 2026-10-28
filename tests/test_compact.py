@@ -903,3 +903,37 @@ class ParlayBoardTest(unittest.TestCase):
         self.assertTrue(out[2].title.startswith("#2 · "))
         self.assertIn("Updated", out[2].description)
         self.assertNotIn("P0", out[2].description.split("Updated")[1].split("💵")[0])
+
+    def test_posted_card_menu_relabelled(self):
+        import tempfile
+        from types import SimpleNamespace
+        import discord
+        from linemaker import bot, parlay
+        from tests.test_parlay_opt import leg
+        evs = [leg(f"g{i}", f"P{i}", "points", p=0.75 - i * 0.02, odds=-150, key=f"NBA|g{i}|P{i}|points|10.5")
+               for i in range(5)]
+        for ev in evs:
+            ev.market.books = [("FanDuel", [-150, 120]), ("DraftKings", [-150, 120])]
+        first = parlay.price("FanDuel", [(evs[0], -150), (evs[1], -150)])
+        second = parlay.price("DraftKings", [(evs[0], -150), (evs[2], -150)])
+        key = bot._remember({"parlays": [first, second], "numbers": [1, 2], "pool": evs})
+
+        class Resp:
+            async def edit_message(self, **kw):
+                pass
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(os.environ, {
+                "LINEMAKER_TRACKING_DIR": tmp, "LINEMAKER_MAX_EXPOSURE": "1"}):
+            async def go():
+                view = discord.ui.View(timeout=None)
+                view.add_item(discord.ui.Select(custom_id="lm:pbet:x:0", options=[
+                    discord.SelectOption(label="#1 old", value="x:0"), discord.SelectOption(label="#2 old", value="x:1")]))
+                bot.parlay_board(key)
+                await bot._board_bet(key, 0)(SimpleNamespace(response=Resp(), user="me"))
+                bot.card_menu(key, view)
+                return view.children[0].options
+            opts = asyncio.run(go())
+        self.assertTrue(opts[0].label.startswith("✅ #1 · FanDuel"))
+        self.assertTrue(opts[0].description.startswith("Logged"))
+        self.assertTrue(opts[1].label.startswith("#2 · DraftKings"))
+        self.assertNotIn("P0", opts[1].description)
+        self.assertEqual(opts[1].value, "x:1")                                     # still opens the board
