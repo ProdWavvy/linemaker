@@ -169,6 +169,11 @@ async def route_component(interaction: discord.Interaction) -> bool:
         handler = _restake(key)
     elif kind == "unlog":
         handler = _unlog(key)
+    elif kind == "nopar":
+        handler = _no_parlay_menu(key, int(parts[3]))
+    elif kind == "noparsel":
+        values = (interaction.data or {}).get("values") or ["x"]
+        handler = _no_parlay_pick(key, int(parts[3]), values[0])
     elif kind == "pbet":   # lm:pbet:<key>:<i>; the dropdown sends the chosen parlay as key:i
         values = (interaction.data or {}).get("values") or [f"{key}:{parts[3] if len(parts) > 3 else 0}"]
         handler = _parlay_bet_card(values[0])
@@ -361,6 +366,9 @@ def _bet_go(key: str, i: int):
                                             custom_id=f"lm:restake:{bet['id']}"))
             view.add_item(discord.ui.Button(label="Undo (didn't place it)", emoji="↩️",
                                             style=discord.ButtonStyle.danger, custom_id=f"lm:unlog:{bet['id']}"))
+            if len(p.legs) > 1:
+                view.add_item(discord.ui.Button(label=f"{p.book} won't parlay it", emoji="⛔",
+                                                style=discord.ButtonStyle.secondary, custom_id=f"lm:nopar:{key}:{i}"))
             practice = " as a 🧪 **practice bet** (paper mode: no real money; `/record practice:True`)" if bet.get("paper") else ""
             head = ("Already logged" if again else "📝 Logged") + (
                 f" **{_money(bet['stake'])}** on the {len(p.legs)}-leg {p.book} parlay at **{fmt_odds(bet['odds'])}**"
@@ -370,7 +378,7 @@ def _bet_go(key: str, i: int):
                 "If the slip shows a different price, ✏️ it so your record is right."
                 if getattr(p, "sgp_estimated", False) else "") + (
                 "\nIt settles itself after grading (`/record`). Different stake or price? ✏️. "
-                "Didn't place it? ↩️.")
+                "Didn't place it? ↩️." + (f" {p.book} says a leg can't be parlayed? ⛔." if len(p.legs) > 1 else ""))
             await interaction.response.send_message(head + tail, view=view, ephemeral=True)
         except Exception as e:
             await _report_error(interaction, e)
@@ -411,6 +419,58 @@ def _restake(bet_id: str):
             await interaction.response.send_message("That bet is settled or no longer logged.", ephemeral=True)
             return
         await interaction.response.send_modal(StakeModal(bet))
+    return callback
+
+
+def _no_parlay_menu(key: str, i: int):
+    """⛔ The book refused this parlay ("can't be parlayed"): which leg was it?"""
+    async def callback(interaction: discord.Interaction):
+        detail = PICK_DETAILS.get(key)
+        if detail is None or not detail.get("parlays"):
+            await interaction.response.send_message("This card is too old. Ask again for fresh parlays.",
+                                                    ephemeral=True)
+            return
+        p = detail["parlays"][i]
+        options = [discord.SelectOption(label=ev.best.label[:100], value=str(j),
+                                        description=f"{p.book} {fmt_odds(o)}"[:100])
+                   for j, (ev, o) in enumerate(p.legs[:24])]
+        options.append(discord.SelectOption(label="Not sure which one", value="x",
+                                            description="Just remove the logged bet"))
+        view = discord.ui.View(timeout=None)
+        view.add_item(discord.ui.Select(placeholder="Which leg wouldn't go in the parlay?", options=options,
+                                        custom_id=f"lm:noparsel:{key}:{i}"))
+        await interaction.response.send_message(
+            f"On the {p.book} slip, the leg it won't parlay is usually the one marked with a warning. "
+            "Pick it and I'll keep that market out of your "
+            f"{p.book} parlays (still fine as a straight bet). I'll also remove the logged bet.",
+            view=view, ephemeral=True)
+    return callback
+
+
+def _no_parlay_pick(key: str, i: int, value: str):
+    async def callback(interaction: discord.Interaction):
+        detail = PICK_DETAILS.get(key)
+        if detail is None or not detail.get("parlays"):
+            await interaction.response.send_message("This card is too old.", ephemeral=True)
+            return
+        try:
+            from .bets import find_open, leg_from_eval, remove_bet
+            from .parlay import mark_no_parlay
+            p = detail["parlays"][i]
+            bet = find_open(p.book, [leg_from_eval(ev, odds=o, book=p.book) for ev, o in p.legs])
+            removed = bool(bet) and remove_bet(bet["id"])
+            msg = []
+            if value != "x":
+                ev = p.legs[int(value)][0]
+                src = await asyncio.to_thread(mark_no_parlay, ev, p.book)
+                what = src.split("|", 1)[1].replace("player_", "").replace("batter_", "").replace("_", " ")
+                msg.append(f"⛔ Got it: {p.book} won't parlay **{ev.market.sport} {what}**. From now on "
+                           f"that market stays out of {p.book} parlays (Safest by payout, Best next leg "
+                           "and the auto-parlays); it's still offered as a straight bet.")
+            msg.append("↩️ Removed the logged bet." if removed else "Nothing was logged for it.")
+            await interaction.response.send_message("\n".join(msg), ephemeral=True)
+        except Exception as e:
+            await _report_error(interaction, e)
     return callback
 
 

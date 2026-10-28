@@ -720,3 +720,46 @@ class AutoLogTest(unittest.TestCase):
             self.assertIn(f"lm:unlog:{logged[0]['id']}", ids)
             asyncio.run(bot._unlog(logged[0]["id"])(inter))
             self.assertEqual(bets.load_bets(), [])
+
+
+class NoParlayTest(unittest.TestCase):
+    def test_reported_market_stays_out_of_that_books_parlays(self):
+        import tempfile
+        from types import SimpleNamespace
+        from linemaker import bets, bot, parlay
+        from tests.test_parlay_opt import leg
+
+        def dk_leg(game, subject, market, mk):
+            ev = leg(game, subject, market, p=0.72, odds=-200, key=f"{game}|{subject}|{market}")
+            ev.market.books = [("FanDuel", [-200, 160]), ("DraftKings", [-205, 165])]
+            ev.market.links = {"DraftKings": [{"link": "", "sid": f"s-{subject}", "msid": "", "mk": mk}, None]}
+            return ev
+        steals = dk_leg("g1", "Mikal Bridges", "steals", "player_steals")
+        points = dk_leg("g2", "Scoot Henderson", "points", "player_points_alternate")
+        other = dk_leg("g3", "Other Guy", "rebounds", "player_rebounds")
+        replies = []
+
+        class Resp:
+            async def send_message(self, text, view=None, ephemeral=False):
+                replies.append((text, view))
+        with tempfile.TemporaryDirectory() as d, mock.patch.dict(os.environ, {
+                "LINEMAKER_TRACKING_DIR": d, "LINEMAKER_CACHE_DIR": d, "LINEMAKER_NO_PARLAY": ""}):
+            p = parlay.price("DraftKings", [(steals, -205), (points, -205)])
+            key = bot._remember({"parlays": [p]})
+            inter = SimpleNamespace(user="me", response=Resp(), data={})
+            asyncio.run(bot._bet_go(key, 0)(inter))
+            self.assertEqual(len(bets.load_bets()), 1)
+            nopar = next(c for c in replies[0][1].children if str(getattr(c, "custom_id", "")).startswith("lm:nopar:"))
+            asyncio.run(bot.route_component(SimpleNamespace(data={"custom_id": nopar.custom_id}, response=Resp())))
+            menu = replies[-1][1].children[0]
+            self.assertEqual([o.label for o in menu.options][-1], "Not sure which one")
+            asyncio.run(bot.route_component(SimpleNamespace(
+                data={"custom_id": menu.custom_id, "values": ["0"]}, response=Resp())))
+            self.assertIn("won't parlay **NBA steals**", replies[-1][0])
+            self.assertEqual(bets.load_bets(), [])                              # the logged bet is gone
+            self.assertEqual(parlay.no_parlay_markets(), {"draftkings": {"NBA|player_steals"}})
+            built = parlay.build_parlays([steals, points, other], sizes=(2,), books=("DraftKings",), value=False)
+            self.assertTrue(built and all(steals not in [ev for ev, _o in b.legs] for b in built))
+            self.assertTrue(parlay.sgp_check([steals, points], "DraftKings")["blocked"])
+            self.assertFalse(parlay.sgp_check([steals, points], "FanDuel")["blocked"])   # FanDuel unaffected
+            self.assertFalse(parlay.sgp_check([steals], "DraftKings")["blocked"])        # straight bet fine

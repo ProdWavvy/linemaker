@@ -6,6 +6,7 @@ chance multiplies the legs' blended probabilities (independence assumed across g
 the payout multiplies the legs' decimal odds; the book's actual parlay price can differ a
 little from that product.
 """
+import os
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -95,6 +96,73 @@ def leg_price(ev, book: str):
     return next((o for b, o in prices.items() if _key(b) == _key(book)), None)
 
 
+# ---- markets a book won't put in a parlay ---------------------------------------------
+# The books mark some markets "can't be parlayed" (DraftKings does it per market and it
+# changes); the odds feed doesn't say which. You report one from a Bet reply (⛔), and that
+# market stays out of the book's parlays from then on. Straight bets are unaffected.
+# LINEMAKER_NO_PARLAY adds more by hand: "DraftKings:NBA|player_steals,FanDuel:NFL|anytime td".
+
+def _no_parlay_path() -> str:
+    return os.path.join(os.environ.get("LINEMAKER_CACHE_DIR", "cache"), "no_parlay.json")
+
+
+_NO_PARLAY_CACHE = {}
+
+
+def no_parlay_markets() -> dict:
+    """{book key: {"SPORT|market key", ...}} from your reports and LINEMAKER_NO_PARLAY."""
+    from .jsonio import load_json
+    path = _no_parlay_path()
+    try:
+        stamp = (path, os.path.getmtime(path), os.environ.get("LINEMAKER_NO_PARLAY", ""))
+    except OSError:
+        stamp = (path, None, os.environ.get("LINEMAKER_NO_PARLAY", ""))
+    if stamp in _NO_PARLAY_CACHE:
+        return _NO_PARLAY_CACHE[stamp]
+    try:
+        saved = load_json(path) if os.path.exists(path) else {}
+    except (OSError, ValueError):
+        saved = {}
+    out = {b: set(v) for b, v in (saved if isinstance(saved, dict) else {}).items()}
+    for item in os.environ.get("LINEMAKER_NO_PARLAY", "").split(","):
+        book, _, market = item.strip().partition(":")
+        if book and market:
+            out.setdefault(_key(book), set()).add(market.strip())
+    _NO_PARLAY_CACHE.clear()
+    _NO_PARLAY_CACHE[stamp] = out
+    return out
+
+
+def leg_source(ev, book: str) -> str:
+    """"SPORT|book market key" for this leg at this book (player_steals, player_points_alternate),
+    or "SPORT|market name" when the feed didn't say."""
+    from .betlinks import leg
+    e = leg(ev.market, ev.best.side, book) or {}
+    return f"{ev.market.sport}|{e.get('mk') or ev.market.market}"
+
+
+def no_parlay(ev, book: str, blocked: Optional[dict] = None) -> bool:
+    blocked = no_parlay_markets() if blocked is None else blocked
+    mine = blocked.get(_key(book)) or set()
+    return bool(mine) and (leg_source(ev, book) in mine or f"{ev.market.sport}|{ev.market.market}" in mine)
+
+
+def mark_no_parlay(ev, book: str) -> str:
+    """Remember that this book refused this leg's market in a parlay. Returns what was saved."""
+    from .jsonio import save_json
+    src = leg_source(ev, book)
+    data = {b: sorted(v) for b, v in no_parlay_markets().items()}
+    data[_key(book)] = sorted(set(data.get(_key(book), [])) | {src})
+    os.makedirs(os.path.dirname(_no_parlay_path()) or ".", exist_ok=True)
+    save_json(_no_parlay_path(), data)
+    return src
+
+
+def parlay_leg_price(ev, book: str, blocked: Optional[dict] = None):
+    """leg_price, or None when the book won't take this market in a parlay."""
+    return None if no_parlay(ev, book, blocked) else leg_price(ev, book)
+
+
 FAIR_VALUE = 0.98   # legs worth less than this (2%+ under fair) are left out when possible
 
 
@@ -119,7 +187,7 @@ def build_parlays(legs: list, sizes=(2, 3, 4), books=PARLAY_BOOKS, value: bool =
     from .parlay_math import leg_value
     out = []
     for book in books:
-        priced = [(ev, leg_price(ev, book)) for ev in legs]
+        priced = [(ev, parlay_leg_price(ev, book)) for ev in legs]
         priced = [(ev, o) for ev, o in priced if o is not None]
         by_prob = sorted(priced, key=lambda x: x[0].best.blended, reverse=True)
         fair = [x for x in by_prob if leg_value(*x) >= FAIR_VALUE]
@@ -144,7 +212,7 @@ def build_edge_parlays(legs: list, sizes=(2, 3), books=PARLAY_BOOKS) -> list:
     from .parlay_math import leg_value
     out = []
     for book in books:
-        priced = [(ev, leg_price(ev, book)) for ev in legs]
+        priced = [(ev, parlay_leg_price(ev, book)) for ev in legs]
         priced = sorted([(ev, o) for ev, o in priced if o is not None and leg_value(ev, o) > 1.0],
                         key=lambda x: x[0].best.gap, reverse=True)
         for size in sizes:
@@ -223,6 +291,9 @@ def sgp_check(legs: list, book: str) -> dict:
             blocked.append(f"{seen[('side', '', 'moneyline')].best.label} + "
                            f"{seen[('side', '', 'spread')].best.label} (moneyline with spread on one "
                            "game: usually not allowed)")
+    if len(legs) > 1:   # markets you've told the bot this book won't parlay
+        blocked += [f"{ev.best.label} ({book} doesn't allow this market in parlays)"
+                    for ev in legs if no_parlay(ev, book)]
     one, multi = SGP_NAMES.get(book, ("SGP", "SGP+"))
     kind = ""
     if groups:
@@ -251,10 +322,10 @@ def build_sgps(legs: list, books=PARLAY_BOOKS, sgp_size: int = 3, sgpx_size: int
     for book in books:
         by_game = {}
         for ev in sorted(legs, key=lambda e: e.best.blended, reverse=True):
-            odds = leg_price(ev, book)
+            odds = parlay_leg_price(ev, book)
             if odds is not None:
                 by_game.setdefault(ev.market.game_id, []).append(ev)
-        odds_of = {id(ev): leg_price(ev, book) for evs in by_game.values() for ev in evs}
+        odds_of = {id(ev): parlay_leg_price(ev, book) for evs in by_game.values() for ev in evs}
 
         def make(chosen, kind):
             return price(book, [(ev, odds_of[id(ev)]) for ev in chosen], kind=kind)
@@ -358,7 +429,7 @@ def best_for_target(legs: list, book: str, target: float, max_legs: int = 6, poo
         return _best_same_game(legs, book, target, max_legs, pool, used or {})
     best_per_game = {}
     for ev in legs:
-        o = leg_price(ev, book)
+        o = parlay_leg_price(ev, book)
         if o is None or leg_value(ev, o) < 0.97:
             continue
         g = ev.market.game_id
@@ -381,7 +452,7 @@ def _best_same_game(legs: list, book: str, target: float, max_legs: int, pool: i
     from .parlay_math import joint_prob, leg_value
     best_per_player = {}
     for ev in legs:
-        o = leg_price(ev, book)
+        o = parlay_leg_price(ev, book)
         if o is None or leg_value(ev, o) < 0.97:
             continue
         k = ev.market.subject if ev.market.bet_type == "prop" else ev.market.key

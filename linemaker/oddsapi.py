@@ -548,7 +548,8 @@ class _Grouper:
         if outcome and (outcome.get("link") or outcome.get("sid")):
             slots = fm.links.setdefault(book, [None] * n_sides)
             slots[side] = {"link": outcome.get("link") or "", "sid": outcome.get("sid") or "",
-                           "msid": (market or {}).get("sid") or ""}
+                           "msid": (market or {}).get("sid") or "",
+                           "mk": (market or {}).get("key") or ""}   # which book market (main / alternate)
         for b, prices in fm.books:
             if b == book:
                 prices[side] = price
