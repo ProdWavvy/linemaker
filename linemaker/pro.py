@@ -581,6 +581,11 @@ def market_probs(m: ProMarket, cfg: ProConfig):
     named = [(b, p[:n]) for b, p in m.books if len(p) >= n and all(x is not None for x in p[:n])]
     complete = [p for _b, p in named]
     book_w = [weights.get(book_key(b), weights.get("*", 1.0)) for b, _p in named]
+    # A thin or stale quote (an exchange with no one on one side, a crossed market) would
+    # drag a heavily weighted fair price: past LINEMAKER_MAX_BOOK_OVERROUND (15%) or crossed,
+    # that book sits this market out.
+    cap = _env_num("LINEMAKER_MAX_BOOK_OVERROUND", float) or 0.15
+    book_w = [0.0 if not (-0.01 <= overround(*p) <= cap) else w for w, (_b, p) in zip(book_w, named)]
     if not complete and m.books and m.bet_type != "1x2":
         # One-sided feed (typical for alternate lines): average the posted side's implied
         # probability and remove an assumed hold.

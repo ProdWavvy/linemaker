@@ -49,3 +49,18 @@ class PropWeightsTest(unittest.TestCase):
         with mock.patch.dict(os.environ, {"LINEMAKER_SHARP_BOOKS_PROPS": "", "LINEMAKER_SHARP_BOOKS": "Pinnacle:3"}):
             self.assertLess(market_probs(prop, ProConfig(track=False))[0]["A"], 0.55)   # old blend
             self.assertEqual(consensus_books(prop), 4)
+
+
+class ThinQuoteTest(unittest.TestCase):
+    def test_wide_or_crossed_quote_sits_out(self):
+        import os
+        from unittest import mock
+        from linemaker.pro import ProConfig, market_probs, rows_to_markets
+        # Novig's quote is wide (+150/+150 would be crossed; -400/-400 is a 60% margin): ignored
+        books = "FanDuel:-150/+125|DraftKings:-140/+118|Novig:-400/-400"
+        m = rows_to_markets([{"date": "2026-10-21", "sport": "NBA", "game_id": "g", "game": "A @ H",
+                              "bet_type": "prop", "subject": "P", "market": "points", "line": "20.5",
+                              "mean": "21", "stdev": "5", "books": books}])[0]
+        with mock.patch.dict(os.environ, {"LINEMAKER_SHARP_BOOKS_PROPS": "Novig:7,FanDuel:1,DraftKings:1"}):
+            p = market_probs(m, ProConfig(track=False))[0]["A"]
+        self.assertGreater(p, 0.55)      # FanDuel/DraftKings' over, not Novig's meaningless 50/50
