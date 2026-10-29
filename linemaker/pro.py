@@ -237,9 +237,11 @@ def volume_score(ev) -> float:
 
 
 def consensus_books(m: "ProMarket") -> int:
-    """Books with both sides priced (what the no-vig consensus is built from)."""
+    """Books with both sides priced that count in the consensus (weight above 0)."""
     n = len(m.side_keys)
-    return sum(1 for _b, p in m.books if len(p) >= n and all(x is not None for x in p[:n]))
+    w = sharp_weights(m.bet_type)
+    return sum(1 for b, p in m.books if len(p) >= n and all(x is not None for x in p[:n])
+               and w.get(book_key(b), w.get("*", 1.0)) > 0)
 
 
 def ml_parlay_config(types=("moneyline",), **overrides) -> "ProConfig":
@@ -547,16 +549,21 @@ def side_prices(m: ProMarket, allowed: Optional[tuple] = None) -> dict:
     return out
 
 
-def sharp_weights() -> dict:
-    """book_key -> weight in the consensus. LINEMAKER_SHARP_BOOKS, e.g. "Pinnacle:3,LowVig:2":
-    sharp books (high limits, low margins) move first and are right more often, so their
-    no-vig line counts more. Unlisted books weigh 1."""
-    out = {}
-    for part in os.environ.get("LINEMAKER_SHARP_BOOKS", "Pinnacle:3").split(","):
+def sharp_weights(bet_type: Optional[str] = None) -> dict:
+    """book_key -> weight in the consensus (the key "*" holds the weight of unlisted books).
+    LINEMAKER_SHARP_BOOKS (game lines, and props unless set below), e.g. "Pinnacle:3,LowVig:2":
+    sharp books move first and are right more often, so their no-vig line counts more;
+    unlisted books weigh 1. LINEMAKER_SHARP_BOOKS_PROPS: player props' own devig weights,
+    e.g. "FanDuel:80,DraftKings:60,Caesars:20,BetMGM:20,Hard Rock Bet:20,Fanatics:20";
+    books not in it don't count (add "others:5" to let them count a little)."""
+    props = os.environ.get("LINEMAKER_SHARP_BOOKS_PROPS", "").strip() if bet_type == "prop" else ""
+    out = {"*": 0.0} if props else {}
+    for part in (props or os.environ.get("LINEMAKER_SHARP_BOOKS", "Pinnacle:3")).split(","):
         name, _, w = part.partition(":")
         if name.strip():
             try:
-                out[book_key(name)] = float(w) if w.strip() else 3.0
+                out["*" if name.strip().lower() in ("others", "*") else book_key(name)] = (
+                    float(w) if w.strip() else 3.0)
             except ValueError:
                 continue
     # Pick'em sites post flat indicative prices, not a market: they never move the consensus.
@@ -570,10 +577,10 @@ def market_probs(m: ProMarket, cfg: ProConfig):
     With a multi-book feed, consensus is the weighted average of each complete book's no-vig
     line (sharp books such as Pinnacle count more; see sharp_weights)."""
     n = len(m.side_keys)
-    weights = sharp_weights()
+    weights = sharp_weights(m.bet_type)
     named = [(b, p[:n]) for b, p in m.books if len(p) >= n and all(x is not None for x in p[:n])]
     complete = [p for _b, p in named]
-    book_w = [weights.get(book_key(b), 1.0) for b, _p in named]
+    book_w = [weights.get(book_key(b), weights.get("*", 1.0)) for b, _p in named]
     if not complete and m.books and m.bet_type != "1x2":
         # One-sided feed (typical for alternate lines): average the posted side's implied
         # probability and remove an assumed hold.

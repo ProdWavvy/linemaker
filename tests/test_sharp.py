@@ -30,3 +30,22 @@ class SharpTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class PropWeightsTest(unittest.TestCase):
+    def test_props_use_their_own_devig_weights(self):
+        import os
+        from unittest import mock
+        from linemaker.pro import ProConfig, consensus_books, market_probs, rows_to_markets
+        books = "FanDuel:-150/+125|DraftKings:-140/+118|Pinnacle:+110/-130|Bovada:+110/-130"
+        prop = rows_to_markets([{"date": "2026-10-21", "sport": "NBA", "game_id": "g", "game": "A @ H",
+                                 "bet_type": "prop", "subject": "P", "market": "points", "line": "20.5",
+                                 "mean": "21", "stdev": "5", "books": books}])[0]
+        env = {"LINEMAKER_SHARP_BOOKS_PROPS": "FanDuel:80,DraftKings:60,Caesars:20", "LINEMAKER_SHARP_BOOKS": "Pinnacle:3"}
+        with mock.patch.dict(os.environ, env):
+            probs = market_probs(prop, ProConfig(track=False))[0]
+            self.assertGreater(probs["A"], 0.55)                    # FanDuel/DraftKings only: over favoured
+            self.assertEqual(consensus_books(prop), 2)               # Pinnacle / Bovada don't count for props
+        with mock.patch.dict(os.environ, {"LINEMAKER_SHARP_BOOKS_PROPS": "", "LINEMAKER_SHARP_BOOKS": "Pinnacle:3"}):
+            self.assertLess(market_probs(prop, ProConfig(track=False))[0]["A"], 0.55)   # old blend
+            self.assertEqual(consensus_books(prop), 4)

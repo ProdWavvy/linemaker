@@ -514,18 +514,18 @@ def clv_lines(records: list) -> list:
     return out
 
 
-def snapshot_fair(snap: dict, side: str) -> Optional[float]:
+def snapshot_fair(snap: dict, side: str, bet_type: Optional[str] = None) -> Optional[float]:
     """Sharp-weighted no-vig probability of `side` (A/B) in one price snapshot."""
     from .devig import no_vig
     from .pro import book_key, sharp_weights
     other = "B" if side == "A" else "A"
     a, b = snap.get(side) or {}, snap.get(other) or {}
-    weights = sharp_weights()
+    weights = sharp_weights(bet_type)
     num = den = 0.0
     for book, odds in a.items():
         if odds is None or b.get(book) is None:
             continue
-        w = weights.get(book_key(book), 1.0)
+        w = weights.get(book_key(book), weights.get("*", 1.0))
         if w <= 0:
             continue
         num += w * no_vig(odds, b[book])[0]
@@ -545,5 +545,6 @@ def market_move(rec: dict, side: str, min_minutes: float = 20) -> Optional[float
         return None
     if span.total_seconds() < min_minutes * 60:
         return None
-    first, last = snapshot_fair(hist[0], side), snapshot_fair(hist[-1], side)
+    bt = (rec.get("inputs") or {}).get("bet_type")
+    first, last = snapshot_fair(hist[0], side, bt), snapshot_fair(hist[-1], side, bt)
     return None if first is None or last is None else last - first
