@@ -2396,6 +2396,24 @@ async def clv_cmd(interaction: discord.Interaction, days: Optional[int] = 14):
         await _report_error(interaction, e)
 
 
+@bot.tree.command(name="books", description="Which books' prices were most accurate (your devig weights)")
+@app_commands.describe(days="How many days back (default 14)")
+async def books_cmd(interaction: discord.Interaction, days: Optional[int] = 14):
+    await interaction.response.defer(thinking=True)
+    try:
+        from .book_report import book_lines
+        from .tracking import load_records
+        recs = await asyncio.to_thread(load_records, TRACKING, days or None, today())
+        lines = await asyncio.to_thread(book_lines, recs)
+        embed = discord.Embed(title=f"📚 Sharpest Books · last {days} days", color=0x3498DB,
+                              description="\n".join(lines)[:4000])
+        embed.set_footer(text="Apply a suggestion: /set LINEMAKER_SHARP_BOOKS_PROPS <list> "
+                              "(props) or /set LINEMAKER_SHARP_BOOKS <list> (game lines)")
+        await interaction.followup.send(embed=embed)
+    except Exception as e:
+        await _report_error(interaction, e)
+
+
 @bot.tree.command(name="calibrate", description="Test blend weights against graded results")
 @app_commands.describe(days="How many days of tracked results to use (default all)")
 async def calibrate_cmd(interaction: discord.Interaction, days: Optional[int] = None):
