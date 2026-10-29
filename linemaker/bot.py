@@ -1936,11 +1936,11 @@ class LinemakerBot(discord.Client):
         """Typed asks in the channel are answered in the asker's own private thread for the day
         (only they and the server's admins see it), so the channel stays clean: their message
         is tidied away and a pointer to the thread deletes itself after 30 seconds.
-        LINEMAKER_PRIVATE_THREADS=off answers in the channel; LINEMAKER_TIDY_ASKS=off keeps
+        Off by default (LINEMAKER_PRIVATE_THREADS=on turns it on); LINEMAKER_TIDY_ASKS=off keeps
         the typed message. None when answering where it was asked (a thread, a DM, or the
         bot can't make threads there)."""
         if (message.guild is None or isinstance(message.channel, discord.Thread)
-                or os.environ.get("LINEMAKER_PRIVATE_THREADS", "on").lower() in ("off", "0", "no", "false")):
+                or os.environ.get("LINEMAKER_PRIVATE_THREADS", "off").lower() not in ("on", "1", "yes", "true")):
             return None
         from .alerts import load_state, save_state
         threads = load_state("private_threads.json", {})

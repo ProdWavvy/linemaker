@@ -811,9 +811,9 @@ def run_pro(markets: list, slate_date: str, cfg: ProConfig, freezer=None,
             seen[k] = ev.best.label
             kept.append(ev)
         quals = kept
-    # A player's props rise and fall together (more minutes than projected sinks every under),
-    # so a few per player: 10/27 had 70 of 102 picks on 16 players, one of them 0-9.
-    per_player = 1 if cfg.one_per_player else (_env_num("LINEMAKER_MAX_PICKS_PER_PLAYER", int) or 2)
+    # A player's props rise and fall together (more minutes than projected sinks every under):
+    # his best-ranked pick only. 10/25-10/28 graded: no cap -20.5u, 2 a player +3.5u, 1 +12.9u.
+    per_player = 1 if cfg.one_per_player else (_env_num("LINEMAKER_MAX_PICKS_PER_PLAYER", int) or 1)
     seen, kept = {}, []
     for ev in quals:   # best-ranked first
         k = (ev.market.game_id, ev.market.subject) if ev.market.bet_type == "prop" else id(ev)
