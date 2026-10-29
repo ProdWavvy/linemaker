@@ -2,6 +2,7 @@ import math
 import os
 import tempfile
 import unittest
+from unittest import mock
 
 from linemaker.devig import hold, no_vig, overround
 from linemaker.freeze import Freezer, grade

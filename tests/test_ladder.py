@@ -18,7 +18,7 @@ class LadderTest(unittest.TestCase):
                 + [row("Kevin Durant", "points", 22.5, 27), row("Other Guy", "PRA", 25.5, 30, "g2")])
 
     def test_one_line_per_player_stat(self):
-        res = run_pro(rows_to_markets(self.rows()), "2026-10-21", ProConfig(track=False, min_gap=0.0))
+        res = run_pro(rows_to_markets(self.rows()), "2026-10-21", ProConfig(track=False, min_gap=0.0, max_per_player=0))
         labels = [ev.best.label for ev in res.picks]
         durant_pra = [l for l in labels if l.startswith("Kevin Durant") and "PRA" in l]
         self.assertEqual(len(durant_pra), 1)                       # not 25.5 *and* 26.5
@@ -33,7 +33,7 @@ class LadderTest(unittest.TestCase):
 
     def test_off_switch_and_cap(self):
         with mock.patch.dict(os.environ, {"LINEMAKER_ONE_PER_STAT": "off"}):
-            res = run_pro(rows_to_markets(self.rows()), "2026-10-21", ProConfig(track=False, min_gap=0.0))
+            res = run_pro(rows_to_markets(self.rows()), "2026-10-21", ProConfig(track=False, min_gap=0.0, max_per_player=0))
         self.assertGreaterEqual(sum("Durant" in ev.best.label and "PRA" in ev.best.label for ev in res.picks), 2)
         self.assertEqual(ProConfig().max_picks, 25)
         with mock.patch.dict(os.environ, {"LINEMAKER_MAX_PICKS": "40"}):

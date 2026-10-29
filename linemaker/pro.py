@@ -156,6 +156,7 @@ class ProConfig:
     parlay_min_ev: Optional[float] = None   # parlays past 2 legs shown only at this EV or better
     game_parlay_types: tuple = ()      # game-line parlay legs (ml_parlay_config): bet types used
     one_per_player: bool = False       # at most one leg per player (volume: his legs move together)
+    max_per_player: Optional[int] = None   # picks per player (None: LINEMAKER_MAX_PICKS_PER_PLAYER, 1; 0: no cap)
     # Log every priced market (not just picks) to tracking/<date>.json for calibration.
     track: bool = field(default_factory=lambda: os.environ.get(
         "LINEMAKER_TRACKING", "on").lower() not in ("off", "0", "false", "no"))
@@ -813,14 +814,15 @@ def run_pro(markets: list, slate_date: str, cfg: ProConfig, freezer=None,
         quals = kept
     # A player's props rise and fall together (more minutes than projected sinks every under):
     # his best-ranked pick only. 10/25-10/28 graded: no cap -20.5u, 2 a player +3.5u, 1 +12.9u.
-    per_player = 1 if cfg.one_per_player else (_env_num("LINEMAKER_MAX_PICKS_PER_PLAYER", int) or 1)
+    per_player = 1 if cfg.one_per_player else (
+        cfg.max_per_player if cfg.max_per_player is not None else (_env_num("LINEMAKER_MAX_PICKS_PER_PLAYER", int) or 1))
     seen, kept = {}, []
     for ev in quals:   # best-ranked first
         k = (ev.market.game_id, ev.market.subject) if ev.market.bet_type == "prop" else id(ev)
-        if len(seen.setdefault(k, [])) >= per_player:
+        if per_player and len(seen.setdefault(k, [])) >= per_player:
             res.passes.append((ev.best.label, f"same player already on the board ({seen[k][0]})"))
             continue
-        seen[k].append(ev.best.label)
+        seen.setdefault(k, []).append(ev.best.label)
         kept.append(ev)
     quals = kept
     sports = {ev.market.sport for ev in quals}
