@@ -332,3 +332,28 @@ def apply_hit_gate(res, profiles: dict, floor: Optional[float] = None):
         games.setdefault(ev.market.game_id, []).append(ev.best.label)
     res.correlated = {g: v for g, v in games.items() if len(v) > 1}
     return res
+
+
+@functools.lru_cache(maxsize=8)
+def top25_teams(date: str) -> frozenset:
+    """norm(team name) of every AP Top 25 team on ESPN's college football scoreboard for the
+    date (its rank comes with each game). Empty when ESPN can't be read."""
+    try:
+        board = _get(f"{PATHS['NCAAF']}/scoreboard", dates=date.replace("-", ""))
+    except Exception as e:
+        log.warning("espn college rankings unavailable: %s", e)
+        return frozenset()
+    out = set()
+    for event in board.get("events", []):
+        for c in event["competitions"][0]["competitors"]:
+            rank = (c.get("curatedRank") or {}).get("current")
+            if rank and int(rank) <= 25:
+                team = c.get("team") or {}
+                out |= {norm(team.get(k) or "") for k in ("displayName", "shortDisplayName")} - {""}
+    return frozenset(out)
+
+
+def has_top25(game_teams: tuple, ranked: frozenset) -> bool:
+    """True when either team is ranked, by exact name ("Alabama Crimson Tide": the odds feed
+    and ESPN use the same full names), so Alabama State never passes for Alabama."""
+    return any(norm(name) in ranked for name in game_teams)

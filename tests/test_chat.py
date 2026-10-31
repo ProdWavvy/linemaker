@@ -417,3 +417,13 @@ class AllSportsTest(unittest.TestCase):
         self.assertIsNone(prop_games_cap("NBA"))
         with mock.patch.dict(os.environ, {"LINEMAKER_MAX_PROP_GAMES_NCAAF": "0"}):
             self.assertIsNone(prop_games_cap("NCAAF"))
+
+
+class Top25Test(unittest.TestCase):
+    def test_only_games_with_a_ranked_team(self):
+        from linemaker.gamelogs import has_top25
+        ranked = frozenset({"alabama crimson tide", "alabama", "ohio state", "ohio state buckeyes"})
+        self.assertTrue(has_top25(("Alabama Crimson Tide", "Vanderbilt Commodores"), ranked))
+        self.assertTrue(has_top25(("Purdue Boilermakers", "Ohio State Buckeyes"), ranked))
+        self.assertFalse(has_top25(("Kent State Golden Flashes", "Ohio Bobcats"), ranked))   # Ohio isn't Ohio State
+        self.assertFalse(has_top25(("Alabama State Hornets", "Jackson State Tigers"), ranked))   # not Alabama

@@ -729,6 +729,15 @@ def fetch_slate(api: OddsAPI, sport: str, date: str, tz: ZoneInfo, props: bool =
     source = (api.game_odds(sport, game_markets, start, end) if game_lines
               else api.events(sport, start, end))
     events = [e for e in source if _local_date(e["commence_time"], tz) == date]
+    if sport.upper() == "NCAAF" and os.environ.get("LINEMAKER_NCAAF_TOP25", "on").lower() not in ("off", "0", "no", "false"):
+        # College football: only games with an AP Top 25 team (ESPN's ranking, free). If the
+        # rankings can't be read, every game stays and the props cap still applies.
+        from .gamelogs import has_top25, top25_teams
+        ranked = top25_teams(date)
+        if ranked:
+            kept = [e for e in events if has_top25((e.get("home_team", ""), e.get("away_team", "")), ranked)]
+            log.info("NCAAF: %d of %d games have a Top 25 team", len(kept), len(events))
+            events = kept
     if only is not None:   # a single-game scan (pre-tip, injury news)
         events = [e for e in events if e["id"] in only]
     if hasattr(api, "slate"):
