@@ -1001,8 +1001,11 @@ def slate_age_minutes(sport: str, date: str, kind: str = "props") -> Optional[fl
     return (time.time() - hit[0]) / 60 if hit else None
 
 
+SLATE_CACHE_VERSION = 2   # bump when the feed's shape changes, so older saved slates are ignored
+
+
 def _cache_path(sport: str, date: str, kind: str = "props") -> str:
-    name = f"slate_{sport}_{date}" + ("" if kind == "props" else f"_{kind}")
+    name = f"slate_v{SLATE_CACHE_VERSION}_{sport}_{date}" + ("" if kind == "props" else f"_{kind}")
     return os.path.join(os.environ.get("LINEMAKER_CACHE_DIR", "cache"), name + ".json")
 
 

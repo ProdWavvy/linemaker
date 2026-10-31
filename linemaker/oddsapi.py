@@ -643,7 +643,35 @@ def parse_game_odds(events: list, sport: str, tz: ZoneInfo) -> list:
                         side = 0 if o["name"] == "Over" else 1
                         g.add(base, (ev["id"], "total", pt), book, side, 2, o["price"], mk, o,
                               bk.get("last_update"))
-    return list(g.markets.values())
+    return drop_exchange_only(list(g.markets.values()))
+
+
+EXCHANGES = {"kalshi", "novig", "prophetx", "polymarket", "polymarketus", "sporttrade", "betfairexchange",
+             "matchbook", "smarkets"}
+
+
+def _bk(name: str) -> str:
+    return "".join(ch for ch in (name or "").lower() if ch.isalnum())
+
+
+def drop_exchange_only(markets: list) -> list:
+    """Exchanges post their own ladders ("25+ points" at every step) that no sportsbook
+    offers: those lines can't be bet and only add simulations and tracking (asks timed out
+    once they were in the feed). An exchange price counts only on a line a sportsbook also
+    prices, merged into that market when it came in under another market key."""
+    def only_exchanges(fm):
+        return bool(fm.books) and all(_bk(b) in EXCHANGES for b, _p in fm.books)
+    keep = [fm for fm in markets if not only_exchanges(fm)]
+    index = {(fm.game_id, fm.bet_type, fm.subject, fm.market, fm.line): fm for fm in keep}
+    for fm in markets:
+        if not only_exchanges(fm):
+            continue
+        twin = index.get((fm.game_id, fm.bet_type, fm.subject, fm.market, fm.line))
+        if twin is None:
+            continue
+        have = {_bk(b) for b, _p in twin.books}
+        twin.books += [(b, p) for b, p in fm.books if _bk(b) not in have]
+    return keep
 
 
 def parse_event_props(event: dict, sport: str, tz: ZoneInfo) -> list:
@@ -670,7 +698,7 @@ def parse_event_props(event: dict, sport: str, tz: ZoneInfo) -> list:
                 base = dict(common, subject=player, market=names[mk["key"]], line=line)
                 g.add(base, (event["id"], player, mk["key"], line), book, side, 2, o["price"],
                       mk, o, bk.get("last_update"))
-    return list(g.markets.values())
+    return drop_exchange_only(list(g.markets.values()))
 
 
 def fetch_slate(api: OddsAPI, sport: str, date: str, tz: ZoneInfo, props: bool = False,

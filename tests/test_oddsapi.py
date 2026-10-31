@@ -313,3 +313,22 @@ class KeyQuotaTest(unittest.TestCase):
         self.assertTrue(rows[0][5])                       # key #1 still the active one
         self.assertIn("401", rows[2][4])
         self.assertEqual(oddsapi._ACTIVE_KEY["index"], 0)  # checking quotas never switches keys
+
+
+class ExchangeLadderTest(unittest.TestCase):
+    def test_exchange_only_lines_dropped_shared_lines_merged(self):
+        from zoneinfo import ZoneInfo
+        from linemaker.oddsapi import parse_event_props
+        def bk(title, key, outs):
+            return {"key": title.lower(), "title": title, "markets": [{"key": key, "outcomes": outs}]}
+        over = lambda p, l, price: {"name": "Over", "description": p, "point": l, "price": price}
+        under = lambda p, l, price: {"name": "Under", "description": p, "point": l, "price": price}
+        event = {"id": "e1", "home_team": "H", "away_team": "A", "commence_time": "2026-10-31T23:00:00Z",
+                 "bookmakers": [
+                     bk("FanDuel", "player_points", [over("P", 20.5, -110), under("P", 20.5, -110)]),
+                     bk("Kalshi", "player_points_alternate", [over("P", 20.5, -105), under("P", 20.5, -105),
+                                                              over("P", 24.5, 200), under("P", 24.5, -250),
+                                                              over("P", 29.5, 500), under("P", 29.5, -700)])]}
+        fms = parse_event_props(event, "NBA", ZoneInfo("America/New_York"))
+        self.assertEqual([fm.line for fm in fms], [20.5])                      # Kalshi's own ladder gone
+        self.assertEqual(sorted(b for b, _p in fms[0].books), ["FanDuel", "Kalshi"])   # its 20.5 merged in
