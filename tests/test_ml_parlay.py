@@ -204,7 +204,7 @@ class CalibrationPriorTest(unittest.TestCase):
         with mock.patch.dict(os.environ, {"LINEMAKER_CALIBRATION_PRIORS": "on"}), \
                 mock.patch.object(autotune, "load_weights", return_value={}):
             self.assertAlmostEqual(autotune.calibrated(0.85, "NBA", "prop"), 0.835, places=2)
-            self.assertAlmostEqual(autotune.calibrated(0.85, "NHL", "prop"), 0.85)       # no prior
+            self.assertAlmostEqual(autotune.calibrated(0.85, "NHL", "prop"), 0.837, places=2)   # the shared start
             self.assertAlmostEqual(autotune.calibrated(0.85, "NBA", "prop", "live"), 0.85)  # live: its own
             self.assertAlmostEqual(autotune.calibrated(0.85, "NBA", "moneyline"), 0.85)    # game lines apart
         fitted = {"segments": {"pre props": {"calibration": {"NBA": [0.0, 1.0, 900]}}}}

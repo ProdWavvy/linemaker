@@ -1847,6 +1847,7 @@ class LinemakerBot(discord.Client):
         if _spend(local_today()).get("start_remaining") is None:   # restarted before today's check
             asyncio.get_running_loop().create_task(_refresh_budget())
         asyncio.get_running_loop().create_task(_catch_up_bets())
+        asyncio.get_running_loop().create_task(_autotune_today())
         if self.home is not None:
             ch = self.get_channel(self.home)
             if ch is None:
@@ -2674,6 +2675,21 @@ async def _warm_up():
 async def budget_loop():
     """Just after midnight: today's credit budget from every key's balance (free check)."""
     await _refresh_budget()
+
+
+async def _autotune_today():
+    """Re-fit once a day at startup too (no credits: it reads graded tracking only), so a new
+    rule (pauses, pick corrections) applies right after an update, not at the next grade."""
+    try:
+        from .alerts import load_state, save_state
+        from .autotune import autotune_on, run_autotune
+        if not autotune_on() or load_state("autotune_startup.json", "") == today():
+            return
+        lines = await asyncio.to_thread(run_autotune, TRACKING, today())
+        save_state("autotune_startup.json", today())
+        log.info("startup re-fit: %s", "; ".join(lines)[:500])
+    except Exception as e:
+        log.warning("startup re-fit: %s", e)
 
 
 async def _catch_up_bets():

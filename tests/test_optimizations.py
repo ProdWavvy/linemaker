@@ -31,7 +31,13 @@ class PruneTest(unittest.TestCase):
 
     def test_small_sample_kept(self):
         from linemaker.autotune import tune_prune
-        self.assertEqual(tune_prune([pick(i, False) for i in range(40)])[0], {})
+        self.assertEqual(tune_prune([pick(i, False) for i in range(30)])[0], {})   # under 40: luck can't be ruled out
+
+    def test_clear_loser_paused_early(self):
+        from linemaker.autotune import tune_prune
+        out = tune_prune([pick(i, i % 4 == 0) for i in range(48)])[0]           # 12-36 at -110: -25%
+        self.assertIn("NBA threes", out)
+        self.assertIn("12-36", out["NBA threes"])
 
 
 class MoveTest(unittest.TestCase):

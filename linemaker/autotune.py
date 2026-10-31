@@ -266,13 +266,19 @@ def tune_bias(records: list, current: dict) -> tuple:
 
 
 # ---- pausing markets that keep losing ---------------------------------------------------
-# A market (e.g. "NBA threes") stops producing picks when, over its last PRUNE_WINDOW graded
-# picks (PRUNE_MIN at least), it has lost money (ROI below -3%) AND the picks have closed worse
-# than they were taken (average closing-line value below 0). Both together are the signature
-# of a market the model reads badly, not of bad luck. While paused it keeps making shadow
-# picks (logged and graded, never shown), so its recent record keeps moving: it's checked
-# again every grading run and comes back once either turns. LINEMAKER_PRUNE=off disables it.
+# One rule for every market of every league and phase (e.g. "NBA threes", "NFL receptions"),
+# over its latest PRUNE_WINDOW graded picks, one per player per game (or per game for game
+# lines), real or shadow. It stops producing picks when either
+#   * steady loser: PRUNE_MIN+ picks losing money (ROI below -3%) AND closing worse than they
+#     were taken (average closing-line value below 0), the signature of a market the model
+#     reads badly, not of bad luck; or
+#   * clear loser: PRUNE_BAD_MIN+ picks at ROI PRUNE_BAD_ROI or worse and PRUNE_BAD_UNITS or
+#     more units down (too far under to be luck, even without the closing-line read).
+# While paused it keeps making shadow picks (logged and graded, never shown), so its recent
+# record keeps moving: it's checked again every grading run and comes back once neither
+# holds. LINEMAKER_PRUNE=off disables it.
 PRUNE_MIN, PRUNE_ROI, PRUNE_WINDOW = 100, -0.03, 120
+PRUNE_BAD_MIN, PRUNE_BAD_ROI, PRUNE_BAD_UNITS = 40, -0.12, -8.0
 
 
 def _as_pick(r: dict) -> dict:
@@ -298,19 +304,30 @@ def tune_prune(records: list) -> tuple:
             groups.setdefault(f"{r.get('sport')} {r.get('market')}", []).append(_as_pick(r))
     out = {}
     for name, recs in groups.items():
-        recs = sorted(recs, key=lambda r: r.get("pick_time") or "")[-PRUNE_WINDOW:]   # the latest
+        first = {}
+        for r in sorted(recs, key=lambda r: r.get("pick_time") or ""):   # one per player per game
+            k = (r.get("game_id"), r.get("subject") if (r.get("inputs") or {}).get("bet_type", "prop") == "prop"
+                 else "game line")
+            first.setdefault(k, r)
+        recs = sorted(first.values(), key=lambda r: r.get("pick_time") or "")[-PRUNE_WINDOW:]   # the latest
         pr = pick_record(recs)
         n = pr["won"] + pr["lost"]
-        clvs = [c["prob"] for c in (pick_clv(r) for r in recs) if c]
-        if n < PRUNE_MIN or len(clvs) < PRUNE_MIN // 2:
+        if pr["roi"] is None:
             continue
-        clv = sum(clvs) / len(clvs)
-        if pr["roi"] is not None and pr["roi"] < PRUNE_ROI and clv < 0:
+        why = None
+        if n >= PRUNE_BAD_MIN and pr["roi"] <= PRUNE_BAD_ROI and pr["units"] <= PRUNE_BAD_UNITS:
+            why = f"last {n} picks {pr['won']}-{pr['lost']}, {pr['units']:+.1f}u, ROI {pr['roi']:+.1%}"
+        else:
+            clvs = [c["prob"] for c in (pick_clv(r) for r in recs) if c]
+            if n >= PRUNE_MIN and len(clvs) >= PRUNE_MIN // 2:
+                clv = sum(clvs) / len(clvs)
+                if pr["roi"] < PRUNE_ROI and clv < 0:
+                    why = f"last {n} picks ROI {pr['roi']:+.1%}, closing-line value {clv * 100:+.2f} pts"
+        if why:
             shadow = pick_record([r for r in recs if r.get("shadow")])
             sn = shadow["won"] + shadow["lost"]
-            out[name] = (f"last {n} picks ROI {pr['roi']:+.1%}, closing-line value {clv * 100:+.2f} pts"
-                         + (f"; while paused {shadow['won']}-{shadow['lost']} ({shadow['units']:+.1f}u)"
-                            if sn else ""))
+            out[name] = why + (f"; while paused {shadow['won']}-{shadow['lost']} ({shadow['units']:+.1f}u)"
+                               if sn else "")
     return out, []
 
 
@@ -362,7 +379,8 @@ def tune_manual_pauses(records: list, current: dict) -> tuple:
 # 1 by sample size; a pick's shown hit chance and stake use market + k x (blend - market).
 # The picks themselves don't change. LINEMAKER_PICK_SHRINK fixes k (1 = off).
 PICK_SHRINK_MIN, PICK_SHRINK_WINDOW, PICK_SHRINK_PRIOR_N = 150, 500, 200
-PICK_SHRINK_START = {"pre props": 0.6}   # from the 10/25-10/30 grades, until a segment's own fit
+# From the 10/25-10/30 grades, until a segment's own fit: the same start everywhere.
+PICK_SHRINK_START = {"pre props": 0.6, "pre games": 0.6, "live props": 0.6, "live games": 0.6}
 
 
 def tune_pick_shrink(records: list) -> Optional[dict]:
@@ -494,14 +512,17 @@ def calibrate_p(p: float, a: float, b: float) -> float:
 # one row per player-stat-side, shrunk by n / (n + 500) like the fit: favourite props hit a
 # little less often than the model and the books said (NBA "85%" landed 81%, NFL 81%),
 # mostly low alt-line overs sunk by a dud night. LINEMAKER_CALIBRATION_PRIORS=off drops them.
-CALIBRATION_PRIORS = {"pre props": {"NBA": [-0.144, 1.024, 1781], "NFL": [-0.067, 0.984, 1083]}}
+# "*": every other league until it has its own fit (the average of the NBA and NFL fits).
+CALIBRATION_PRIORS = {"pre props": {"NBA": [-0.144, 1.024, 1781], "NFL": [-0.067, 0.984, 1083],
+                                    "*": [-0.106, 1.004, 0]}}
 
 
 def _prior(phase: str, bet_type: str, sport: str):
     if os.environ.get("LINEMAKER_CALIBRATION_PRIORS", "on").strip().lower() in ("off", "0", "no", "false"):
         return None
     from .tracking import kind_of
-    return CALIBRATION_PRIORS.get(f"{phase} {kind_of(bet_type)}", {}).get(sport)
+    priors = CALIBRATION_PRIORS.get(f"{phase} {kind_of(bet_type)}", {})
+    return priors.get(sport) or priors.get("*")
 
 
 def calibrated(p: float, sport: str, bet_type: str = "prop", phase: str = "pre") -> float:

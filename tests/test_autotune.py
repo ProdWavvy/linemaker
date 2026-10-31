@@ -228,7 +228,8 @@ class ShadowPickTest(unittest.TestCase):
     def test_pause_lifts_when_the_recent_record_turns(self):
         from linemaker import autotune
         def rec(i, won, shadow):
-            r = {"sport": "NBA", "market": "PRA", "result": {"winner": "A" if won else "B"}}
+            r = {"sport": "NBA", "market": "PRA", "result": {"winner": "A" if won else "B"},
+                 "game_id": f"g{i}", "subject": f"P{i}"}
             pick = {"side": "A", "odds": -110, "time": f"2026-10-{10 + i // 10:02d}T{i % 10:02d}:00:00"}
             if shadow:
                 r["shadow_pick"] = pick

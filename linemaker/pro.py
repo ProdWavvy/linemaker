@@ -847,8 +847,9 @@ def run_pro(markets: list, slate_date: str, cfg: ProConfig, freezer=None,
     per_player = 1 if cfg.one_per_player else (
         cfg.max_per_player if cfg.max_per_player is not None else (_env_num("LINEMAKER_MAX_PICKS_PER_PLAYER", int) or 1))
     seen, kept = {}, []
-    for ev in quals:   # best-ranked first
-        k = (ev.market.game_id, ev.market.subject) if ev.market.bet_type == "prop" else id(ev)
+    for ev in quals:   # best-ranked first; model picks: one per game for game lines too
+        k = ((ev.market.game_id, ev.market.subject) if ev.market.bet_type == "prop"
+             else (ev.market.game_id, "game line") if cfg.pick_tag == "model" else id(ev))
         if per_player and len(seen.setdefault(k, [])) >= per_player:
             res.passes.append((ev.best.label, f"same player already on the board ({seen[k][0]})"))
             continue

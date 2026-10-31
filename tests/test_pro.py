@@ -412,3 +412,15 @@ class OnePickPerPlayerPerDayTest(unittest.TestCase):
             recs = load_day(d, "2026-10-30")
         picked = sorted(r["inputs"]["line"] for r in recs.values() if r.get("picked"))
         self.assertEqual(picked, [27.5])                                    # the first pick stands
+
+
+class OnePickPerGameTest(unittest.TestCase):
+    def test_a_games_lines_count_once(self):
+        from linemaker.pro import ProConfig, rows_to_markets, run_pro
+        base = {"date": "2026-10-30", "sport": "NBA", "game_id": "g1", "game": "Road @ Home", "stdev": "12",
+                "books": "FanDuel:-110/-110|DraftKings:-110/-110"}
+        rows = [dict(base, bet_type="moneyline", subject="Home", opponent="Road", market="moneyline", line="0", mean="6"),
+                dict(base, bet_type="spread", subject="Home", opponent="Road", market="spread", line="-1.5", mean="6")]
+        res = run_pro(rows_to_markets(rows), "2026-10-30", ProConfig(track=False, min_gap=0.0, n_sims=2000))
+        self.assertEqual(len(res.picks), 1)
+        self.assertTrue(any("same player already on the board" in w for _l, w in res.passes))

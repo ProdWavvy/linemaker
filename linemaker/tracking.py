@@ -192,10 +192,12 @@ class Tracker:
         later scan at a moved line, 27.5 then 28.5, doesn't count him twice); 0 = no limit."""
         now = now or _now()
         picked = {}
+        def who(game_id, subject, bet_type):   # a player, or a game's lines (they lose together)
+            return (game_id, subject if bet_type == "prop" else "game line")
         if per_player and tag == "model":
             for r in self.records.values():
-                if r.get("picked") and (r.get("inputs") or {}).get("bet_type") == "prop":
-                    k = (r.get("game_id"), r.get("subject"))
+                if r.get("picked"):
+                    k = who(r.get("game_id"), r.get("subject"), (r.get("inputs") or {}).get("bet_type", "prop"))
                     picked[k] = picked.get(k, 0) + 1
         for ev in picks:
             if ev.market.key in self._touched:
@@ -208,8 +210,8 @@ class Tracker:
                         pick["background"] = True
                     rec.setdefault(f"{tag}_pick", pick)
                     continue
-                if per_player and not rec.get("picked") and ev.market.bet_type == "prop":
-                    k = (ev.market.game_id, ev.market.subject)
+                if per_player and not rec.get("picked"):
+                    k = who(ev.market.game_id, ev.market.subject, ev.market.bet_type)
                     if picked.get(k, 0) >= per_player:
                         continue   # he already has his pick today, from an earlier scan
                     picked[k] = picked.get(k, 0) + 1
