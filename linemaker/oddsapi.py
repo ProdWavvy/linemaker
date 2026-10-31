@@ -701,6 +701,21 @@ def parse_event_props(event: dict, sport: str, tz: ZoneInfo) -> list:
     return drop_exchange_only(list(g.markets.values()))
 
 
+PROP_GAMES_CAP = {"NCAAF": 12, "NCAAB": 12}   # props cost credits per game; college slates are huge
+
+
+def prop_games_cap(sport: str) -> Optional[int]:
+    """Most games a props scan buys for this league (LINEMAKER_MAX_PROP_GAMES_<SPORT>; blank or
+    0 = no cap): a college football Saturday has 50+ games, about 10 credits each."""
+    raw = os.environ.get(f"LINEMAKER_MAX_PROP_GAMES_{sport.upper()}")
+    if raw is not None:
+        try:
+            return int(raw) or None
+        except ValueError:
+            return None
+    return PROP_GAMES_CAP.get(sport.upper())
+
+
 def fetch_slate(api: OddsAPI, sport: str, date: str, tz: ZoneInfo, props: bool = False,
                 prop_markets: Optional[list] = None, max_events: Optional[int] = None,
                 game_markets: str = "h2h,spreads,totals", game_lines: bool = True,
@@ -727,6 +742,11 @@ def fetch_slate(api: OddsAPI, sport: str, date: str, tz: ZoneInfo, props: bool =
             now = dt.datetime.now(dt.timezone.utc)
             chosen = [e for e in chosen
                       if dt.datetime.fromisoformat(e["commence_time"].replace("Z", "+00:00")) > now]
+        cap = prop_games_cap(sport)
+        if cap and only is None and len(chosen) > cap:   # e.g. a college football Saturday: the next few
+            log.info("%s: props for the next %d of %d games (LINEMAKER_MAX_PROP_GAMES_%s)",
+                     sport, cap, len(chosen), sport.upper())
+            chosen = sorted(chosen, key=lambda e: e["commence_time"])[:cap]
         with ThreadPoolExecutor(max_workers=4) as pool:   # a few at a time; 429s are retried
             # each worker runs in a copy of this thread's context, so the credits it spends
             # are counted toward the job that asked (pre-tip, chat ...)

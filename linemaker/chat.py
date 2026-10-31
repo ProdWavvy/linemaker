@@ -558,6 +558,9 @@ class LinemakerChat:
                 except Exception as e:
                     errors[sport] = friendly_error(sport, e)
             await asyncio.gather(*(scan(s) for s in quick))   # leagues at once: 4 leagues ~ the time of 1
+            if len(quick) > 1 and ctx.get("results"):   # leagues with no games today drop off the card
+                playing = [r for r in ctx["results"] if getattr(r[1], "slate", None) or getattr(r[1], "games", 0)]
+                ctx["results"] = playing or ctx["results"][:1]
             order = {s: i for i, s in enumerate(quick)}
             if ctx.get("results"):
                 ctx["results"].sort(key=lambda r: order.get(r[0], 99))
@@ -1302,6 +1305,10 @@ def quick_book(text: str) -> Optional[str]:
     return named[0] if len(named) == 1 else None
 
 
+ALL_SPORTS = "NBA,NFL,NCAAF,NHL,WNBA,MLB"
+ALL_SPORTS_WORDS = re.compile(r"\b(all|every)[- ]?(the )?(sports?|leagues?)\b|\bcross[- ]sports?\b", re.I)
+
+
 def quick_plays_request(text: str) -> Optional[list]:
     """Sports for a plain 'best props tonight?' question, answered without the AI model."""
     league_ask = (any(re.search(p, text, re.I) for p in SPORT_WORDS.values())
@@ -1312,6 +1319,8 @@ def quick_plays_request(text: str) -> Optional[list]:
         return None
     if re.search(r"\b(i have|i think|i got|projection|my number|at \d)", text, re.I):
         return None   # the user supplied their own number: let the model read it
+    if ALL_SPORTS_WORDS.search(text):   # "all sports": every league with a model, empty ones drop off
+        return [s.strip().upper() for s in os.environ.get("LINEMAKER_ALL_SPORTS", ALL_SPORTS).split(",") if s.strip()]
     sports, rest = [], text
     for s, pat in SPORT_WORDS.items():
         if re.search(pat, rest, re.I):

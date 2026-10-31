@@ -384,7 +384,8 @@ class LeagueTimeoutTest(unittest.TestCase):
         def fake_tool(self, name, args, ctx):
             if args["sport"] == "MLB":
                 time.sleep(1.5)                  # the slow league
-            ctx.setdefault("results", []).append((args["sport"], object(), {}))
+            from types import SimpleNamespace
+            ctx.setdefault("results", []).append((args["sport"], SimpleNamespace(slate=[("A @ H", "")], games=1), {}))
             return ""
         c = C.LinemakerChat.__new__(C.LinemakerChat)
         c.history = collections.defaultdict(list)
@@ -395,3 +396,24 @@ class LeagueTimeoutTest(unittest.TestCase):
             turn = asyncio.run(c.respond(1, "me", "best player props"))
         self.assertEqual(sorted(s for s, _r, _e in turn.results), ["NBA", "NFL"])
         self.assertIn("MLB** took too long", turn.text)
+
+
+class AllSportsTest(unittest.TestCase):
+    def test_all_sports_asks_every_league(self):
+        import os
+        from unittest import mock
+        from linemaker.chat import quick_plays_request
+        with mock.patch.dict(os.environ, {"LINEMAKER_SPORTS": "NBA,NFL", "LINEMAKER_ALL_SPORTS": ""}):
+            os.environ.pop("LINEMAKER_ALL_SPORTS")
+            for ask in ("all sports parlay", "best props all sports", "cross sport parlay", "every league props parlay"):
+                self.assertEqual(quick_plays_request(ask), ["NBA", "NFL", "NCAAF", "NHL", "WNBA", "MLB"], ask)
+            self.assertEqual(quick_plays_request("best props parlay"), ["NBA", "NFL"])   # leagueless: main leagues
+
+    def test_college_props_capped(self):
+        import os
+        from unittest import mock
+        from linemaker.oddsapi import prop_games_cap
+        self.assertEqual(prop_games_cap("NCAAF"), 12)
+        self.assertIsNone(prop_games_cap("NBA"))
+        with mock.patch.dict(os.environ, {"LINEMAKER_MAX_PROP_GAMES_NCAAF": "0"}):
+            self.assertIsNone(prop_games_cap("NCAAF"))
