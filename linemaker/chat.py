@@ -704,7 +704,24 @@ def slate_for(sport: str, date: str, kind: str = "props", refresh: bool = False)
     at most once per LINEMAKER_PLAYS_CACHE_MINUTES; smart and volume mode share the pull."""
     from .busy import busy
     with busy():
-        return _slate_for(sport, date, kind, refresh)
+        out = _slate_for(sport, date, kind, refresh)
+    return _no_props(sport, out)
+
+
+def _is_prop(x) -> bool:
+    if isinstance(x, dict):
+        return (x.get("inputs") or {}).get("bet_type", x.get("bet_type")) == "prop"
+    return getattr(x, "bet_type", None) == "prop"
+
+
+def _no_props(sport: str, out: tuple) -> tuple:
+    """Leagues in LINEMAKER_NO_PROPS_SPORTS lose any player props, including ones in a slate
+    saved before the setting changed or read live."""
+    from .oddsapi import no_props_sports
+    if sport.upper() not in no_props_sports():
+        return out
+    rows, slate = out[0], out[1]
+    return ([r for r in rows if not _is_prop(r)], [m for m in (slate or []) if not _is_prop(m)]) + tuple(out[2:])
 
 
 def _slate_for(sport: str, date: str, kind: str, refresh: bool) -> tuple:
@@ -1039,7 +1056,8 @@ def _fresh_rows(sport: str, date: str, event_ids: set):
     if {r.get("game_id") for r in rows} != set(event_ids):
         return None
     hit = _apply_news(sport, date, "props", hit)
-    return [r for r in hit[1] if r.get("game_id") in event_ids], time.time() - hit[0], hit[5]
+    rows = _no_props(sport, ([r for r in hit[1] if r.get("game_id") in event_ids], []))[0]
+    return rows, time.time() - hit[0], hit[5]
 
 
 def played_markets(sport: str, date: str, event_ids: set) -> set:

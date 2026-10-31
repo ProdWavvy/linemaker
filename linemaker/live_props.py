@@ -150,8 +150,11 @@ def run_live_props(api, sports: list, date: str, tz: ZoneInfo):
     from .pro import ProResult
     feed, rows, slate = [], [], []
     now = dt.datetime.now(dt.timezone.utc)
+    from .oddsapi import no_props_sports
     for sport in sports:
         s = sport.upper()
+        if s in no_props_sports():
+            continue
         family = sport_key(s).split("_")[0]
         keys = list(PROP_MARKETS.get(family, {}))
         if extra_markets_on() and alt_lines_ok():

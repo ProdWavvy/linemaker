@@ -342,3 +342,15 @@ class NoPropsSportsTest(unittest.TestCase):
             self.assertEqual(no_props_sports(), {"NCAAF", "NCAAB"})
         with mock.patch.dict("os.environ", {"LINEMAKER_NO_PROPS_SPORTS": ""}):
             self.assertEqual(no_props_sports(), set())
+
+
+class NoPropsFilterTest(unittest.TestCase):
+    def test_strips_props_for_listed_league(self):
+        from unittest import mock
+        from linemaker.chat import _no_props
+        rows = [{"inputs": {"bet_type": "prop"}}, {"inputs": {"bet_type": "spread"}}]
+        with mock.patch.dict("os.environ", {"LINEMAKER_NO_PROPS_SPORTS": "NCAAF"}):
+            out = _no_props("NCAAF", (rows, [], 5, None, "x"))
+            self.assertEqual(out[0], [rows[1]])
+            self.assertEqual(out[2:], (5, None, "x"))
+            self.assertEqual(_no_props("NFL", (rows, [], 5, None, "x"))[0], rows)
