@@ -76,8 +76,8 @@ def _pick_side(rec: dict, side: Optional[str]) -> dict:
     """The picked side's label and hit chance as shown when it was picked, even if a later
     read no longer priced that side."""
     s = dict(_side(rec, side) or {})
-    if rec.get("pick_label") and side == rec.get("pick_side"):
-        s.update(label=rec["pick_label"], blended=rec.get("pick_prob", s.get("blended")))
+    if rec.get("pick_label") and side == rec.get("pick_side"):   # the hit chance you were shown
+        s.update(label=rec["pick_label"], blended=rec.get("pick_shown_prob", rec.get("pick_prob", s.get("blended"))))
     if "label" not in s:
         other = next((x for x in rec.get("sides", []) if x.get("side") != side), None)
         label = _flip_label(other.get("label") or "") if other else None

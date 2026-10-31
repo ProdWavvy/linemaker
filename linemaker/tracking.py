@@ -218,7 +218,8 @@ class Tracker:
                 if "pick_time" not in rec:   # the pick as it was shown: grading reads these
                     rec.update(pick_time=now.isoformat(timespec="seconds"), pick_odds=ev.best.best_odds,
                                pick_book=ev.best.best_book, pick_market_prob=ev.best.market_prob,
-                               pick_prob=ev.best.blended, pick_label=ev.best.label)
+                               pick_prob=getattr(ev, "raw_pick_prob", ev.best.blended),
+                               pick_shown_prob=ev.best.blended, pick_label=ev.best.label)
 
     def save(self):
         """Merge into what's on disk now: other scans and live grading may have saved since

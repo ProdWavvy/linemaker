@@ -240,3 +240,58 @@ class ShadowPickTest(unittest.TestCase):
             self.assertIn("NBA PRA", autotune.tune_prune(old)[0])
             better = old + [rec(130 + i, i % 3 != 0, True) for i in range(120)]   # 67% while paused
             self.assertNotIn("NBA PRA", autotune.tune_prune(better)[0])
+
+
+class PickShrinkTest(unittest.TestCase):
+    def test_fit_from_graded_picks(self):
+        from linemaker.autotune import tune_pick_shrink
+        recs = []
+        for i in range(400):   # said 64%, market 53%, hit 58%
+            recs.append({"picked": True, "pick_side": "A", "pick_prob": 0.64, "pick_market_prob": 0.53,
+                         "pick_time": f"t{i:04d}", "result": {"winner": "A" if i % 100 < 58 else "B"}})
+        fit = tune_pick_shrink(recs)
+        self.assertAlmostEqual(fit["hit"], 0.58)
+        raw = (0.58 - 0.53) / (0.64 - 0.53)                          # 0.45 of the edge was real
+        self.assertAlmostEqual(fit["k"], round(1 + 400 / 600 * (raw - 1), 3))
+        self.assertIsNone(tune_pick_shrink(recs[:100]))               # too few to fit
+
+    def test_pick_shown_and_staked_on_the_corrected_chance(self):
+        import os
+        import tempfile
+        from linemaker.pro import ProConfig, rows_to_markets, run_pro
+        from linemaker.tracking import Tracker, load_day
+        row = {"date": "2026-10-30", "sport": "NBA", "game_id": "g1", "game": "A @ H", "bet_type": "prop",
+               "subject": "P", "market": "points", "line": "20.5", "mean": "24", "stdev": "5",
+               "books": "FanDuel:-110/-110|DraftKings:-110/-110"}
+        with mock.patch.dict(os.environ, {"LINEMAKER_PICK_SHRINK": "1"}):
+            raw = run_pro(rows_to_markets([row]), "2026-10-30", ProConfig(track=False, min_gap=0.0, n_sims=2000)).picks[0]
+        with tempfile.TemporaryDirectory() as d, mock.patch.dict(os.environ, {"LINEMAKER_PICK_SHRINK": "0.5"}):
+            res = run_pro(rows_to_markets([row]), "2026-10-30", ProConfig(min_gap=0.0, n_sims=2000), None,
+                          Tracker(d, "2026-10-30"))
+            rec = next(iter(load_day(d, "2026-10-30").values()))
+        ev = res.picks[0]
+        m = ev.best.market_prob
+        self.assertAlmostEqual(ev.best.blended, m + 0.5 * (raw.best.blended - m), places=6)
+        self.assertAlmostEqual(rec["pick_prob"], raw.best.blended, places=6)        # the fit reads the raw blend
+        self.assertAlmostEqual(rec["pick_shown_prob"], ev.best.blended, places=6)
+
+    def test_edge_gone_after_correction_is_dropped(self):
+        import os
+        from linemaker.pro import ProConfig, rows_to_markets, run_pro
+        row = {"date": "2026-10-30", "sport": "NBA", "game_id": "g1", "game": "A @ H", "bet_type": "prop",
+               "subject": "P", "market": "points", "line": "20.5", "mean": "23", "stdev": "5",
+               "books": "FanDuel:-115/-105|DraftKings:-115/-105"}
+        with mock.patch.dict(os.environ, {"LINEMAKER_PICK_SHRINK": "1"}):   # a pick before the correction
+            self.assertTrue(run_pro(rows_to_markets([row]), "2026-10-30",
+                                    ProConfig(track=False, min_gap=0.0, n_sims=2000)).picks)
+        with mock.patch.dict(os.environ, {"LINEMAKER_PICK_SHRINK": "0.1"}):
+            res = run_pro(rows_to_markets([row]), "2026-10-30", ProConfig(track=False, min_gap=0.0, n_sims=2000))
+        self.assertEqual(res.picks, [])
+        self.assertTrue(any("no edge once its hit chance is corrected" in w for _l, w in res.passes))
+
+    def test_manual_pause(self):
+        import os
+        from linemaker.autotune import pruned
+        with mock.patch.dict(os.environ, {"LINEMAKER_PAUSED_MARKETS": "NBA reb + ast"}):
+            self.assertEqual(pruned("NBA", "reb + ast"), "paused by you")
+            self.assertIsNone(pruned("NBA", "points"))

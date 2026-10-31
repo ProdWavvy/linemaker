@@ -664,6 +664,22 @@ def evaluate(m: ProMarket, cfg: ProConfig, sim: Optional[SimResult] = None) -> O
     return ev
 
 
+def shrink_pick(ev, k: float):
+    """A pick's hit chances moved to market + k x (blend - market) (see autotune.pick_shrink),
+    with gap, EV and fair odds re-derived. Its side stays the side that was picked."""
+    if k >= 0.999 or len(ev.sides) != 2:
+        return
+    ev.chosen = ev.best.side
+    ev.raw_pick_prob = ev.best.blended   # what the picks-vs-results fit compares against
+    push = getattr(ev.sim, "p_push", 0.0) or 0.0
+    for s in ev.sides:
+        s.blended = min(0.999, max(0.001, s.market_prob + k * (s.blended - s.market_prob)))
+        s.gap = s.blended - s.best_implied
+        s.ev = expected_value(s.blended, s.best_odds, 100, push)
+        s.fair = fair_odds(s.blended)
+    ev.shrunk = k
+
+
 def heaviest_allowed() -> Optional[int]:
     """LINEMAKER_MAX_FAVORITE (e.g. -250): no leg or pick priced heavier, in any mode."""
     return _env_num("LINEMAKER_MAX_FAVORITE", int)
@@ -847,6 +863,17 @@ def run_pro(markets: list, slate_date: str, cfg: ProConfig, freezer=None,
     if cfg.game_parlay_types:   # moneyline / spread parlays: their own leg picker (see ml_parlay_legs)
         res.picks = ml_parlay_legs(res, cfg)[:cfg.max_picks]
         res.ml_only, res.game_types = True, cfg.game_parlay_types
+    if cfg.pick_tag == "model":   # honest hit chances (the raw blend stays on the record for the fit)
+        from .autotune import pick_shrink
+        kept = []
+        for ev in res.picks:
+            shrink_pick(ev, pick_shrink(cfg.phase, ev.market.bet_type))
+            if ev.best.gap <= 0:
+                res.passes.append((ev.best.label, f"no edge once its hit chance is corrected "
+                                                  f"({ev.best.blended:.0%} vs {ev.best.best_implied:.0%})"))
+            else:
+                kept.append(ev)
+        res.picks = kept
     if freezer is not None:
         freezer.mark_picks(res.picks)
         freezer.save()
