@@ -164,3 +164,31 @@ class PrivateThreadTest(unittest.TestCase):
         self.assertEqual(made[0]["type"], discord.ChannelType.private_thread)
         self.assertEqual(deleted, [True, True])                                  # the asks tidied away
         self.assertEqual(pointers[0][1]["delete_after"], 30)
+
+
+class WatchdogTest(unittest.TestCase):
+    def test_frozen_loop_exits(self):
+        import time
+        from linemaker import bot as B
+        exits = []
+
+        class DeadLoop:
+            def call_soon_threadsafe(self, fn):
+                pass   # a frozen loop never runs its check-ins
+        with mock.patch.object(B.os, "_exit", side_effect=lambda code: exits.append(code)):
+            t = B.start_watchdog(DeadLoop(), limit=0.2, every=0.05)
+            time.sleep(0.5)
+        self.assertTrue(exits and exits[0] == 1)
+
+    def test_healthy_loop_stays_up(self):
+        import time
+        from linemaker import bot as B
+        exits = []
+
+        class LiveLoop:
+            def call_soon_threadsafe(self, fn):
+                fn()
+        with mock.patch.object(B.os, "_exit", side_effect=lambda code: exits.append(code)):
+            B.start_watchdog(LiveLoop(), limit=0.2, every=0.05)
+            time.sleep(0.5)
+        self.assertEqual(exits, [])

@@ -1785,6 +1785,7 @@ class LinemakerBot(discord.Client):
         asyncio.get_running_loop().set_default_executor(
             ThreadPoolExecutor(max_workers=int(os.environ.get("LINEMAKER_THREADS", "40") or 40),
                                thread_name_prefix="linemaker"))
+        start_watchdog(asyncio.get_running_loop())
         await asyncio.to_thread(load_details)   # buttons on earlier cards keep working
         # Linemaker owns this application: each sync replaces the whole command list, so
         # commands left over from whatever the bot ran before are removed.
@@ -2726,6 +2727,45 @@ async def _refresh_budget():
             log.info("credit budget for %s: %s a day (%s day(s) to the refill)", today(), budget, days_to_reset())
     except Exception as e:
         log.warning("midnight budget check: %s", e)
+
+
+def loop_stuck_for(last_beat: float, now: float) -> float:
+    return now - last_beat
+
+
+def start_watchdog(loop, limit: Optional[float] = None, every: float = 30.0):
+    """A frozen main loop still looks online (Discord's heartbeat runs on its own thread) but
+    answers nothing. If the loop hasn't run a check-in for LINEMAKER_WATCHDOG_SECONDS (180),
+    log it and exit: systemd restarts the bot 10 seconds later. 0 turns it off."""
+    import threading
+    import time as _t
+    limit = float(os.environ.get("LINEMAKER_WATCHDOG_SECONDS", "180") or 0) if limit is None else limit
+    if not limit:
+        return None
+    last = [_t.time()]
+
+    def beat():
+        last[0] = _t.time()
+
+    def watch():
+        while True:
+            _t.sleep(every)
+            try:
+                loop.call_soon_threadsafe(beat)
+            except RuntimeError:   # the loop closed: the bot is shutting down
+                return
+            if loop_stuck_for(last[0], _t.time()) > limit:
+                log.error("watchdog: the main loop hasn't answered for %.0fs; restarting", _t.time() - last[0])
+                for h in logging.getLogger().handlers:
+                    try:
+                        h.flush()
+                    except Exception:
+                        pass
+                os._exit(1)
+                return
+    t = threading.Thread(target=watch, daemon=True, name="watchdog")
+    t.start()
+    return t
 
 
 def _alert_sports(override: str = "") -> list:
