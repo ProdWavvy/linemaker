@@ -95,3 +95,19 @@ class BackgroundMarketEdgesTest(unittest.TestCase):
         got = dict(zip(head, row))
         self.assertEqual((got["market_pick"], got["market_pick_odds"], got["market_pick_book"],
                           got["market_pick_result"]), ("background", "100", "FanDuel", "hit"))
+
+
+class MarketTrackingStatsTest(unittest.TestCase):
+    def test_runs_and_reasons_recorded_for_the_grade(self):
+        from linemaker.chat import market_tracking_line, track_market_edges
+        rows = BackgroundMarketEdgesTest.ROWS + [dict(BackgroundMarketEdgesTest.ROWS[0], subject="Thin",
+                                                      books="FanDuel:-110/-110|DraftKings:-110/-110")]
+        with tempfile.TemporaryDirectory() as d, mock.patch.dict(os.environ, {
+                "LINEMAKER_TRACKING": "on", "LINEMAKER_TRACKING_DIR": d, "LINEMAKER_CACHE_DIR": d,
+                "LINEMAKER_MARKET_MIN_GAP": "", "LINEMAKER_SHARP_BOOKS_PROPS": ""}):
+            self.assertIn("didn't run today", market_tracking_line("2026-10-25"))
+            track_market_edges(rows, "2026-10-25", wait=True)
+            line = market_tracking_line("2026-10-25")
+        self.assertIn("1 runs", line)
+        self.assertIn("1 edges logged", line)
+        self.assertIn("books with both sides", line)          # why "Thin" was passed

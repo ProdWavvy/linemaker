@@ -901,8 +901,10 @@ def track_market_edges(rows: list, date: str, sims: Optional[dict] = None, wait:
             res = run_pro(rows_to_markets(rows), date, cfg, None, None, sims=sims)
             log.info("market edges logged in the background: %d of %d markets (0 credits)",
                      len(res.picks), len(res.evaluated))
+            _tracking_stats(date, res=res)
         except Exception as e:
             log.warning("market-edge tracking: %s", e)
+            _tracking_stats(date, error=f"{type(e).__name__}: {e}")
     if wait:
         run()
     else:
@@ -913,6 +915,41 @@ def track_market_edges(rows: list, date: str, sims: Optional[dict] = None, wait:
 # (it's CPU work that would otherwise slow the asks it rides on).
 from concurrent.futures import ThreadPoolExecutor as _Pool
 _TRACKING_POOL = _Pool(max_workers=1, thread_name_prefix="market-edge-tracking")
+
+
+def _tracking_stats(date: str, res=None, error: str = ""):
+    """The day's market-edge tracking runs, for the grade report: markets checked, edges
+    logged, and the commonest reasons markets were passed (or the errors)."""
+    import collections
+    from .alerts import load_state, save_state
+    s = load_state(f"market_tracking_{date}.json", {}) or {}
+    s["runs"] = s.get("runs", 0) + 1
+    if res is not None:
+        s["markets"] = s.get("markets", 0) + len(res.evaluated) + len(res.passes)
+        s["priced"] = s.get("priced", 0) + len(res.evaluated)
+        s["edges"] = s.get("edges", 0) + len(res.picks)
+        why = collections.Counter(s.get("why") or {})
+        why.update(re.sub(r"\([^)]*\)|[-+]?\d[\d.,%]*", "#", w).strip() for _l, w in res.passes)
+        s["why"] = dict(why.most_common(6))
+    if error:
+        s["errors"] = (s.get("errors") or [])[-4:] + [error[:200]]
+    save_state(f"market_tracking_{date}.json", s)
+
+
+def market_tracking_line(date: str) -> str:
+    from .alerts import load_state
+    s = load_state(f"market_tracking_{date}.json", {}) or {}
+    if not s:
+        return ("⚡ **Market-edge tracking:** didn't run today (it rides on asks and pre-tip scans "
+                "that buy odds).")
+    line = (f"⚡ **Market-edge tracking:** {s.get('runs', 0)} runs · {s.get('markets', 0):,} markets · "
+            f"{s.get('priced', 0):,} priced at FanDuel/DraftKings · **{s.get('edges', 0)} edges logged**")
+    top = list((s.get("why") or {}).items())[:3]
+    if top:
+        line += " · most passed for: " + "; ".join(f"{w} ({n:,})" for w, n in top)
+    if s.get("errors"):
+        line += " · ⚠️ errors: " + " | ".join(s["errors"][-2:])
+    return line[:900]
 
 
 def _when_idle(fn, max_wait: float = 600):

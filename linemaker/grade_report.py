@@ -395,6 +395,11 @@ def notes_embed(date: str, records: dict, summary: list, newly: int, remaining) 
         if done:
             lines.append(f"🚫 **{done} market{'s' if done != 1 else ''} in finished games won't grade:** "
                          "players who didn't play, or stats the box score doesn't list. Nothing to do.")
+    try:
+        from .chat import market_tracking_line
+        lines.append(market_tracking_line(date))
+    except Exception:
+        pass
     pushes = [r for r in main.values() if r.get("result") and r["result"].get("winner") is None]
     if pushes:
         lines.append(f"➖ **Pushes:** {len(pushes)} (landed exactly on the line).")
