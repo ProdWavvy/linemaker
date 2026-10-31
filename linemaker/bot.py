@@ -1778,6 +1778,13 @@ class LinemakerBot(discord.Client):
             self.chat_channels.add(self.home)
 
     async def setup_hook(self):
+        # Scans, grading, re-fits and background logging all run in worker threads: a small
+        # default pool (CPU count + 4) left buttons and slash commands waiting past
+        # Discord's 3-second window ("application did not respond").
+        from concurrent.futures import ThreadPoolExecutor
+        asyncio.get_running_loop().set_default_executor(
+            ThreadPoolExecutor(max_workers=int(os.environ.get("LINEMAKER_THREADS", "40") or 40),
+                               thread_name_prefix="linemaker"))
         await asyncio.to_thread(load_details)   # buttons on earlier cards keep working
         # Linemaker owns this application: each sync replaces the whole command list, so
         # commands left over from whatever the bot ran before are removed.
@@ -2308,7 +2315,8 @@ async def help_cmd(interaction: discord.Interaction):
 async def today_cmd(interaction: discord.Interaction):
     from .dashboard import today_embed
     try:
-        await interaction.response.send_message(embed=await asyncio.to_thread(today_embed, today()), ephemeral=True)
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        await interaction.followup.send(embed=await asyncio.to_thread(today_embed, today()), ephemeral=True)
     except Exception as e:
         await _report_error(interaction, e)
 
@@ -2631,10 +2639,11 @@ async def odds_cmd(interaction: discord.Interaction, sport: app_commands.Choice[
 @bot.tree.command(name="quota", description="The Odds API credits left on every key (free call)")
 async def quota_cmd(interaction: discord.Interaction):
     try:
+        await interaction.response.defer(ephemeral=True, thinking=True)   # answer Discord within its 3 s
         from .oddsapi import key_quotas
         rows = await asyncio.to_thread(key_quotas)
         if not rows:
-            await interaction.response.send_message("No ODDS_API_KEY set in .env.", ephemeral=True)
+            await interaction.followup.send("No ODDS_API_KEY set in .env.", ephemeral=True)
             return
         lines, total = [], 0
         for n, masked, remaining, used, error, active in rows:
@@ -2649,7 +2658,7 @@ async def quota_cmd(interaction: discord.Interaction):
                               description="\n".join(lines))
         embed.add_field(name="Total remaining", value=f"**{total}** across {len(rows)} "
                                                       f"key{'s' if len(rows) != 1 else ''}")
-        await interaction.response.send_message(embed=embed, ephemeral=True)
+        await interaction.followup.send(embed=embed, ephemeral=True)
     except Exception as e:
         await _report_error(interaction, e)
 
@@ -3237,8 +3246,8 @@ async def status_cmd(interaction: discord.Interaction):
     if not await _owner_only(interaction):
         return
     from .admin import status_lines
-    await interaction.response.send_message("\n".join(await asyncio.to_thread(status_lines)),
-                                            ephemeral=True)
+    await interaction.response.defer(ephemeral=True, thinking=True)
+    await interaction.followup.send("\n".join(await asyncio.to_thread(status_lines))[:2000], ephemeral=True)
 
 
 @daily_post.before_loop
