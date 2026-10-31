@@ -28,7 +28,7 @@ ROWS = [
 COMMANDS = [
     ("💰 Money", "`/bankroll` stakes as a share of what you have · `/paper` practice bets · "
                 "`/bets` open bets (change / undo) · `/record` your results · `/today` dashboard"),
-    ("📊 Results", "`/grade` grade a day · `/weekly` the week · `/clv` beat the close? · `/calibrate` · `/books` sharpest books"),
+    ("📊 Results", "`/grade` grade a day · `/weekly` the week · `/clv` beat the close? · `/calibrate` · `/books` sharpest books · `/alltime` all-time record"),
     ("⚙️ Owner", "`/status` version, credits · `/settings` · `/set` · `/envchanges` · `/logs` · "
                 "`/restart` · `/backup`"),
 ]

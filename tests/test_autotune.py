@@ -295,3 +295,24 @@ class PickShrinkTest(unittest.TestCase):
         with mock.patch.dict(os.environ, {"LINEMAKER_PAUSED_MARKETS": "NBA reb + ast"}):
             self.assertEqual(pruned("NBA", "reb + ast"), "paused by you")
             self.assertIsNone(pruned("NBA", "points"))
+
+
+class ManualLiftTest(unittest.TestCase):
+    def test_paused_by_you_comes_back_after_doing_better(self):
+        import os
+        from linemaker import autotune
+        def shadow(i, won):
+            return {"sport": "NBA", "market": "reb + ast", "result": {"winner": "A" if won else "B"},
+                    "shadow_pick": {"side": "A", "odds": -110, "time": f"t{i:03d}"}}
+        with mock.patch.dict(os.environ, {"LINEMAKER_PAUSED_MARKETS": "NBA reb + ast"}):
+            lifted, status, ch = autotune.tune_manual_pauses([shadow(i, i % 2 == 0) for i in range(30)], {})
+            self.assertEqual(lifted, {})                                     # too few, and losing
+            self.assertEqual(status["nba reb + ast"], "15-15 (-1.4u)")
+            good = [shadow(i, i % 3 != 0) for i in range(45)]                  # 30-15 while paused
+            lifted, status, ch = autotune.tune_manual_pauses(good, {})
+            self.assertIn("nba reb + ast", lifted)
+            self.assertIn("back on", ch[0])
+            with mock.patch.object(autotune, "load_weights", return_value={"manual_lifted": lifted}):
+                self.assertIsNone(autotune.pruned("NBA", "reb + ast"))
+            with mock.patch.object(autotune, "load_weights", return_value={}):
+                self.assertEqual(autotune.pruned("NBA", "reb + ast"), "paused by you")

@@ -2396,6 +2396,30 @@ async def clv_cmd(interaction: discord.Interaction, days: Optional[int] = 14):
         await _report_error(interaction, e)
 
 
+@bot.tree.command(name="alltime", description="All-time record: total, per sport, per market, and more")
+async def alltime_cmd(interaction: discord.Interaction):
+    await interaction.response.defer(thinking=True)
+    try:
+        from .reports import alltime_sections
+        sections = await asyncio.to_thread(alltime_sections, today())
+        embeds = []
+        for title, lines in sections:
+            body, extra = "", 0
+            for line in lines:   # long market lists: as many as fit, then a count
+                if len(body) + len(line) + 1 > 3900:
+                    extra += 1
+                    continue
+                body += line + "\n"
+            if extra:
+                body += f"…and {extra} more"
+            embeds.append(discord.Embed(title=title, description=body, color=0x3498DB))
+        embeds[0].title = "🏆 All-Time Record · " + embeds[0].title.split(" ", 1)[1]
+        for group in chunk_embeds(embeds):
+            await interaction.followup.send(embeds=group)
+    except Exception as e:
+        await _report_error(interaction, e)
+
+
 @bot.tree.command(name="books", description="Which books' prices were most accurate (your devig weights)")
 @app_commands.describe(days="How many days back (default 14)")
 async def books_cmd(interaction: discord.Interaction, days: Optional[int] = 14):

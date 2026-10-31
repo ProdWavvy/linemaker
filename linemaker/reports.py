@@ -149,3 +149,83 @@ def whats_working(recs: list, min_n: int = 15) -> list:
     if mk:
         out.append(f"**⚡ Market-edge picks:** {sum(mk):+.1f}u over {len(mk)}")
     return out
+
+
+# ---- all-time record ------------------------------------------------------------------
+
+def _rec_line(name: str, pr: dict) -> str:
+    n = pr["won"] + pr["lost"]
+    return (f"{name}: **{pr['won']}-{pr['lost']}" + (f"-{pr['push']}" if pr["push"] else "") + "** · "
+            f"{pr['units']:+.1f}u" + (f" · ROI {pr['roi']:+.1%}" if pr["roi"] is not None else "")
+            + (f" · hit {pr['won'] / n:.0%}" if n else ""))
+
+
+def alltime_sections(today: str) -> list:
+    """[(title, [lines])]: every graded model pick the bot has tracked (1 unit each, at the
+    price when picked): totals per phase, per sport, per market, overs vs unders, plus the
+    market-edge, paused-market (shadow) and auto-parlay records and your own bets."""
+    from .autotune import _as_pick
+    tdir = os.environ.get("LINEMAKER_TRACKING_DIR", "tracking")
+    pre = [r for r in load_records(tdir, None, today) if r.get("result")]
+    live = [r for r in load_records(os.path.join(tdir, "live"), None, today) if r.get("result")]
+    pp = [r for r in load_records(os.path.join(tdir, "pp"), None, today) if r.get("result")]
+    picks = [r for r in pre if r.get("picked")]
+    days = sorted({r["key"][:10] for r in pre if r.get("key")})
+    span = f"{days[0]} to {days[-1]} ({len(days)} days)" if days else "no graded days yet"
+    one = {}
+    for r in picks:   # one per player per game: the rule picks follow now
+        k = (r.get("game_id"), r.get("subject"))
+        if k not in one or (r.get("pick_time") or "") < (one[k].get("pick_time") or ""):
+            one[k] = r
+    out = [("📊 Totals", [f"Graded {span}. 1 unit a pick, at the price when picked.",
+                         _rec_line("Pre-game picks", pick_record(picks)),
+                         _rec_line("↳ one per player per game (today's rule)", pick_record(list(one.values()))),
+                         _rec_line("Live picks", pick_record([r for r in live if r.get("picked")])),
+                         _rec_line("PrizePicks picks", pick_record([r for r in pp if r.get("picked")]))])]
+    by_sport = {}
+    for r in picks:
+        by_sport.setdefault(r.get("sport", "?"), []).append(r)
+    out.append(("🏟️ By Sport (pre-game)", [_rec_line(s, pick_record(rs)) for s, rs in
+                                          sorted(by_sport.items(), key=lambda kv: -pick_record(kv[1])["units"])]))
+    by_market = {}
+    for r in picks:
+        by_market.setdefault(f"{r.get('sport')} {r.get('market')}", []).append(r)
+    big = sorted(((k, pick_record(v)) for k, v in by_market.items() if len(v) >= 10), key=lambda kv: -kv[1]["units"])
+    rest = [r for k, v in by_market.items() if len(v) < 10 for r in v]
+    lines = [_rec_line(k, pr) for k, pr in big]
+    if rest:
+        lines.append(_rec_line(f"{len(by_market) - len(big)} smaller markets (under 10 picks)", pick_record(rest)))
+    out.append(("📈 By Market (pre-game, best first)", lines))
+    sides = {"Overs": [], "Unders": []}
+    for r in picks:
+        if (r.get("inputs") or {}).get("bet_type") == "prop":
+            sides["Overs" if r.get("pick_side") == "A" else "Unders"].append(r)
+    other = [_rec_line(k, pick_record(v)) for k, v in sides.items() if v]
+    edges = [dict(r, picked=True, pick_side=r["market_pick"]["side"], pick_odds=r["market_pick"].get("odds"))
+             for r in pre if r.get("market_pick") and r["market_pick"].get("odds") is not None]
+    if edges:
+        other.append(_rec_line("⚡ Market-edge picks", pick_record(edges)))
+    shadows = [_as_pick(r) for r in pre if r.get("shadow_pick") and r["shadow_pick"].get("odds") is not None]
+    if shadows:
+        other.append(_rec_line("⏸️ Paused markets' shadow picks", pick_record(shadows)))
+    try:
+        from .parlay_track import load_range
+        parlays = [p for p in load_range(len(days) + 1 if days else 0, today) if p.get("result") in ("won", "lost")]
+        if parlays:
+            won = sum(p["result"] == "won" for p in parlays)
+            other.append(f"🎰 Auto-parlays: **{won}-{len(parlays) - won}** · "
+                         f"{sum(p.get('profit', 0) for p in parlays):+.1f}u (1u each)")
+    except Exception:
+        pass
+    try:
+        from .bets import summary
+        s = summary(None, today)
+        if s["settled"]:
+            other.append(f"🧾 Your bets: **{s['won']}-{s['lost']}** · ${s['staked']:,.2f} staked · "
+                         f"{s['profit']:+,.2f}" + (f" · ROI {s['roi']:+.1%}" if s["roi"] is not None else "")
+                         + " (`/record` for more)")
+    except Exception:
+        pass
+    if other:
+        out.append(("🔎 Everything Else", other))
+    return out

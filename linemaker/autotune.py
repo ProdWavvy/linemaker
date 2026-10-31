@@ -315,15 +315,44 @@ def tune_prune(records: list) -> tuple:
 
 
 def manual_pauses() -> set:
-    """LINEMAKER_PAUSED_MARKETS, e.g. "NBA reb + ast": paused by you until you remove it
-    (shadow picks still graded); the auto-tuner never lifts these."""
+    """LINEMAKER_PAUSED_MARKETS, e.g. "NBA reb + ast": paused by you. Its shadow picks keep
+    grading it, and once they've done better (MANUAL_LIFT_MIN+ graded, in profit) the
+    auto-tuner brings it back (weights.json "manual_lifted"); remove it from the list to
+    reset."""
     return {p.strip().lower() for p in os.environ.get("LINEMAKER_PAUSED_MARKETS", "").split(",") if p.strip()}
 
 
+MANUAL_LIFT_MIN = 40
+
+
 def pruned(sport: str, market: str, phase: str = "pre", bet_type: str = "prop") -> Optional[str]:
-    if f"{sport} {market}".lower() in manual_pauses():
+    name = f"{sport} {market}".lower()
+    if name in manual_pauses() and name not in (load_weights().get("manual_lifted") or {}):
         return "paused by you"
     return segment(phase, bet_type).get("pruned", {}).get(f"{sport} {market}")
+
+
+def shadow_record(records: list, name: str) -> dict:
+    """The shadow picks' record (a paused market's would-be picks) for "NBA reb + ast"."""
+    from .reports import pick_record
+    return pick_record([_as_pick(r) for r in records if r.get("result") and r.get("shadow_pick")
+                        and r["shadow_pick"].get("odds") is not None
+                        and f"{r.get('sport')} {r.get('market')}".lower() == name])
+
+
+def tune_manual_pauses(records: list, current: dict) -> tuple:
+    """({lifted}, {name: "W-L (+u)"}, [changes]): a market you paused comes back once its
+    shadow picks have done better."""
+    lifted = {k: v for k, v in (current.get("manual_lifted") or {}).items() if k in manual_pauses()}
+    status, changes = {}, []
+    for name in sorted(manual_pauses()):
+        rec = shadow_record(records, name)
+        n = rec["won"] + rec["lost"]
+        status[name] = f"{rec['won']}-{rec['lost']} ({rec['units']:+.1f}u)" if n else "no shadow picks yet"
+        if name not in lifted and n >= MANUAL_LIFT_MIN and rec["units"] > 0:
+            lifted[name] = {"date": dt.date.today().isoformat(), "record": status[name]}
+            changes.append(f"▶️ {name} back on: its shadow picks went {status[name]} while paused")
+    return lifted, status, changes
 
 
 # ---- how much of a pick's edge is real ---------------------------------------------------
@@ -639,6 +668,8 @@ def run_autotune(tracking_dir: str, today: str) -> list:
         changes += [f"{label}: ▶️ {k} back on (no longer losing on both counts)"
                     for k in before if k not in seg["pruned"]]
         new["segments"][name] = seg
+    new["manual_lifted"], new["manual_status"], manual_changes = tune_manual_pauses(by_phase["pre"], current)
+    changes += manual_changes
     from .parlay_track import load_range
     new["parlay_calibration"], pcal_notes = tune_parlay_calibration(load_range(days, today))
     if new["parlay_calibration"] != current.get("parlay_calibration", {}):
@@ -697,7 +728,9 @@ def current_summary() -> str:
     if shrink:
         out.append("Pick hit chances (share of the edge over the market kept): " + ", ".join(shrink))
     paused = [f"{SEGMENT_LABELS[n]} {k} ({v})" for n in SEGMENTS for k, v in sorted(segs.get(n, {}).get("pruned", {}).items())]
-    paused += [f"{m} (paused by you)" for m in sorted(manual_pauses())]
+    lifted, status = w.get("manual_lifted") or {}, w.get("manual_status") or {}
+    paused += [f"{m} (paused by you; while paused {status.get(m, 'no shadow picks yet')}; back on at "
+               f"{MANUAL_LIFT_MIN}+ shadow picks in profit)" for m in sorted(manual_pauses()) if m not in lifted]
     if paused:
         out.append("Paused markets: " + ", ".join(paused))
     if w.get("bias"):
