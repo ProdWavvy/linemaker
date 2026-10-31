@@ -1854,7 +1854,6 @@ class LinemakerBot(discord.Client):
         if _spend(local_today()).get("start_remaining") is None:   # restarted before today's check
             asyncio.get_running_loop().create_task(_refresh_budget())
         asyncio.get_running_loop().create_task(_catch_up_bets())
-        asyncio.get_running_loop().create_task(_autotune_today())
         if self.home is not None:
             ch = self.get_channel(self.home)
             if ch is None:
@@ -2704,8 +2703,12 @@ async def _autotune_today():
 async def _catch_up_bets():
     """Older live bets still open: grade their days again from ESPN (free) and settle them."""
     try:
+        from .alerts import load_state, save_state
         from .bets import settle, stale_days
         from .grading import regrade_live
+        if load_state("catchup_startup.json", "") == today():
+            return   # once a day: a restart loop can't rerun it (marked before it runs)
+        save_state("catchup_startup.json", today())
         for d in stale_days(today()):
             await asyncio.to_thread(regrade_live, d)
         n = await asyncio.to_thread(settle)
