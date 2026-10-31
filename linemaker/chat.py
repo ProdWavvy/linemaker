@@ -535,14 +535,26 @@ class LinemakerChat:
                      f" ({book} only)" if book else "")
             errors = {}
 
+            # Several leagues: each gets LINEMAKER_LEAGUE_TIMEOUT (170 s) so a slow one is left
+            # off the card instead of the whole answer timing out.
+            limit = float(os.environ.get("LINEMAKER_LEAGUE_TIMEOUT", "170") or 170) if len(quick) > 1 else None
+
             async def scan(sport):
+                own = {"files": ctx["files"], "attached_rows": ctx["attached_rows"]}   # merged only if in time
                 try:
-                    await asyncio.to_thread(self.run_tool, "find_plays",
-                                            {"sport": sport, "mode": mode,
-                                             "kind": "games" if sport == "UFC" else kind,   # fights: winners only
-                                             "refresh": refresh, "book": book,
-                                             "game_parlay_types": game_parlay_types(text),
-                                             "teams": [t for s, t in teams if s == sport]}, ctx)
+                    await asyncio.wait_for(asyncio.to_thread(
+                        self.run_tool, "find_plays",
+                        {"sport": sport, "mode": mode,
+                         "kind": "games" if sport == "UFC" else kind,   # fights: winners only
+                         "refresh": refresh, "book": book,
+                         "game_parlay_types": game_parlay_types(text),
+                         "teams": [t for s, t in teams if s == sport]}, own), timeout=limit)
+                    for k in ("results", "summaries", "armed"):
+                        ctx.setdefault(k, []).extend(own.get(k) or [])
+                except asyncio.TimeoutError:
+                    log.warning("%s took over %.0fs in a multi-league ask: left off the card", sport, limit)
+                    errors[sport] = (f"⏱️ **{sport}** took too long, so it's left off this card. "
+                                     f"Ask for it on its own (`best {sport.lower()} props`).")
                 except Exception as e:
                     errors[sport] = friendly_error(sport, e)
             await asyncio.gather(*(scan(s) for s in quick))   # leagues at once: 4 leagues ~ the time of 1
@@ -894,7 +906,21 @@ def track_market_edges(rows: list, date: str, sims: Optional[dict] = None, wait:
     if wait:
         run()
     else:
-        threading.Thread(target=run, daemon=True, name="market-edge-tracking").start()
+        _TRACKING_POOL.submit(_when_idle, run)
+
+
+# Background market-edge logging: one league at a time, after the answers in progress are out
+# (it's CPU work that would otherwise slow the asks it rides on).
+from concurrent.futures import ThreadPoolExecutor as _Pool
+_TRACKING_POOL = _Pool(max_workers=1, thread_name_prefix="market-edge-tracking")
+
+
+def _when_idle(fn, max_wait: float = 600):
+    from .busy import _COUNT
+    start = time.time()
+    while _COUNT[0] > 0 and time.time() - start < max_wait:
+        time.sleep(2)
+    fn()
 
 
 def track_game_lines(sport: str, date: str, only: Optional[set] = None) -> int:

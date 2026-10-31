@@ -370,3 +370,28 @@ class TeamAskTest(unittest.TestCase):
             self.assertEqual(chat.find_teams("warriors props", "d"), [("NBA", "Golden State Warriors", True)])
             self.assertEqual(chat.find_teams("red wings props", "d"), [("NHL", "Detroit Red Wings", True)])
             self.assertEqual(chat.find_teams("steelers props", "d"), [("NFL", "Pittsburgh Steelers", False)])
+
+
+class LeagueTimeoutTest(unittest.TestCase):
+    def test_slow_league_left_off_the_card(self):
+        import asyncio
+        import collections
+        import os
+        import time
+        from unittest import mock
+        from linemaker import chat as C
+
+        def fake_tool(self, name, args, ctx):
+            if args["sport"] == "MLB":
+                time.sleep(1.5)                  # the slow league
+            ctx.setdefault("results", []).append((args["sport"], object(), {}))
+            return ""
+        c = C.LinemakerChat.__new__(C.LinemakerChat)
+        c.history = collections.defaultdict(list)
+        c.provider = "gemini"
+        with mock.patch.dict(os.environ, {"LINEMAKER_SPORTS": "NBA,NFL,MLB", "LINEMAKER_LEAGUE_TIMEOUT": "0.5"}), \
+                mock.patch.object(C.LinemakerChat, "run_tool", fake_tool), \
+                mock.patch.object(C, "find_teams", return_value=[]):
+            turn = asyncio.run(c.respond(1, "me", "best player props"))
+        self.assertEqual(sorted(s for s, _r, _e in turn.results), ["NBA", "NFL"])
+        self.assertIn("MLB** took too long", turn.text)
