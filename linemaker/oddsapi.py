@@ -704,6 +704,14 @@ def parse_event_props(event: dict, sport: str, tz: ZoneInfo) -> list:
 PROP_GAMES_CAP = {"NCAAF": 12, "NCAAB": 12}   # props cost credits per game; college slates are huge
 
 
+def no_props_sports() -> set:
+    """Leagues whose player props are skipped (LINEMAKER_NO_PROPS_SPORTS, e.g. NCAAF,NCAAB):
+    some states, New York among them, don't allow props on college players, so buying them
+    only spends credits on bets you can't place. Game lines still come through."""
+    raw = os.environ.get("LINEMAKER_NO_PROPS_SPORTS", "")
+    return {s.strip().upper() for s in raw.split(",") if s.strip()}
+
+
 def prop_games_cap(sport: str) -> Optional[int]:
     """Most games a props scan buys for this league (LINEMAKER_MAX_PROP_GAMES_<SPORT>; blank or
     0 = no cap): a college football Saturday has 50+ games, about 10 credits each."""
@@ -724,8 +732,8 @@ def fetch_slate(api: OddsAPI, sport: str, date: str, tz: ZoneInfo, props: bool =
     event list comes from the free /events endpoint instead of a paid /odds call."""
     start, end = slate_window(date, tz)
     game_markets = GAME_MARKETS.get(sport.upper(), game_markets)
-    if sport.upper() in GAME_MARKETS:
-        props = False   # no player props for these in the feed
+    if sport.upper() in GAME_MARKETS or sport.upper() in no_props_sports():
+        props = False   # no player props for these (not in the feed, or not offered where you bet)
     source = (api.game_odds(sport, game_markets, start, end) if game_lines
               else api.events(sport, start, end))
     events = [e for e in source if _local_date(e["commence_time"], tz) == date]

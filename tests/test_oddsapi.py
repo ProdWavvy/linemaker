@@ -332,3 +332,13 @@ class ExchangeLadderTest(unittest.TestCase):
         fms = parse_event_props(event, "NBA", ZoneInfo("America/New_York"))
         self.assertEqual([fm.line for fm in fms], [20.5])                      # Kalshi's own ladder gone
         self.assertEqual(sorted(b for b, _p in fms[0].books), ["FanDuel", "Kalshi"])   # its 20.5 merged in
+
+
+class NoPropsSportsTest(unittest.TestCase):
+    def test_parses_list(self):
+        from unittest import mock
+        from linemaker.oddsapi import no_props_sports
+        with mock.patch.dict("os.environ", {"LINEMAKER_NO_PROPS_SPORTS": "ncaaf, NCAAB"}):
+            self.assertEqual(no_props_sports(), {"NCAAF", "NCAAB"})
+        with mock.patch.dict("os.environ", {"LINEMAKER_NO_PROPS_SPORTS": ""}):
+            self.assertEqual(no_props_sports(), set())
