@@ -266,12 +266,20 @@ def tune_bias(records: list, current: dict) -> tuple:
 
 
 # ---- pausing markets that keep losing ---------------------------------------------------
-# A market (e.g. "NBA threes") stops producing picks when, over its last PRUNE_MIN+ graded
-# model picks, it has lost money (ROI below -3%) AND the picks have closed worse than they
-# were taken (average closing-line value below 0). Both together are the signature of a
-# market the model reads badly, not of bad luck. It's checked again every grading run and
-# comes back once either turns. LINEMAKER_PRUNE=off disables it.
-PRUNE_MIN, PRUNE_ROI = 100, -0.03
+# A market (e.g. "NBA threes") stops producing picks when, over its last PRUNE_WINDOW graded
+# picks (PRUNE_MIN at least), it has lost money (ROI below -3%) AND the picks have closed worse
+# than they were taken (average closing-line value below 0). Both together are the signature
+# of a market the model reads badly, not of bad luck. While paused it keeps making shadow
+# picks (logged and graded, never shown), so its recent record keeps moving: it's checked
+# again every grading run and comes back once either turns. LINEMAKER_PRUNE=off disables it.
+PRUNE_MIN, PRUNE_ROI, PRUNE_WINDOW = 100, -0.03, 120
+
+
+def _as_pick(r: dict) -> dict:
+    """A shadow pick (a paused market's would-be pick) read like a real one."""
+    sp = r["shadow_pick"]
+    return dict(r, picked=True, pick_side=sp["side"], pick_odds=sp.get("odds"), pick_time=sp.get("time"),
+                pick_book=sp.get("book"), pick_market_prob=sp.get("market_prob"), shadow=True)
 
 
 def tune_prune(records: list) -> tuple:
@@ -282,10 +290,15 @@ def tune_prune(records: list) -> tuple:
     from .tracking import pick_clv
     groups = {}
     for r in records:
-        if r.get("picked") and r.get("result") and r.get("pick_odds") is not None:
+        if not r.get("result"):
+            continue
+        if r.get("picked") and r.get("pick_odds") is not None:
             groups.setdefault(f"{r.get('sport')} {r.get('market')}", []).append(r)
+        elif r.get("shadow_pick") and r["shadow_pick"].get("odds") is not None:
+            groups.setdefault(f"{r.get('sport')} {r.get('market')}", []).append(_as_pick(r))
     out = {}
     for name, recs in groups.items():
+        recs = sorted(recs, key=lambda r: r.get("pick_time") or "")[-PRUNE_WINDOW:]   # the latest
         pr = pick_record(recs)
         n = pr["won"] + pr["lost"]
         clvs = [c["prob"] for c in (pick_clv(r) for r in recs) if c]
@@ -293,7 +306,11 @@ def tune_prune(records: list) -> tuple:
             continue
         clv = sum(clvs) / len(clvs)
         if pr["roi"] is not None and pr["roi"] < PRUNE_ROI and clv < 0:
-            out[name] = f"{n} picks, ROI {pr['roi']:+.1%}, closing-line value {clv * 100:+.2f} pts"
+            shadow = pick_record([r for r in recs if r.get("shadow")])
+            sn = shadow["won"] + shadow["lost"]
+            out[name] = (f"last {n} picks ROI {pr['roi']:+.1%}, closing-line value {clv * 100:+.2f} pts"
+                         + (f"; while paused {shadow['won']}-{shadow['lost']} ({shadow['units']:+.1f}u)"
+                            if sn else ""))
     return out, []
 
 

@@ -206,3 +206,37 @@ class VolumeSelectionTest(unittest.TestCase):
             res = run_pro(rows_to_markets(rows), "2026-10-21", volume_config(track=False, n_sims=4000))
         self.assertEqual(len(res.picks), 1)                                   # one leg for Star
         self.assertTrue(any("same player already" in r for _l, r in res.passes))
+
+
+class ShadowPickTest(unittest.TestCase):
+    def test_paused_market_logs_shadow_picks(self):
+        import tempfile
+        from linemaker.pro import ProConfig, rows_to_markets, run_pro
+        from linemaker.tracking import Tracker, load_day
+        row = {"date": "2026-10-30", "sport": "NBA", "game_id": "g1", "game": "A @ H", "bet_type": "prop",
+               "subject": "P", "market": "PRA", "line": "30.5", "mean": "36", "stdev": "5",
+               "books": "FanDuel:-110/-110|DraftKings:-110/-110"}
+        with tempfile.TemporaryDirectory() as d, \
+                mock.patch("linemaker.autotune.pruned", lambda s, m, ph="pre", bt="prop": "losing" if m == "PRA" else None):
+            res = run_pro(rows_to_markets([row]), "2026-10-30", ProConfig(min_gap=0.0, n_sims=2000), None,
+                          Tracker(d, "2026-10-30"))
+            rec = next(iter(load_day(d, "2026-10-30").values()))
+        self.assertEqual(res.picks, [])                                   # not shown
+        self.assertFalse(rec.get("picked"))
+        self.assertEqual(rec["shadow_pick"]["side"], "A")                 # but logged
+
+    def test_pause_lifts_when_the_recent_record_turns(self):
+        from linemaker import autotune
+        def rec(i, won, shadow):
+            r = {"sport": "NBA", "market": "PRA", "result": {"winner": "A" if won else "B"}}
+            pick = {"side": "A", "odds": -110, "time": f"2026-10-{10 + i // 10:02d}T{i % 10:02d}:00:00"}
+            if shadow:
+                r["shadow_pick"] = pick
+            else:
+                r.update(picked=True, pick_side="A", pick_odds=-110, pick_time=pick["time"])
+            return r
+        old = [rec(i, i % 2 == 0, False) for i in range(130)]            # 50%: about -4.5% at -110
+        with mock.patch("linemaker.tracking.pick_clv", return_value={"prob": -0.01, "price": None}):
+            self.assertIn("NBA PRA", autotune.tune_prune(old)[0])
+            better = old + [rec(130 + i, i % 3 != 0, True) for i in range(120)]   # 67% while paused
+            self.assertNotIn("NBA PRA", autotune.tune_prune(better)[0])

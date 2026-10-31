@@ -180,7 +180,7 @@ class Tracker:
             have = {s.side for s in ev.sides}
             self.records[m.key]["sides"] += [s for s in old.get("sides", []) if s.get("side") not in have]
             self.records[m.key]["sides"].sort(key=lambda s: s.get("side", ""))
-        for k in PICK_FIELDS + ("market_pick", "volume_pick"):   # the price we picked at, kept for closing-line value
+        for k in PICK_FIELDS + ("market_pick", "volume_pick", "shadow_pick"):   # the price we picked at, kept for closing-line value
             if old and k in old:
                 self.records[m.key][k] = old[k]
         self._touched.add(m.key)
@@ -235,7 +235,7 @@ class Tracker:
                     if theirs:
                         if theirs.get("result") and not mine.get("result"):
                             mine["result"] = theirs["result"]
-                        for k in PICK_FIELDS + ("market_pick", "volume_pick", "picked", "pick_side"):
+                        for k in PICK_FIELDS + ("market_pick", "volume_pick", "shadow_pick", "picked", "pick_side"):
                             if k in theirs and not mine.get(k):
                                 mine[k] = theirs[k]
                     disk[key] = mine

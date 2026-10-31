@@ -716,7 +716,7 @@ def run_pro(markets: list, slate_date: str, cfg: ProConfig, freezer=None,
     if tracker is None and cfg.track:
         from .tracking import Tracker
         tracker = Tracker(os.environ.get("LINEMAKER_TRACKING_DIR", "tracking"), slate_date)
-    quals, per_sport = [], {}
+    quals, per_sport, shadows = [], {}, []
     # Ladder lines next to each other, so they reuse one simulation (see simulate_ladder).
     for m in sorted(markets, key=lambda m: (m.game_id, m.subject, m.market)):
         label = m.side_label("A")
@@ -765,12 +765,10 @@ def run_pro(markets: list, slate_date: str, cfg: ProConfig, freezer=None,
         if cfg.calibrate:   # after tracking: the record keeps the raw hit chances for the next fit
             apply_calibration(ev)
         c = sport_cfg(cfg, m.sport, per_sport)   # this sport's own gates, if any
+        paused = None
         if cfg.pick_tag == "model" and cfg.sport_settings:
             from .autotune import pruned
-            why = pruned(m.sport, m.market, cfg.phase, m.bet_type)
-            if why:
-                res.passes.append((ev.best.label, f"market paused, it keeps losing ({why})"))
-                continue
+            paused = pruned(m.sport, m.market, cfg.phase, m.bet_type)
         if c.rank_by == "prob":
             in_window = [s for s in ev.sides if _window_ok(s.best_odds, c)]
             if in_window:
@@ -810,6 +808,10 @@ def run_pro(markets: list, slate_date: str, cfg: ProConfig, freezer=None,
             continue
         if c.min_prob is not None and best.blended < c.min_prob:
             res.passes.append((best.label, f"blended {best.blended:.1%} below {c.min_prob:.0%} floor"))
+            continue
+        if paused:   # would have been a pick: logged as a shadow pick, so the market can earn its way back
+            res.passes.append((best.label, f"market paused, it keeps losing ({paused})"))
+            shadows.append(ev)
             continue
         quals.append(ev)
 
@@ -851,6 +853,14 @@ def run_pro(markets: list, slate_date: str, cfg: ProConfig, freezer=None,
     if tracker is not None:
         tracker.mark_picks(res.picks, cfg.pick_tag, background=getattr(cfg, "background", False),
                            per_player=per_player)
+        if shadows:   # paused markets: one shadow pick per player-stat, graded to decide the pause
+            seen, one = set(), []
+            for ev in sorted(shadows, key=lambda e: e.best.gap, reverse=True):
+                k = (ev.market.game_id, ev.market.subject, ev.market.market)
+                if k not in seen:
+                    seen.add(k)
+                    one.append(ev)
+            tracker.mark_picks(one, "shadow")
         tracker.save()
     games = {}
     for ev in res.picks:
