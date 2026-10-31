@@ -849,7 +849,8 @@ def run_pro(markets: list, slate_date: str, cfg: ProConfig, freezer=None,
         freezer.mark_picks(res.picks)
         freezer.save()
     if tracker is not None:
-        tracker.mark_picks(res.picks, cfg.pick_tag, background=getattr(cfg, "background", False))
+        tracker.mark_picks(res.picks, cfg.pick_tag, background=getattr(cfg, "background", False),
+                           per_player=per_player)
         tracker.save()
     games = {}
     for ev in res.picks:

@@ -186,9 +186,17 @@ class Tracker:
         self._touched.add(m.key)
 
     def mark_picks(self, picks, tag: str = "model", now: Optional[dt.datetime] = None,
-                   background: bool = False):
-        """background: logged from odds already bought, never shown (see chat.track_market_edges)."""
+                   background: bool = False, per_player: int = 0):
+        """background: logged from odds already bought, never shown (see chat.track_market_edges).
+        per_player: model picks a player may have in the day's record across every scan (a
+        later scan at a moved line, 27.5 then 28.5, doesn't count him twice); 0 = no limit."""
         now = now or _now()
+        picked = {}
+        if per_player and tag == "model":
+            for r in self.records.values():
+                if r.get("picked") and (r.get("inputs") or {}).get("bet_type") == "prop":
+                    k = (r.get("game_id"), r.get("subject"))
+                    picked[k] = picked.get(k, 0) + 1
         for ev in picks:
             if ev.market.key in self._touched:
                 rec = self.records[ev.market.key]
@@ -200,6 +208,11 @@ class Tracker:
                         pick["background"] = True
                     rec.setdefault(f"{tag}_pick", pick)
                     continue
+                if per_player and not rec.get("picked") and ev.market.bet_type == "prop":
+                    k = (ev.market.game_id, ev.market.subject)
+                    if picked.get(k, 0) >= per_player:
+                        continue   # he already has his pick today, from an earlier scan
+                    picked[k] = picked.get(k, 0) + 1
                 rec["picked"] = True
                 rec["pick_side"] = ev.best.side
                 if "pick_time" not in rec:   # the pick as it was shown: grading reads these

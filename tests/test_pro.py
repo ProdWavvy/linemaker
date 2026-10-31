@@ -395,3 +395,20 @@ class PicksPerPlayerTest(unittest.TestCase):
         self.assertEqual(len([ev for ev in two.picks if ev.market.subject == "Big Man"]), 2)
         self.assertTrue(any(ev.market.subject == "Other Guy" for ev in res.picks))
         self.assertTrue(any("same player already on the board" in why for _l, why in res.passes))
+
+
+class OnePickPerPlayerPerDayTest(unittest.TestCase):
+    def test_later_scan_at_a_moved_line_doesnt_count_twice(self):
+        from linemaker.pro import ProConfig, rows_to_markets, run_pro
+        from linemaker.tracking import Tracker, load_day
+        row = {"date": "2026-10-30", "sport": "NBA", "game_id": "g1", "game": "A @ H", "bet_type": "prop",
+               "subject": "Kevin Durant", "market": "pts + ast", "stdev": "4", "mean": "33",
+               "books": "FanDuel:-110/-110|DraftKings:-110/-110"}
+        with tempfile.TemporaryDirectory() as d:
+            run_pro(rows_to_markets([dict(row, line="27.5")]), "2026-10-30",
+                    ProConfig(min_gap=0.0, n_sims=2000), None, Tracker(d, "2026-10-30"))
+            run_pro(rows_to_markets([dict(row, line="28.5")]), "2026-10-30",      # the line moved
+                    ProConfig(min_gap=0.0, n_sims=2000), None, Tracker(d, "2026-10-30"))
+            recs = load_day(d, "2026-10-30")
+        picked = sorted(r["inputs"]["line"] for r in recs.values() if r.get("picked"))
+        self.assertEqual(picked, [27.5])                                    # the first pick stands
