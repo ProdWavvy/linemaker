@@ -1111,7 +1111,9 @@ def boost_messages(sections: list, date: str, cfg, spec) -> list:
     how = discord.Embed(title="📖 How the Boost Ticket Was Picked", color=GREY, description=(
         "A profit boost multiplies the **winnings**, so it's worth more on a bigger payout, but "
         "every extra leg lowers the hit chance. This checks every combination of the best-priced "
-        "legs (one per game, so they don't move together) inside the boost's rules and keeps:\n"
+        "legs inside the boost's rules (one per game, so they don't move together; an **SGP** "
+        "boost uses one game, an **SGPx / SGP+** boost 2+ games with at least one same-game "
+        "group, priced the way the book prices an SGP) and keeps:\n"
         "🔒 **Safest**: the likeliest ticket that's still +EV with the boost (fewest legs the "
         "rules allow).\n"
         "💰 **Best value**: the most expected profit with the boost. It's usually longer and "
@@ -1120,6 +1122,7 @@ def boost_messages(sections: list, date: str, cfg, spec) -> list:
         "Odds rules are checked on the book's prices **before** the boost. Use the max wager only "
         "if your bankroll plan allows it; the stake shown already stays inside the wager limits.\n"
         "Say the rules in your ask: `30% nfl boost min odds +300 3+ legs max $25 wager`, "
-        "`50% nba boost each leg -200 or longer`, `cross sport 25% boost fanduel`."))
+        "`50% nba boost each leg -200 or longer`, `cross sport 25% boost fanduel`, "
+        "`30% knicks sgp boost`, `50% nfl sgpx boost`."))
     out.append(([how], None))
     return out

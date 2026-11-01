@@ -615,9 +615,12 @@ class BoostSpec:
     max_legs: int = 4
     min_wager: Optional[float] = None
     max_wager: Optional[float] = None
+    kind: str = ""                     # "", "sgp" (one game) or "sgpx" (SGPx / SGP+)
 
     def rules(self) -> list:
         out = [f"🚀 +{self.boost:.0%} profit boost"]
+        if self.kind:
+            out.append({"sgp": "same-game parlay (SGP)", "sgpx": "SGPx / SGP+ (2+ games, a same-game group)"}[self.kind])
         if self.min_total is not None:
             out.append(f"ticket {self.min_total:+d} or longer")
         if self.min_leg is not None:
@@ -639,51 +642,85 @@ def _odds_ok(odds: int, floor: Optional[int]) -> bool:
 
 def best_boosted(legs: list, book: str, spec: "BoostSpec", safest: bool = False, pool: int = 14,
                  used: Optional[set] = None) -> "Parlay | None":
+    return _boost_search(legs, book, spec, pool, used)[1 if safest else 0]
+
+
+def _boost_search(legs: list, book: str, spec: "BoostSpec", pool: int = 14,
+                  used: Optional[set] = None) -> tuple:
     """The ticket to put this boost on at this book. Default: the most boosted EV (hit chance
     x boosted payout). safest=True: the likeliest ticket that's still +EV with the boost (the
     best-EV one if none is). Legs must be fair-ish (value >= 0.97 before the boost), inside
-    spec's odds rules; used: exposure keys to leave out (players already on another ticket)."""
+    spec's odds rules; used: exposure keys to leave out (players already on another ticket).
+    spec.kind: "" = one leg per game; "sgp" = every leg from one game; "sgpx" = 2+ games with
+    at least one same-game group (DraftKings SGPx / FanDuel SGP+). Same-game legs are priced
+    the way the book prices an SGP (their correlation comes out of the payout)."""
     import itertools
     import math
     from .parlay_math import boosted, hit_chance, joint_prob, leg_value
     used = used or set()
+    kind = getattr(spec, "kind", "") or ""
     one_game = len({ev.market.game_id for ev in legs}) == 1
-    best_by = {}
+    priced = []
     for ev in legs:
         o = parlay_leg_price(ev, book)
         if o is None or leg_value(ev, o) < 0.97 or not _odds_ok(o, spec.min_leg) or exposure(ev) in used:
             continue
-        k = exposure(ev) if one_game else ev.market.game_id
-        if k not in best_by or leg_value(ev, o) > leg_value(*best_by[k]):
-            best_by[k] = (ev, o)
-    cands = sorted(best_by.values(), key=lambda x: leg_value(*x), reverse=True)[:min(pool, 10 if one_game else pool)]
+        priced.append((ev, o))
+    by_game = {}
+    for ev, o in sorted(priced, key=lambda x: leg_value(*x), reverse=True):
+        mine = by_game.setdefault(ev.market.game_id, [])
+        if all(exposure(e) != exposure(ev) for e, _o in mine):   # one leg per player
+            mine.append((ev, o))
+    if kind == "sgp" or (one_game and not kind):
+        pools = [g[:10] for g in by_game.values() if len(g) >= max(spec.min_legs, 2)]
+        pools = sorted(pools, key=lambda g: sum(leg_value(*x) for x in g[:3]), reverse=True)[:8]
+        per_game = None
+    elif kind == "sgpx":
+        games = sorted(by_game.values(), key=lambda g: sum(leg_value(*x) for x in g[:3]), reverse=True)[:6]
+        cands = sorted((x for g in games for x in g[:3]), key=lambda x: leg_value(*x), reverse=True)[:pool]
+        pools, per_game = [cands], 3
+    else:
+        cands = sorted((g[0] for g in by_game.values()), key=lambda x: leg_value(*x), reverse=True)[:pool]
+        pools, per_game = [cands], 1
     floor = american_to_decimal(spec.min_total) if spec.min_total is not None else 1.0
-    best, best_key = None, None
-    for k in range(max(spec.min_legs, 1), min(spec.max_legs, len(cands)) + 1):
-        for combo in itertools.combinations(cands, k):
-            listed = math.prod(american_to_decimal(o) for _e, o in combo)
-            if listed < floor - 1e-9:
-                continue
-            evs = [e for e, _o in combo]
-            if one_game and len(combo) > 1:
-                if len({exposure(e) for e in evs}) < len(evs) or sgp_check(evs, book)["blocked"]:
+    picks = [[None, None], [None, None]]   # [best value, safest] -> [key, combo]
+    for cands in pools:
+        for k in range(max(spec.min_legs, 1), min(spec.max_legs, len(cands)) + 1):
+            for combo in itertools.combinations(cands, k):
+                listed = math.prod(american_to_decimal(o) for _e, o in combo)
+                if listed < floor - 1e-9:
                     continue
-                joint = joint_prob(evs, draws=3000)
-                indep = math.prod(hit_chance(e) for e in evs)
-                payout = sgp_payout(listed, indep, joint, 1)
-                if payout < floor - 1e-9:
+                evs = [e for e, _o in combo]
+                counts = {}
+                for e in evs:
+                    counts[e.market.game_id] = counts.get(e.market.game_id, 0) + 1
+                if per_game and max(counts.values()) > per_game:
                     continue
-            else:
-                joint, payout = math.prod(hit_chance(e) for e in evs), listed
-            ev_b = joint * boosted(payout, spec.boost) - 1
-            key = ((ev_b >= 0, joint, ev_b) if safest else (ev_b, joint))
-            if best_key is None or key > best_key:
-                best, best_key = combo, key
-    if best is None:
-        return None
-    p = price(book, list(best), style="boost", boost=spec.boost)
-    p.boost_spec = spec
-    return p
+                if kind == "sgpx" and (len(counts) < 2 or max(counts.values()) < 2):
+                    continue
+                groups = sum(1 for n in counts.values() if n > 1)
+                if groups:
+                    if len({exposure(e) for e in evs}) < len(evs) or sgp_check(evs, book)["blocked"]:
+                        continue
+                    joint = joint_prob(evs, draws=2000)
+                    payout = sgp_payout(listed, math.prod(hit_chance(e) for e in evs), joint, groups)
+                    if payout < floor - 1e-9:
+                        continue
+                else:
+                    joint, payout = math.prod(hit_chance(e) for e in evs), listed
+                ev_b = joint * boosted(payout, spec.boost) - 1
+                for slot, key in ((0, (ev_b, joint)), (1, (ev_b >= 0, joint, ev_b))):
+                    if picks[slot][0] is None or key > picks[slot][0]:
+                        picks[slot] = [key, combo]
+    out = []
+    for _key, combo in picks:
+        if combo is None:
+            out.append(None)
+            continue
+        p = price(book, list(combo), style="boost", boost=spec.boost)
+        p.boost_spec = spec
+        out.append(p)
+    return tuple(out)
 
 
 def boost_tickets(legs: list, books, spec: "BoostSpec") -> list:
@@ -691,11 +728,10 @@ def boost_tickets(legs: list, books, spec: "BoostSpec") -> list:
     still +EV with the boost. [(label, Parlay)]."""
     out = []
     for book in books:
-        safe = best_boosted(legs, book, spec, safest=True)
+        top, safe = _boost_search(legs, book, spec)
         if safe is None:
             continue
         out.append(("🔒 Safest", safe))
-        top = best_boosted(legs, book, spec)
         if top is not None and {exposure(e) for e, _o in safe.legs} != {exposure(e) for e, _o in top.legs}:
             out.append(("💰 Best value", top))
     return out

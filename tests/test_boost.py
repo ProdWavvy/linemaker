@@ -89,3 +89,29 @@ class BoostCardTest(unittest.TestCase):
             return bot.compact_card(msgs)
         embeds, view = asyncio.run(build())
         self.assertTrue(any("Boost" in (e.title or "") for e in embeds))
+
+
+class SgpBoostTest(unittest.TestCase):
+    def setUp(self):
+        for target, kw in (("linemaker.parlay.parlay_leg_price", {"side_effect": lambda ev, b: ev.best.best_odds}),
+                           ("linemaker.autotune.parlay_calibrated", {"side_effect": lambda p, *a: p}),
+                           ("linemaker.parlay_math.team_of", {"return_value": None})):
+            pt = mock.patch(target, **kw)
+            pt.start()
+            self.addCleanup(pt.stop)
+        self.legs = ([leg("g1", f"A{i}", "points", p=0.62, odds=-140) for i in range(4)]
+                     + [leg("g2", f"B{i}", "rebounds", p=0.6, odds=-130) for i in range(3)]
+                     + [leg(f"h{i}", f"C{i}", "assists", p=0.64, odds=-150) for i in range(3)])
+
+    def test_sgp_is_one_game(self):
+        p = parlay.best_boosted(self.legs, "DraftKings", BoostSpec(boost=0.3, kind="sgp", min_legs=3))
+        self.assertEqual(len({ev.market.game_id for ev, _o in p.legs}), 1)
+        self.assertGreaterEqual(len(p.legs), 3)
+        self.assertEqual(p.kind, "SGP")
+
+    def test_sgpx_has_a_group_and_two_games(self):
+        p = parlay.best_boosted(self.legs, "DraftKings", BoostSpec(boost=0.3, kind="sgpx", min_legs=3))
+        games = [ev.market.game_id for ev, _o in p.legs]
+        self.assertGreaterEqual(len(set(games)), 2)
+        self.assertTrue(any(games.count(g) >= 2 for g in games))
+        self.assertEqual(p.kind, "SGPx")

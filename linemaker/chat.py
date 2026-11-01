@@ -1392,6 +1392,10 @@ def parse_boost(text: str):
     if not m:
         return None
     spec = BoostSpec(boost=float(m.group(1)) / 100)
+    if re.search(r"\bsgp\s*(x|\+|plus)|\bsgpx\b|\bsame[- ]game parlay (x|plus)\b", text, re.I):
+        spec.kind = "sgpx"
+    elif re.search(r"\bsgp\b|\bsame[- ]game( parlay)?\b", text, re.I):
+        spec.kind = "sgp"
     for o in _ODDS.finditer(text):
         before, after = text[max(0, o.start() - 30):o.start()].lower(), text[o.end():o.end() + 20].lower()
         per_leg = (re.search(r"\b(per|each|every|a)\s+leg\b[^,.;]*$", before)
