@@ -923,8 +923,8 @@ def parlay_box(p, num: Optional[int] = None, note: str = "") -> discord.Embed:
     """One parlay's box on a card (also how the card is redrawn after you bet from it)."""
     from .parlay_format import legs_lines, money_line, odds_text, sgp_line
     bname, _tag, emoji, colour = _style(p.book)
-    icon = "🎯" if p.style == "edge" else "🔗" if p.kind else "💰" if p.style == "value" else "🔒"
-    kind = ("Edge" if p.style == "edge" else p.kind or ("Value" if p.style == "value" else "Safest"))
+    icon = "🚀" if p.style == "boost" else "🎯" if p.style == "edge" else "🔗" if p.kind else "💰" if p.style == "value" else "🔒"
+    kind = ("Boost" if p.style == "boost" else "Edge" if p.style == "edge" else p.kind or ("Value" if p.style == "value" else "Safest"))
     lines = ([note] if note else []) + legs_lines(p) + [money_line(p)]
     if abs(p.prob - p.indep_prob) >= 0.01:
         lines.append(f"↔️ {_pct(p.indep_prob)} if the legs were independent")
@@ -1063,3 +1063,63 @@ def stats_board(details: list) -> discord.Embed:
 
 BOARDS = {"odds": ("Odds", "🏷️", odds_board), "hits": ("Hit Rates", "📊", hits_board),
           "move": ("Line Moves", "📉", movement_board), "stats": ("Key Stats", "📈", stats_board)}
+
+
+def boost_messages(sections: list, date: str, cfg, spec) -> list:
+    """[(embeds, detail)] for "30% nfl boost": the ticket to put a profit boost on at each
+    book (best boosted value, and the safest one that's still +EV), inside the boost's rules.
+    Legs: the volume board's (likely to hit) plus the model's picks, one per player, none
+    you already hold."""
+    from .bets import max_exposure, open_exposure
+    from .betlinks import parlay_link
+    from .odds import decimal_to_american
+    from .parlay import boost_tickets, exposure
+    sections = _norm_sections(sections)
+    for _sport, res, ex in sections:
+        apply_hit_gate(res, ex["profiles"], floor=cfg.min_prob)
+    legs, seen = [], set()
+    for _s, res, _e in sections:
+        for ev in list(res.picks) + list(getattr(res, "edge_legs", None) or []):
+            if exposure(ev) not in seen:
+                seen.add(exposure(ev))
+                legs.append(ev)
+    held, cap = open_exposure(), max_exposure()
+    legs = [ev for ev in legs if not cap or held.get(exposure(ev), {}).get("n", 0) < cap]
+    books = books_of([res for _s, res, _e in sections])
+    name = "Cross-Sport" if len(sections) > 1 else SPORT_NAMES.get(sections[0][0], sections[0][0])
+    tickets = boost_tickets(legs, books, spec) if len(legs) >= max(spec.min_legs, 1) else []
+    rules = " · ".join(spec.rules())
+    lines = [f"**{rules}**", f"{len(legs)} legs to choose from · " + ", ".join(
+        f"{SPORT_NAMES.get(sp, sp)} ({len(res.slate) or res.games} games)" for sp, res, _e in sections)]
+    if not tickets:
+        lines.append("**No ticket fits these rules with fair-priced legs right now.** Try fewer "
+                     "legs or a lower odds requirement, or ask again closer to game time.")
+    header = discord.Embed(title=f"🚀 {name} +{spec.boost:.0%} Boost · {_day(date)}",
+                           color=GOLD if tickets else GREY, description="\n".join(lines))
+    header.set_footer(text=odds_age_note(sections))
+    out = [([header], None)]
+    for label, p in tickets:
+        unboosted = 1 + (p.decimal - 1) / (1 + spec.boost)
+        ev_raw = p.prob * unboosted - 1
+        note = (f"**{label}** · {fmt_odds(decimal_to_american(unboosted))} → **{fmt_odds(p.american)}** "
+                f"boosted · EV {ev_raw:+.0%} → **{p.prob * p.decimal - 1:+.0%}**")
+        url = parlay_link(p)
+        bname = _style(p.book)[0]
+        out.append(([parlay_box(p, note=note)],
+                    {"links": [(f"{len(p.legs)}-leg on {bname}", url)] if url else [],
+                     "parlays": [p], "pool": legs}))
+    how = discord.Embed(title="📖 How the Boost Ticket Was Picked", color=GREY, description=(
+        "A profit boost multiplies the **winnings**, so it's worth more on a bigger payout, but "
+        "every extra leg lowers the hit chance. This checks every combination of the best-priced "
+        "legs (one per game, so they don't move together) inside the boost's rules and keeps:\n"
+        "🔒 **Safest**: the likeliest ticket that's still +EV with the boost (fewest legs the "
+        "rules allow).\n"
+        "💰 **Best value**: the most expected profit with the boost. It's usually longer and "
+        "hits less often, since the boost grows with the payout.\n"
+        "Up to 4 legs unless you say otherwise (`max 6 legs`).\n"
+        "Odds rules are checked on the book's prices **before** the boost. Use the max wager only "
+        "if your bankroll plan allows it; the stake shown already stays inside the wager limits.\n"
+        "Say the rules in your ask: `30% nfl boost min odds +300 3+ legs max $25 wager`, "
+        "`50% nba boost each leg -200 or longer`, `cross sport 25% boost fanduel`."))
+    out.append(([how], None))
+    return out

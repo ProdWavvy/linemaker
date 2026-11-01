@@ -371,7 +371,8 @@ def _bet_go(key: str, i: int):
             again = bet is not None
             from .staking import bankroll, paper_on
             if bet is None:
-                stake = suggested_dollars(p.prob, p.american, parlay=True) or (0.10 if bankroll() else 2.5)
+                from .staking import parlay_stake
+                stake = parlay_stake(p) or (0.10 if bankroll() else 2.5)
                 bet = add_bet(legs, p.american, stake, p.book, str(interaction.user), auto=True,
                               paper=paper_on(), what=f"{len(p.legs)}-leg {getattr(p, 'kind', '') or 'parlay'}")
             view = discord.ui.View(timeout=None)
@@ -1200,7 +1201,8 @@ def log_parlay(p, user: str) -> tuple:
     bet = find_open(p.book, legs)
     if bet is not None:
         return bet, True
-    stake = suggested_dollars(p.prob, p.american, parlay=True) or (0.10 if bankroll() else 2.5)
+    from .staking import parlay_stake
+    stake = parlay_stake(p) or (0.10 if bankroll() else 2.5)
     return add_bet(legs, p.american, stake, p.book, user, auto=True, paper=paper_on(),
                    what=f"{len(p.legs)}-leg {getattr(p, 'kind', '') or 'parlay'}"), False
 
@@ -2049,6 +2051,11 @@ def cards_for(results: list) -> list:
     if all(getattr(r, "kind", "") == "pp" for _s, r, _ex in results):
         from .scan_format import pp_messages
         return pp_messages(results, today())
+    spec = next(((ex or {}).get("boost") for _s, _r, ex in results if (ex or {}).get("boost")), None)
+    if spec is not None:   # "30% nfl boost": the tickets to put the boost on
+        from .pro import volume_config
+        from .scan_format import boost_messages
+        return boost_messages(results, today(), volume_config(), spec)
     if all((ex or {}).get("mode") == "volume" for _s, _r, ex in results):
         from .pro import volume_config
         from .scan_format import volume_messages

@@ -49,8 +49,8 @@ def legs_lines(p) -> list:
 
 def money_line(p) -> str:
     """'💵 $10 → $32.22 · EV +17%' at your suggested stake ($10 → when no tiers are set)."""
-    from .staking import _money, suggested, suggested_dollars
-    amount = suggested_dollars(p.prob, p.american, parlay=True) or 10.0
+    from .staking import _money, parlay_stake, suggested
+    amount = parlay_stake(p) or 10.0
     fun = " · fun money" if suggested(p.prob, p.american) <= 0 else ""
     boost = f" · 🚀 +{p.boost:.0%}" if getattr(p, "boost", 0) else ""
     return f"💵 **{_money(amount)} → {_money(round(amount * p.decimal, 2))}** · EV {p.ev:+.0f}%{boost}{fun}"

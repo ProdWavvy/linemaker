@@ -450,6 +450,12 @@ def swap_held(p, pool: list, held: Optional[dict] = None, cap: Optional[int] = N
         return ev.market.bet_type == "prop" and held.get(exposure(ev), {}).get("n", 0) >= cap
     if not any(is_held(ev) for ev, _o in p.legs):
         return p, []
+    spec = getattr(p, "boost_spec", None)
+    if p.style == "boost" and spec is not None:   # a boost ticket: search again inside its rules
+        gone = [ev.best.label for ev, _o in p.legs if is_held(ev)]
+        held_keys = {k for k, v in held.items() if v.get("n", 0) >= cap}
+        new = best_boosted(pool, p.book, spec, used=held_keys)
+        return new, [f"rebuilt without {', '.join(gone)} (already bet)"]
     score = {"edge": lambda ev, o: ev.best.gap, "value": lambda ev, o: leg_value(ev, o)}.get(
         p.style, lambda ev, o: ev.best.blended)
     keep = [(ev, o) for ev, o in p.legs if not is_held(ev)]
@@ -592,3 +598,104 @@ def _best_same_game(legs: list, book: str, target: float, max_legs: int, pool: i
         return None
     one, _multi = SGP_NAMES.get(book, ("SGP", "SGP+"))
     return price(book, list(best), kind=one if len(best) > 1 else "", style="target")
+
+
+# ---- profit boosts ----------------------------------------------------------------------
+# A profit boost pays (1 + boost) x the winnings, so its value grows with the payout: the
+# best ticket to boost is longer than an unboosted one, but each extra leg costs hit chance.
+# best_boosted searches every combo of the best-value legs (one per game, or one per player
+# for a single game) inside the boost's rules (legs, odds per leg, odds for the ticket).
+
+@dataclass
+class BoostSpec:
+    boost: float                       # 0.30 = +30% profit
+    min_total: Optional[int] = None    # the ticket's odds before the boost, e.g. +200
+    min_leg: Optional[int] = None      # every leg at least this, e.g. -200 (no heavier)
+    min_legs: int = 2
+    max_legs: int = 4
+    min_wager: Optional[float] = None
+    max_wager: Optional[float] = None
+
+    def rules(self) -> list:
+        out = [f"🚀 +{self.boost:.0%} profit boost"]
+        if self.min_total is not None:
+            out.append(f"ticket {self.min_total:+d} or longer")
+        if self.min_leg is not None:
+            out.append(f"each leg {self.min_leg:+d} or longer")
+        out.append(f"{self.min_legs}+ legs" if self.min_legs > 1 else "1+ legs")
+        if self.min_wager and self.max_wager and self.min_wager == self.max_wager:
+            out.append(f"${self.max_wager:g} wager")
+        else:
+            if self.min_wager:
+                out.append(f"min wager ${self.min_wager:g}")
+            if self.max_wager:
+                out.append(f"max wager ${self.max_wager:g}")
+        return out
+
+
+def _odds_ok(odds: int, floor: Optional[int]) -> bool:
+    return floor is None or american_to_decimal(odds) >= american_to_decimal(floor) - 1e-9
+
+
+def best_boosted(legs: list, book: str, spec: "BoostSpec", safest: bool = False, pool: int = 14,
+                 used: Optional[set] = None) -> "Parlay | None":
+    """The ticket to put this boost on at this book. Default: the most boosted EV (hit chance
+    x boosted payout). safest=True: the likeliest ticket that's still +EV with the boost (the
+    best-EV one if none is). Legs must be fair-ish (value >= 0.97 before the boost), inside
+    spec's odds rules; used: exposure keys to leave out (players already on another ticket)."""
+    import itertools
+    import math
+    from .parlay_math import boosted, hit_chance, joint_prob, leg_value
+    used = used or set()
+    one_game = len({ev.market.game_id for ev in legs}) == 1
+    best_by = {}
+    for ev in legs:
+        o = parlay_leg_price(ev, book)
+        if o is None or leg_value(ev, o) < 0.97 or not _odds_ok(o, spec.min_leg) or exposure(ev) in used:
+            continue
+        k = exposure(ev) if one_game else ev.market.game_id
+        if k not in best_by or leg_value(ev, o) > leg_value(*best_by[k]):
+            best_by[k] = (ev, o)
+    cands = sorted(best_by.values(), key=lambda x: leg_value(*x), reverse=True)[:min(pool, 10 if one_game else pool)]
+    floor = american_to_decimal(spec.min_total) if spec.min_total is not None else 1.0
+    best, best_key = None, None
+    for k in range(max(spec.min_legs, 1), min(spec.max_legs, len(cands)) + 1):
+        for combo in itertools.combinations(cands, k):
+            listed = math.prod(american_to_decimal(o) for _e, o in combo)
+            if listed < floor - 1e-9:
+                continue
+            evs = [e for e, _o in combo]
+            if one_game and len(combo) > 1:
+                if len({exposure(e) for e in evs}) < len(evs) or sgp_check(evs, book)["blocked"]:
+                    continue
+                joint = joint_prob(evs, draws=3000)
+                indep = math.prod(hit_chance(e) for e in evs)
+                payout = sgp_payout(listed, indep, joint, 1)
+                if payout < floor - 1e-9:
+                    continue
+            else:
+                joint, payout = math.prod(hit_chance(e) for e in evs), listed
+            ev_b = joint * boosted(payout, spec.boost) - 1
+            key = ((ev_b >= 0, joint, ev_b) if safest else (ev_b, joint))
+            if best_key is None or key > best_key:
+                best, best_key = combo, key
+    if best is None:
+        return None
+    p = price(book, list(best), style="boost", boost=spec.boost)
+    p.boost_spec = spec
+    return p
+
+
+def boost_tickets(legs: list, books, spec: "BoostSpec") -> list:
+    """Per book: the best-value ticket and, when it's a different one, the safest one that's
+    still +EV with the boost. [(label, Parlay)]."""
+    out = []
+    for book in books:
+        safe = best_boosted(legs, book, spec, safest=True)
+        if safe is None:
+            continue
+        out.append(("🔒 Safest", safe))
+        top = best_boosted(legs, book, spec)
+        if top is not None and {exposure(e) for e, _o in safe.legs} != {exposure(e) for e, _o in top.legs}:
+            out.append(("💰 Best value", top))
+    return out

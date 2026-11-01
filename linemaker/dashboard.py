@@ -13,6 +13,8 @@ ASKS = [
                      "WNBA and MLB at once (leagues with no games drop off)"),
     ("🎰 Parlays", "`best nba props parlay` · `ml parlay nfl` · `ml and spread parlay nba` · "
                   "`spread parlay nfl` · `run line parlay mlb`"),
+    ("🚀 Boosts", "`30% nfl boost` · `50% nba boost fanduel` · `cross sport 25% boost min odds +300 "
+                  "3+ legs max $25 wager` · `each leg -200 or longer`: the best ticket to put a profit boost on"),
     ("🔴 Live", "`live props nba` · `live props parlay nfl` · `live ml parlay nba` · "
                "`live ml and spread parlay nfl`"),
     ("⚡ Edges & books", "`market edges` (every main league; the ⚡ button does the same) · `market edges nba` · "

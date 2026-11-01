@@ -159,3 +159,20 @@ def parlay_pay_line(p: float, american: int, decimal: float) -> str:
     fun = " · fun money: no edge, keep it small" if suggested(p, american) <= 0 else ""
     return (f"💵 **Stake {_money(amount)}** → pays **{_money(round(amount * decimal, 2))}** "
             f"({_money(round(amount * (decimal - 1), 2))} profit){fun}")
+
+
+def parlay_stake(p) -> Optional[float]:
+    """Suggested stake for a parlay, kept inside a profit boost's wager limits (min / max
+    wager) when the parlay carries one."""
+    amount = suggested_dollars(p.prob, p.american, parlay=True)
+    spec = getattr(p, "boost_spec", None)
+    if spec is None:
+        return amount
+    if amount is None:
+        amount = spec.min_wager or spec.max_wager
+    if amount is not None:
+        if spec.max_wager:
+            amount = min(amount, spec.max_wager)
+        if spec.min_wager:
+            amount = max(amount, spec.min_wager)
+    return amount

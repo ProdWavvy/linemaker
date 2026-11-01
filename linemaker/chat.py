@@ -561,6 +561,11 @@ class LinemakerChat:
             if len(quick) > 1 and ctx.get("results"):   # leagues with no games today drop off the card
                 playing = [r for r in ctx["results"] if getattr(r[1], "slate", None) or getattr(r[1], "games", 0)]
                 ctx["results"] = playing or ctx["results"][:1]
+            spec = parse_boost(text)
+            if spec is not None:   # the card becomes "where to put this boost" (bot.cards_for)
+                for _s, _r, ex in ctx.get("results") or []:
+                    if isinstance(ex, dict):
+                        ex["boost"] = spec
             order = {s: i for i, s in enumerate(quick)}
             if ctx.get("results"):
                 ctx["results"].sort(key=lambda r: order.get(r[0], 99))
@@ -1233,6 +1238,8 @@ MARKET_WORDS = re.compile(r"(\+ev\b|\bpositive ev\b|\bmarket edges?\b|\bsharp(s|
 def quick_mode(text: str) -> str:
     """market for +EV / sharp-book asks; volume for parlay/volume requests, or
     'safe/locks/...' with a bet word; else smart."""
+    if parse_boost(text) is not None:
+        return "volume"   # a boost ticket is built from the volume board's legs (plus model picks)
     if MARKET_WORDS.search(text):
         return "market"
     if STRONG_VOLUME.search(text) or (SOFT_VOLUME.search(text) and BET_WORDS.search(text)):
@@ -1332,10 +1339,11 @@ def quick_plays_request(text: str) -> Optional[list]:
     league_ask = (any(re.search(p, text, re.I) for p in SPORT_WORDS.values())
                   and (BET_WORDS.search(text) or GAME_LINE_WORDS.search(text))
                   and not QUESTION_WORDS.search(text))   # "ufc props", "nhl picks"
+    boost = parse_boost(text) is not None   # "30% nfl boost": a ticket to put a profit boost on
     if not (PLAYS_INTENT.search(text) or GAMES_INTENT.search(text) or LIVE_INTENT.search(text)
-            or PP_WORDS.search(text) or quick_mode(text) in ("volume", "market") or league_ask):
+            or PP_WORDS.search(text) or quick_mode(text) in ("volume", "market") or league_ask or boost):
         return None
-    if re.search(r"\b(i have|i think|i got|projection|my number|at \d)", text, re.I):
+    if not boost and re.search(r"\b(i have|i think|i got|projection|my number|at \d)", text, re.I):
         return None   # the user supplied their own number: let the model read it
     if ALL_SPORTS_WORDS.search(text):   # "all sports": every league with a model, empty ones drop off
         return [s.strip().upper() for s in os.environ.get("LINEMAKER_ALL_SPORTS", ALL_SPORTS).split(",") if s.strip()]
@@ -1365,3 +1373,58 @@ def split_for_discord(text: str, limit: int = 1990) -> list:
     if cur.strip():
         chunks.append(cur.rstrip())
     return chunks
+
+
+BOOST_WORDS = re.compile(r"\bboost(s|ed)?\b", re.I)
+_PCT = re.compile(r"(\d{1,3}(?:\.\d+)?)\s*%")
+_ODDS = re.compile(r"(?<![\w$.])([+-]\d{3,5})\b")
+_MONEY = r"\$?\s*(\d+(?:\.\d+)?)"
+
+
+def parse_boost(text: str):
+    """A BoostSpec from "30% nfl boost, +300 min odds, 3+ legs, max $25 wager", or None.
+    Odds next to "leg" are a per-leg floor ("legs -200 or longer"), others the ticket's
+    floor; a wager with min / max is that limit, a bare "$25 wager" is the stake."""
+    from .parlay import BoostSpec
+    if not BOOST_WORDS.search(text):
+        return None
+    m = _PCT.search(text)
+    if not m:
+        return None
+    spec = BoostSpec(boost=float(m.group(1)) / 100)
+    for o in _ODDS.finditer(text):
+        before, after = text[max(0, o.start() - 30):o.start()].lower(), text[o.end():o.end() + 20].lower()
+        per_leg = (re.search(r"\b(per|each|every|a)\s+leg\b[^,.;]*$", before)
+                   or re.search(r"\blegs?\s+(at|of|must be|priced|odds)\b[^,.;]*$", before)
+                   or re.match(r"[^,.;]{0,12}\b(per|each|a)\s+leg\b", after)
+                   or re.match(r"\s*(or longer|or better|or more)?\s*(per|each|a|every)\s+leg", after))
+        if per_leg:
+            spec.min_leg = int(o.group(1))
+        else:
+            spec.min_total = int(o.group(1))
+    if spec.min_total is None:   # "min odds 300" without a sign
+        m = re.search(r"\bodds\D{0,20}?(\d{3,5})\b", text, re.I)
+        if m:
+            spec.min_total = int(m.group(1))
+    m = re.search(r"\b(\d{1,2})\s*\+?\s*(?:-|\s)?\s*(?:or more\s+)?legs?\b", text, re.I) or \
+        re.search(r"\b(?:at least|min(?:imum)?)\s+(\d{1,2})\s+legs?\b", text, re.I)
+    if m:
+        spec.min_legs = int(m.group(1))
+    m = re.search(r"\bmax(?:imum)?\s+(?:of\s+)?(\d{1,2})\s+legs?\b", text, re.I)
+    if m:
+        spec.max_legs = int(m.group(1))
+    spec.max_legs = max(spec.max_legs, spec.min_legs)
+    m = (re.search(r"\b(?:max(?:imum)?|up to)\s+(?:wager|bet|stake)?\s*(?:of\s+)?" + _MONEY, text, re.I)
+         or re.search(r"\$\s*(\d+(?:\.\d+)?)\s*max\b", text, re.I))
+    if m:
+        spec.max_wager = float(m.group(1))
+    m = (re.search(r"\bmin(?:imum)?\s+(?:wager|bet|stake)\s*(?:of\s+)?" + _MONEY, text, re.I)
+         or re.search(r"\$\s*(\d+(?:\.\d+)?)\s*min(?:imum)?\b", text, re.I))
+    if m:
+        spec.min_wager = float(m.group(1))
+    if spec.min_wager is None and spec.max_wager is None:
+        m = (re.search(r"\$\s*(\d+(?:\.\d+)?)\s*(?:wager|bet|stake)", text, re.I)
+             or re.search(r"\b(?:wager|bet|stake)\s*(?:of\s+)?\$\s*(\d+(?:\.\d+)?)", text, re.I))
+        if m:
+            spec.min_wager = spec.max_wager = float(m.group(1))
+    return spec
