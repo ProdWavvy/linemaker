@@ -2122,7 +2122,7 @@ async def pro_cmd(interaction: discord.Interaction, slate: discord.Attachment,
                   devig: Optional[app_commands.Choice[str]] = None):
     await interaction.response.defer(thinking=True)
     try:
-        date = date or today()
+        date = parse_day(date) if date else today()
         cfg = ProConfig(min_odds=odds_min, max_odds=odds_max, min_prob=min_prob,
                         confirmed_only=confirmed_only,
                         devig_method=devig.value if devig else "proportional")
@@ -2146,7 +2146,7 @@ async def lite_cmd(interaction: discord.Interaction, slate: discord.Attachment,
                    odds_max: Optional[int] = None, min_prob: Optional[float] = None):
     await interaction.response.defer(thinking=True)
     try:
-        date = date or today()
+        date = parse_day(date) if date else today()
         cfg = Config()
         for attr, val in (("min_odds", odds_min), ("max_odds", odds_max),
                           ("min_true_prob", min_prob)):
@@ -2174,16 +2174,19 @@ async def grade_cmd(interaction: discord.Interaction, results: Optional[discord.
                     date: Optional[str] = None, auto: bool = True):
     await interaction.response.defer(thinking=True)
     try:
-        date = date or today()
+        date = parse_day(date) if date else today()
         rows = []
         if results is not None:
             if results.size > MAX_UPLOAD:
                 raise ValueError("results file too large")
             rows = list(csv.DictReader(io.StringIO((await results.read()).decode("utf-8-sig"))))
         from .grade_report import day_records, grade_report, graded_keys
-        before = await asyncio.to_thread(lambda: graded_keys(day_records(date)))
-        summary, remaining, tracked = await asyncio.to_thread(grade_day, date, rows, auto)
-        embeds, table = await asyncio.to_thread(grade_report, date, summary, before, remaining)
+        if GRADE_LOCK.locked():
+            await interaction.followup.send("⏳ Another grade is running; this one starts when it's done.")
+        async with GRADE_LOCK:   # one grade at a time: each loads a whole day of markets
+            before = await asyncio.to_thread(lambda: graded_keys(day_records(date)))
+            summary, remaining, tracked = await asyncio.to_thread(grade_day, date, rows, auto)
+            embeds, table = await asyncio.to_thread(grade_report, date, summary, before, remaining)
         if not summary and not tracked and table is None:
             await interaction.followup.send(f"Nothing graded for {date} yet: games may not be "
                                             "final, or nothing was tracked that day.")
@@ -2549,7 +2552,7 @@ async def live_cmd(interaction: discord.Interaction, sport: app_commands.Choice[
                    devig: Optional[app_commands.Choice[str]] = None):
     await interaction.response.defer(thinking=True)
     try:
-        date = date or today()
+        date = parse_day(date) if date else today()
         cfg = ProConfig(devig_method=devig.value if devig else "proportional")
         if projections.size > MAX_UPLOAD:
             raise ValueError("projections file too large")
@@ -2572,7 +2575,7 @@ async def picks_cmd(interaction: discord.Interaction, sport: app_commands.Choice
                     refresh: bool = False):
     await interaction.response.defer(thinking=True)
     try:
-        date = date or today()
+        date = parse_day(date) if date else today()
         kind = bet.value if bet else "props"
         ARMED_NOW.clear()
         embeds, md = await asyncio.to_thread(build_auto, [sport.value], date, ProConfig(), kind,
@@ -2595,7 +2598,7 @@ async def parlay_cmd(interaction: discord.Interaction, sport: app_commands.Choic
                      refresh: bool = False):
     await interaction.response.defer(thinking=True)
     try:
-        date = date or today()
+        date = parse_day(date) if date else today()
 
         def work():
             from .chat import LinemakerChat
@@ -2628,7 +2631,7 @@ async def odds_cmd(interaction: discord.Interaction, sport: app_commands.Choice[
                    date: Optional[str] = None, props: bool = False):
     await interaction.response.defer(thinking=True)
     try:
-        date = date or today()
+        date = parse_day(date) if date else today()
 
         def work():
             api = OddsAPI()
@@ -3073,6 +3076,29 @@ async def weekly_post():
                                            description="\n\n".join(lines)[:4000], color=0x9B59B6))
 
 
+def parse_day(raw: str) -> str:
+    """YYYY-MM-DD from what people type: 2026-10-31, 10/31, 10-31, 10/31/26, 2026-10/31.
+    A month/day with no year is this year's, or last year's if that date is still ahead."""
+    import re as _re
+    s = (raw or "").strip()
+    nums = [int(x) for x in _re.findall(r"\d+", s)]
+    now = dt.datetime.now(TZ).date()
+    try:
+        if len(nums) == 3 and nums[0] > 31:            # 2026-10-31
+            y, m, d = nums
+        elif len(nums) == 3:                            # 10/31/2026 or 10/31/26
+            m, d, y = nums
+            y += 2000 if y < 100 else 0
+        elif len(nums) == 2:                            # 10/31
+            m, d = nums
+            y = now.year if dt.date(now.year, m, d) <= now else now.year - 1
+        else:
+            raise ValueError
+        return dt.date(y, m, d).isoformat()
+    except ValueError:
+        raise ValueError(f"'{raw}' isn't a date I can read: use 10/31 or 2026-10-31")
+
+
 GRADE_FILE_LIMIT = 8 * 1024 * 1024   # Discord takes 10 MB per file from a bot: zip anything near it
 
 
@@ -3137,7 +3163,15 @@ async def daily_grade():
     await morning_grade((dt.datetime.now(TZ).date() - dt.timedelta(days=1)).isoformat())
 
 
+GRADE_LOCK = asyncio.Lock()
+
+
 async def morning_grade(day: str):
+    async with GRADE_LOCK:
+        await _morning_grade(day)
+
+
+async def _morning_grade(day: str):
     _spend_as("nightly grading")
     st = grade_state()
     _set_grade_state(day=day, posted=False,

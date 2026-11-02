@@ -144,7 +144,8 @@ class GradeRobustnessTest(unittest.TestCase):
         from linemaker.tracking import load_day, load_records
         with tempfile.TemporaryDirectory() as d:
             os.makedirs(os.path.join(d, "NBA-props"))
-            recs = {"k1": {"history": [{"t": str(i)} for i in range(10)], "result": {"winner": "A"}},
+            recs = {"k1": {"history": [{"t": str(i)} for i in range(10)], "result": {"winner": "A"},
+                           "pick_time": "x", "books": {}},
                     "k2": {"history": []}}
             with open(os.path.join(d, "NBA-props", "2026-11-01.json"), "w") as f:
                 json.dump(recs, f)
@@ -152,3 +153,17 @@ class GradeRobustnessTest(unittest.TestCase):
             self.assertEqual([h["t"] for h in day["k1"]["history"]], ["0", "8", "9"])
             got = load_records(d, 5, "2026-11-02", graded_only=True, lean=True)
             self.assertEqual([r["key"] for r in got], ["k1"])
+            self.assertEqual(len(got[0]["history"]), 3)
+            self.assertNotIn("books", got[0])
+
+
+class ParseDayTest(unittest.TestCase):
+    def test_formats(self):
+        import datetime as dt
+        from linemaker import bot
+        with mock.patch.object(bot.dt, "datetime", wraps=dt.datetime) as fake:
+            fake.now.return_value = dt.datetime(2026, 11, 2, 15, 0)
+            for raw in ("2026-10-31", "2026-10/31", "10/31", "10-31", "10/31/2026", "10/31/26"):
+                self.assertEqual(bot.parse_day(raw), "2026-10-31", raw)
+        with self.assertRaises(ValueError):
+            bot.parse_day("yesterday")

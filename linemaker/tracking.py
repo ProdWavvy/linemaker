@@ -293,9 +293,10 @@ def load_records(directory: str, days: Optional[int] = None, today: Optional[str
                  segments: Optional[set] = None, graded_only: bool = False, lean: bool = False) -> list:
     """Every record of one phase (directory: tracking, tracking/live or tracking/pp), each
     tagged with its "segment" (e.g. NBA-props); segments= keeps only those.
-    graded_only: just records with a result (all the tuner can use). lean: price history cut
-    to the first snapshot and the last two (what closing-line value and line moves read), so
-    60 days of 20,000+-market slates fit in memory."""
+    graded_only: just records with a result (all the tuner can use). lean: picks keep their
+    first price snapshot and last two (closing-line value), other records no history, and the
+    books / projection steps / sim summary are dropped, so 60 days of 20,000+-market slates
+    fit in memory."""
     for p in glob.glob(os.path.join(directory, "*.json")):
         if DAY_FILE.fullmatch(os.path.basename(p)):
             migrate_day(directory, os.path.basename(p)[:10])
@@ -315,8 +316,11 @@ def load_records(directory: str, days: Optional[int] = None, today: Optional[str
             for key, rec in load_json(p).items():
                 if graded_only and not rec.get("result"):
                     continue
-                if lean and len(rec.get("history") or []) > 3:
-                    rec["history"] = rec["history"][:1] + rec["history"][-2:]
+                if lean:   # only what tuning and reports read
+                    hist = rec.get("history") or []
+                    rec["history"] = (hist[:1] + hist[-2:] if len(hist) > 3 else hist) if rec.get("pick_time") else []
+                    for k in ("books", "projection_steps", "sim"):
+                        rec.pop(k, None)
                 rec["segment"] = seg
                 rec["key"] = key
                 out.append(rec)
