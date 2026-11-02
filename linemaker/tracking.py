@@ -95,12 +95,18 @@ def day_files(base: str, date: str) -> list:
                   if SEGMENT_DIR.match(os.path.basename(os.path.dirname(p))))
 
 
-def load_day(base: str, date: str, segments: Optional[set] = None) -> dict:
-    """{key: record} across a phase's segment files for the date (optionally only some)."""
+def load_day(base: str, date: str, segments: Optional[set] = None, lean: bool = False) -> dict:
+    """{key: record} across a phase's segment files for the date (optionally only some).
+    lean: price history cut to the first snapshot and the last two (for reading, not saving)."""
     out = {}
     for p in day_files(base, date):
         if segments is None or os.path.basename(os.path.dirname(p)) in segments:
-            out.update(load_json(p))
+            recs = load_json(p)
+            if lean:
+                for rec in recs.values():
+                    if len(rec.get("history") or []) > 3:
+                        rec["history"] = rec["history"][:1] + rec["history"][-2:]
+            out.update(recs)
     return out
 
 
@@ -284,9 +290,12 @@ def _apply_results(path: str, results: list) -> int:
 
 
 def load_records(directory: str, days: Optional[int] = None, today: Optional[str] = None,
-                 segments: Optional[set] = None) -> list:
+                 segments: Optional[set] = None, graded_only: bool = False, lean: bool = False) -> list:
     """Every record of one phase (directory: tracking, tracking/live or tracking/pp), each
-    tagged with its "segment" (e.g. NBA-props); segments= keeps only those."""
+    tagged with its "segment" (e.g. NBA-props); segments= keeps only those.
+    graded_only: just records with a result (all the tuner can use). lean: price history cut
+    to the first snapshot and the last two (what closing-line value and line moves read), so
+    60 days of 20,000+-market slates fit in memory."""
     for p in glob.glob(os.path.join(directory, "*.json")):
         if DAY_FILE.fullmatch(os.path.basename(p)):
             migrate_day(directory, os.path.basename(p)[:10])
@@ -304,6 +313,10 @@ def load_records(directory: str, days: Optional[int] = None, today: Optional[str
         seg = os.path.basename(os.path.dirname(p))
         if True:
             for key, rec in load_json(p).items():
+                if graded_only and not rec.get("result"):
+                    continue
+                if lean and len(rec.get("history") or []) > 3:
+                    rec["history"] = rec["history"][:1] + rec["history"][-2:]
                 rec["segment"] = seg
                 rec["key"] = key
                 out.append(rec)

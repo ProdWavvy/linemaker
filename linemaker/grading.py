@@ -83,7 +83,7 @@ def grade_day(date: str, rows: list, auto: bool):
     from .jsonio import load_json
     from .tracking import apply_results_day, load_day
     snap = os.path.join(SNAPSHOTS, f"{date}.json")
-    pre = load_day(TRACKING, date)
+    pre = load_day(TRACKING, date, lean=True)   # read-only here: results are saved per file below
     live_base, pp_base = os.path.join(TRACKING, "live"), os.path.join(TRACKING, "pp")
     remaining = None
     summary_live = []
@@ -96,7 +96,7 @@ def grade_day(date: str, rows: list, auto: bool):
         source = pre or (load_json(snap) if os.path.exists(snap) else {})
         if source:
             rows += [r for r in auto_results(api, source) if (r["game_id"], r["subject"], r["market"]) not in have]
-        live = load_day(live_base, date)
+        live = load_day(live_base, date, lean=True)
         if live:   # in-game reads: graded from the same final scores and box scores
             live_rows = auto_results(api, live) + live_prop_results(live, date)
             n_live = apply_results_day(live_base, date, live_rows)
@@ -111,7 +111,7 @@ def grade_day(date: str, rows: list, auto: bool):
                 rows += [r for r in prop_results(recs, date)
                          if (r["game_id"], r["subject"], r["market"]) not in have]
                 have = keys(rows)
-    pp = load_day(pp_base, date) if auto else {}
+    pp = load_day(pp_base, date, lean=True) if auto else {}
     if pp:   # PrizePicks legs: same ESPN box scores (free)
         n_pp = apply_results_day(pp_base, date, prop_results(pp, date))
         if n_pp:

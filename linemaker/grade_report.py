@@ -35,11 +35,11 @@ def day_records(date: str) -> dict:
     from .live_props import decided_record
     from .tracking import load_day
     t = _tdir()
-    live = load_day(os.path.join(t, "live"), date)
-    return {"main": load_day(t, date),
+    live = load_day(os.path.join(t, "live"), date, lean=True)
+    return {"main": load_day(t, date, lean=True),
             # live props read after the line was already decided can't be bet: left out
             "live": {k: r for k, r in live.items() if not decided_record(r)},
-            "pp": load_day(os.path.join(t, "pp"), date)}
+            "pp": load_day(os.path.join(t, "pp"), date, lean=True)}
 
 
 def graded_keys(records: dict) -> set:

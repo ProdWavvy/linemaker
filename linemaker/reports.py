@@ -28,8 +28,8 @@ def pick_record(records: list) -> dict:
 
 def weekly_lines(today: str) -> list:
     tdir = os.environ.get("LINEMAKER_TRACKING_DIR", "tracking")
-    recs = load_records(tdir, 7, today)
-    live = load_records(os.path.join(tdir, "live"), 7, today)
+    recs = load_records(tdir, 7, today, lean=True)
+    live = load_records(os.path.join(tdir, "live"), 7, today, lean=True)
     out = []
     pr = pick_record(recs)
     if pr["won"] + pr["lost"]:
@@ -166,9 +166,9 @@ def alltime_sections(today: str) -> list:
     market-edge, paused-market (shadow) and auto-parlay records and your own bets."""
     from .autotune import _as_pick
     tdir = os.environ.get("LINEMAKER_TRACKING_DIR", "tracking")
-    pre = [r for r in load_records(tdir, None, today) if r.get("result")]
-    live = [r for r in load_records(os.path.join(tdir, "live"), None, today) if r.get("result")]
-    pp = [r for r in load_records(os.path.join(tdir, "pp"), None, today) if r.get("result")]
+    pre = load_records(tdir, None, today, graded_only=True, lean=True)
+    live = load_records(os.path.join(tdir, "live"), None, today, graded_only=True, lean=True)
+    pp = load_records(os.path.join(tdir, "pp"), None, today, graded_only=True, lean=True)
     picks = [r for r in pre if r.get("picked")]
     days = sorted({r["key"][:10] for r in pre if r.get("key")})
     span = f"{days[0]} to {days[-1]} ({len(days)} days)" if days else "no graded days yet"

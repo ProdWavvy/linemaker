@@ -647,9 +647,10 @@ def run_autotune(tracking_dir: str, today: str) -> list:
     from .tracking import kind_of
     days = int(_env("LINEMAKER_AUTOTUNE_DAYS", 60))
     min_total = int(_env("LINEMAKER_AUTOTUNE_MIN", 200))
-    by_phase = {"pre": load_records(tracking_dir, days, today),
+    by_phase = {"pre": load_records(tracking_dir, days, today, graded_only=True, lean=True),
                 # live props read after the line was already decided can't be bet: left out
-                "live": [r for r in load_records(os.path.join(tracking_dir, "live"), days, today)
+                "live": [r for r in load_records(os.path.join(tracking_dir, "live"), days, today,
+                                                 graded_only=True, lean=True)
                          if not decided_record(r)]}
     current = load_weights()
     old_segs = segment_weights()

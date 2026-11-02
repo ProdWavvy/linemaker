@@ -115,3 +115,40 @@ class SgpBoostTest(unittest.TestCase):
         self.assertGreaterEqual(len(set(games)), 2)
         self.assertTrue(any(games.count(g) >= 2 for g in games))
         self.assertEqual(p.kind, "SGPx")
+
+
+class GradeRobustnessTest(unittest.TestCase):
+    def test_big_grade_file_is_zipped(self):
+        from linemaker import bot
+        small, name = bot.grade_file_bytes("a,b\n1,2\n", "2026-11-01")
+        self.assertEqual(name, "graded_2026-11-01.csv")
+        big = "col1,col2\n" + "some player o15.5 points,0.61\n" * 400000
+        data, name = bot.grade_file_bytes(big, "2026-11-01")
+        self.assertEqual(name, "graded_2026-11-01.zip")
+        self.assertLess(len(data), bot.GRADE_FILE_LIMIT)
+
+    def test_catch_up_day(self):
+        import datetime as dt
+        from linemaker import bot
+        now = dt.datetime(2026, 11, 2, 10, 15)
+        with mock.patch.object(bot, "grade_state", return_value={}):
+            self.assertEqual(bot.grade_catch_up_day(now), "2026-11-01")
+            self.assertIsNone(bot.grade_catch_up_day(dt.datetime(2026, 11, 2, 8, 0)))
+        with mock.patch.object(bot, "grade_state", return_value={"day": "2026-11-01", "posted": True}):
+            self.assertIsNone(bot.grade_catch_up_day(now))
+        with mock.patch.object(bot, "grade_state", return_value={"day": "2026-11-01", "attempts": 2}):
+            self.assertIsNone(bot.grade_catch_up_day(now))
+
+    def test_lean_load(self):
+        import json, os, tempfile
+        from linemaker.tracking import load_day, load_records
+        with tempfile.TemporaryDirectory() as d:
+            os.makedirs(os.path.join(d, "NBA-props"))
+            recs = {"k1": {"history": [{"t": str(i)} for i in range(10)], "result": {"winner": "A"}},
+                    "k2": {"history": []}}
+            with open(os.path.join(d, "NBA-props", "2026-11-01.json"), "w") as f:
+                json.dump(recs, f)
+            day = load_day(d, "2026-11-01", lean=True)
+            self.assertEqual([h["t"] for h in day["k1"]["history"]], ["0", "8", "9"])
+            got = load_records(d, 5, "2026-11-02", graded_only=True, lean=True)
+            self.assertEqual([r["key"] for r in got], ["k1"])

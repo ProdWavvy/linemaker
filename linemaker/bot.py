@@ -1857,6 +1857,16 @@ class LinemakerBot(discord.Client):
         if _spend(local_today()).get("start_remaining") is None:   # restarted before today's check
             asyncio.get_running_loop().create_task(_refresh_budget())
         asyncio.get_running_loop().create_task(_catch_up_bets())
+        grade_at = os.environ.get("LINEMAKER_AUTOGRADE_TIME", "09:30").strip()
+        missed = grade_catch_up_day(dt.datetime.now(TZ), grade_at) if grade_at else None
+        if missed and not getattr(self, "_grade_caught_up", False):   # down or restarted at grade time
+            self._grade_caught_up = True
+            log.info("morning grade for %s wasn't posted: running it now", missed)
+
+            async def later():
+                await asyncio.sleep(90)   # let startup settle first
+                await morning_grade(missed)
+            asyncio.get_running_loop().create_task(later())
         if self.home is not None:
             ch = self.get_channel(self.home)
             if ch is None:
@@ -2171,7 +2181,7 @@ async def grade_cmd(interaction: discord.Interaction, results: Optional[discord.
                 raise ValueError("results file too large")
             rows = list(csv.DictReader(io.StringIO((await results.read()).decode("utf-8-sig"))))
         from .grade_report import day_records, grade_report, graded_keys
-        before = graded_keys(day_records(date))
+        before = await asyncio.to_thread(lambda: graded_keys(day_records(date)))
         summary, remaining, tracked = await asyncio.to_thread(grade_day, date, rows, auto)
         embeds, table = await asyncio.to_thread(grade_report, date, summary, before, remaining)
         if not summary and not tracked and table is None:
@@ -2181,8 +2191,7 @@ async def grade_cmd(interaction: discord.Interaction, results: Optional[discord.
         groups = chunk_embeds(embeds)
         for i, group in enumerate(groups):
             last = i == len(groups) - 1
-            files = ([discord.File(io.BytesIO(table.encode()), filename=f"graded_{date}.csv")]
-                     if last and table else [])
+            files = [grade_file(table, date)] if last and table else []
             await interaction.followup.send(embeds=group, files=files)
     except Exception as e:
         await _report_error(interaction, e)
@@ -3064,13 +3073,80 @@ async def weekly_post():
                                            description="\n\n".join(lines)[:4000], color=0x9B59B6))
 
 
+GRADE_FILE_LIMIT = 8 * 1024 * 1024   # Discord takes 10 MB per file from a bot: zip anything near it
+
+
+def grade_file_bytes(table: str, day: str) -> tuple:
+    """(bytes, filename) for a grade's CSV: zipped when it's too big to attach (a big slate
+    with alt lines runs past 10 MB as plain text; it zips about 10x)."""
+    import zipfile
+    raw = table.encode()
+    if len(raw) <= GRADE_FILE_LIMIT:
+        return raw, f"graded_{day}.csv"
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
+        z.writestr(f"graded_{day}.csv", raw)
+    return buf.getvalue(), f"graded_{day}.zip"
+
+
+def grade_file(table: str, day: str) -> discord.File:
+    data, name = grade_file_bytes(table, day)
+    return discord.File(io.BytesIO(data), filename=name)
+
+
+def _grade_state_path() -> str:
+    return os.path.join(os.environ.get("LINEMAKER_CACHE_DIR", "cache"), "morning_grade.json")
+
+
+def grade_state() -> dict:
+    """{"day", "attempts", "posted"} for the last morning grade (so a restart can catch up)."""
+    from .jsonio import load_json
+    try:
+        return load_json(_grade_state_path()) or {}
+    except Exception:
+        return {}
+
+
+def _set_grade_state(**kw):
+    from .jsonio import save_json
+    st = grade_state()
+    st.update(kw)
+    try:
+        os.makedirs(os.path.dirname(_grade_state_path()) or ".", exist_ok=True)
+        save_json(_grade_state_path(), st)
+    except Exception as e:
+        log.warning("couldn't save the morning grade state: %s", e)
+
+
+def grade_catch_up_day(now: dt.datetime, grade_at: str = "09:30") -> Optional[str]:
+    """Yesterday, if this morning's grade time has passed and it wasn't posted (the bot was
+    down or restarted mid-grade), at most 2 tries a day so a grade that crashes the bot
+    can't restart it forever; else None."""
+    h, m = (int(x) for x in grade_at.split(":"))
+    if (now.hour, now.minute) < (h, m):
+        return None
+    day = (now.date() - dt.timedelta(days=1)).isoformat()
+    st = grade_state()
+    if st.get("day") == day and (st.get("posted") or st.get("attempts", 0) >= 2):
+        return None
+    return day
+
+
 @tasks.loop(time=dt.time(9, 30, tzinfo=TZ))
 async def daily_grade():
+    await morning_grade((dt.datetime.now(TZ).date() - dt.timedelta(days=1)).isoformat())
+
+
+async def morning_grade(day: str):
     _spend_as("nightly grading")
-    day = (dt.datetime.now(TZ).date() - dt.timedelta(days=1)).isoformat()
+    st = grade_state()
+    _set_grade_state(day=day, posted=False,
+                     attempts=(st.get("attempts", 0) if st.get("day") == day else 0) + 1)
+    channel_id = os.environ.get("LINEMAKER_CHANNEL_ID") or bot.home
+    channel = bot.get_channel(int(channel_id)) if channel_id else None
     from .grade_report import day_records, grade_report, graded_keys
     try:
-        before = graded_keys(day_records(day))
+        before = await asyncio.to_thread(lambda: graded_keys(day_records(day)))
         summary, remaining, tracked = await asyncio.to_thread(grade_day, day, [], True)
         try:   # older live bets still open (read after midnight, or graded before the box score)
             from .bets import settle, stale_days
@@ -3087,12 +3163,13 @@ async def daily_grade():
         except Exception as e:
             log.warning("catch-up grading: %s", e)
         embeds, table = await asyncio.to_thread(grade_report, day, summary, before, remaining)
-    except Exception:
+    except Exception as e:
         log.exception("daily grade failed")
+        if channel is not None:
+            await channel.send(f"⚠️ Morning grade for {day} failed: {type(e).__name__}: {str(e)[:300]}. "
+                               f"Try `/grade date:{day}`.")
         return
     log.info("daily grade %s: %d tracked markets graded", day, tracked)
-    channel_id = os.environ.get("LINEMAKER_CHANNEL_ID") or bot.home
-    channel = bot.get_channel(int(channel_id)) if channel_id else None
     from .backup import configured, run_backup
     if configured():   # everything learned overnight goes to the private backup repo
         try:
@@ -3103,13 +3180,23 @@ async def daily_grade():
                 await channel.send(f"💾⚠️ Nightly backup failed: {str(e)[:300]}")
     await _warm_up()
     if channel is None or not (summary or tracked):
+        _set_grade_state(posted=True)
         return
     embeds[0].title = f"📈 Morning Grade · {day}"
     groups = chunk_embeds(embeds)
     for i, group in enumerate(groups):
-        files = ([discord.File(io.BytesIO(table.encode()), filename=f"graded_{day}.csv")]
-                 if i == len(groups) - 1 and table else [])
-        await channel.send(embeds=group, files=files)
+        files = [grade_file(table, day)] if i == len(groups) - 1 and table else []
+        try:
+            await channel.send(embeds=group, files=files)
+        except discord.HTTPException as e:   # the file still too big, or an embed refused
+            log.error("posting the morning grade failed (%s): %s", e.status, str(e)[:300])
+            try:
+                await channel.send(embeds=group, content=(f"⚠️ The grade file wouldn't attach ({str(e)[:150]})."
+                                                          if files else None))
+            except discord.HTTPException:
+                await channel.send(f"⚠️ Part of the morning grade for {day} couldn't be posted "
+                                   f"({str(e)[:200]}). Try `/grade date:{day}`.")
+    _set_grade_state(posted=True)
 
 
 @tasks.loop(time=dt.time(11, 0, tzinfo=TZ))
