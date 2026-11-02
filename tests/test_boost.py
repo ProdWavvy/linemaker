@@ -167,3 +167,34 @@ class ParseDayTest(unittest.TestCase):
                 self.assertEqual(bot.parse_day(raw), "2026-10-31", raw)
         with self.assertRaises(ValueError):
             bot.parse_day("yesterday")
+
+
+class PickShrinkPerSportTest(unittest.TestCase):
+    def test_nfl_gets_its_own_k(self):
+        from linemaker import autotune
+        recs = []
+        for i in range(400):   # NBA: said 70, market 54, hit 60 -> real edge
+            recs.append({"picked": True, "sport": "NBA", "pick_side": "A", "pick_prob": 0.70,
+                         "pick_market_prob": 0.54, "pick_time": f"a{i:04d}",
+                         "result": {"winner": "A" if i % 10 < 6 else "B"}})
+        for i in range(160):   # NFL: said 82, market 53, hit 53 -> no edge
+            recs.append({"picked": True, "sport": "NFL", "pick_side": "A", "pick_prob": 0.82,
+                         "pick_market_prob": 0.53, "pick_time": f"b{i:04d}",
+                         "result": {"winner": "A" if i < 85 else "B"}})
+        fit = autotune.tune_pick_shrink(recs)
+        self.assertIn("NFL", fit["sports"])
+        self.assertLess(fit["sports"]["NFL"]["k"], fit["k"])
+        self.assertGreater(fit["sports"]["NBA"]["k"], fit["sports"]["NFL"]["k"])
+        with mock.patch.object(autotune, "segment", return_value={"pick_shrink": fit}), \
+                mock.patch.dict("os.environ", {"LINEMAKER_PICK_SHRINK": ""}):
+            self.assertEqual(autotune.pick_shrink("pre", "prop", "NFL"), fit["sports"]["NFL"]["k"])
+            self.assertEqual(autotune.pick_shrink("pre", "prop", "WNBA"), fit["k"])
+
+    def test_longest_lines_never_picked(self):
+        from linemaker import autotune
+        with mock.patch.dict("os.environ", {}, clear=False):
+            self.assertTrue(autotune.pruned("NFL", "longest reception"))
+            self.assertTrue(autotune.pruned("NFL", "Longest Rush"))
+        with mock.patch.dict("os.environ", {"LINEMAKER_NO_PICK_MARKETS": ""}):
+            with mock.patch.object(autotune, "segment", return_value={}):
+                self.assertFalse(autotune.pruned("NFL", "longest reception"))

@@ -868,7 +868,7 @@ def run_pro(markets: list, slate_date: str, cfg: ProConfig, freezer=None,
         from .autotune import pick_shrink
         kept = []
         for ev in res.picks:
-            shrink_pick(ev, pick_shrink(cfg.phase, ev.market.bet_type))
+            shrink_pick(ev, pick_shrink(cfg.phase, ev.market.bet_type, ev.market.sport))
             if ev.best.gap <= 0:
                 res.passes.append((ev.best.label, f"no edge once its hit chance is corrected "
                                                   f"({ev.best.blended:.0%} vs {ev.best.best_implied:.0%})"))

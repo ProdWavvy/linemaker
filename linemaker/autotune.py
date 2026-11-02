@@ -342,8 +342,22 @@ def manual_pauses() -> set:
 MANUAL_LIFT_MIN = 40
 
 
+NO_PICK_MARKETS = ("NFL longest reception,NFL longest rush,NFL longest pass,"
+                   "NCAAF longest reception,NCAAF longest rush,NCAAF longest pass")
+
+
+def no_pick_markets() -> set:
+    """LINEMAKER_NO_PICK_MARKETS: markets that never become model picks (default: the
+    "longest" lines, which hinge on a single play). Still tracked and graded as shadow picks;
+    set it blank to allow them."""
+    raw = os.environ.get("LINEMAKER_NO_PICK_MARKETS", NO_PICK_MARKETS)
+    return {p.strip().lower() for p in raw.split(",") if p.strip()}
+
+
 def pruned(sport: str, market: str, phase: str = "pre", bet_type: str = "prop") -> Optional[str]:
     name = f"{sport} {market}".lower()
+    if name in no_pick_markets():
+        return "one-play line, too noisy to pick"
     if name in manual_pauses() and name not in (load_weights().get("manual_lifted") or {}):
         return "paused by you"
     return segment(phase, bet_type).get("pruned", {}).get(f"{sport} {market}")
@@ -379,6 +393,7 @@ def tune_manual_pauses(records: list, current: dict) -> tuple:
 # 1 by sample size; a pick's shown hit chance and stake use market + k x (blend - market).
 # The picks themselves don't change. LINEMAKER_PICK_SHRINK fixes k (1 = off).
 PICK_SHRINK_MIN, PICK_SHRINK_WINDOW, PICK_SHRINK_PRIOR_N = 150, 500, 200
+PICK_SHRINK_SPORT_MIN, PICK_SHRINK_SPORT_WINDOW, PICK_SHRINK_SPORT_FLOOR = 60, 300, 0.10
 # From the 10/25-10/30 grades, until a segment's own fit: the same start everywhere.
 PICK_SHRINK_START = {"pre props": 0.6, "pre games": 0.6, "live props": 0.6, "live games": 0.6}
 
@@ -396,10 +411,29 @@ def tune_pick_shrink(records: list) -> Optional[dict]:
             said = next((s.get("blended") for s in r.get("sides", []) if s.get("side") == side), None)
         if said is None:
             continue
-        rows.append((r.get("pick_time") or "", said, r["pick_market_prob"], 1.0 if res["winner"] == side else 0.0))
-    rows = sorted(rows)[-PICK_SHRINK_WINDOW:]
+        rows.append((r.get("pick_time") or "", said, r["pick_market_prob"], 1.0 if res["winner"] == side else 0.0,
+                     r.get("sport") or ""))
+    rows = sorted(rows)
+    fit = _shrink_fit(rows[-PICK_SHRINK_WINDOW:], 1.0, PICK_SHRINK_MIN, 0.25)
+    if fit is None:
+        return None
+    # Each league's own k, pulled toward the segment's by sample size (the NFL model's picks
+    # sat ~29 points above the market on 11/1, the NBA's ~16: one k can't fit both).
+    sports = {}
+    for sp in sorted({r[4] for r in rows} - {""}):
+        mine = [r for r in rows if r[4] == sp][-PICK_SHRINK_SPORT_WINDOW:]
+        f = _shrink_fit(mine, fit["k"], PICK_SHRINK_SPORT_MIN, PICK_SHRINK_SPORT_FLOOR)
+        if f is not None:
+            sports[sp] = f
+    if sports:
+        fit["sports"] = sports
+    return fit
+
+
+def _shrink_fit(rows: list, toward: float, min_n: int, floor: float) -> Optional[dict]:
+    """k = (hit - market) / (said - market), pulled toward `toward` by n / (n + prior)."""
     n = len(rows)
-    if n < PICK_SHRINK_MIN:
+    if n < min_n:
         return None
     said = sum(r[1] for r in rows) / n
     mkt = sum(r[2] for r in rows) / n
@@ -407,12 +441,12 @@ def tune_pick_shrink(records: list) -> Optional[dict]:
     if said - mkt < 0.02:
         return None
     raw = (hit - mkt) / (said - mkt)
-    k = 1 + n / (n + PICK_SHRINK_PRIOR_N) * (raw - 1)
-    return {"k": round(min(1.0, max(0.25, k)), 3), "n": n, "said": round(said, 4), "hit": round(hit, 4),
+    k = toward + n / (n + PICK_SHRINK_PRIOR_N) * (raw - toward)
+    return {"k": round(min(1.0, max(floor, k)), 3), "n": n, "said": round(said, 4), "hit": round(hit, 4),
             "market": round(mkt, 4)}
 
 
-def pick_shrink(phase: str, bet_type: str) -> float:
+def pick_shrink(phase: str, bet_type: str, sport: str = "") -> float:
     raw = os.environ.get("LINEMAKER_PICK_SHRINK", "").strip()
     if raw:
         try:
@@ -422,7 +456,8 @@ def pick_shrink(phase: str, bet_type: str) -> float:
     from .tracking import kind_of
     fit = segment(phase, bet_type).get("pick_shrink")
     if fit:
-        return fit["k"]
+        own = (fit.get("sports") or {}).get((sport or "").upper())
+        return (own or fit)["k"]
     return PICK_SHRINK_START.get(f"{phase} {kind_of(bet_type)}", 1.0)
 
 
@@ -684,7 +719,10 @@ def run_autotune(tracking_dir: str, today: str) -> list:
             ps = seg["pick_shrink"]
             changes.append(f"{label}: pick hit chances keep {ps['k']:.0%} of the edge over the market "
                            f"(picks said {ps['said']:.0%}, hit {ps['hit']:.0%}, market {ps['market']:.0%}; "
-                           f"{ps['n']} picks)")
+                           f"{ps['n']} picks)" + "".join(
+                               f"; {sp} keeps {v['k']:.0%} (said {v['said']:.0%}, hit {v['hit']:.0%}, "
+                               f"market {v['market']:.0%}; {v['n']} picks)"
+                               for sp, v in sorted((ps.get("sports") or {}).items())))
         before = old.get("pruned", {})
         changes += [f"{label}: ⏸️ paused {k}: {v}" for k, v in seg["pruned"].items() if k not in before]
         changes += [f"{label}: ▶️ {k} back on (no longer losing on both counts)"
@@ -743,8 +781,14 @@ def current_summary() -> str:
                                                   for k, v in sorted(pc.items()))
                                         or f"waiting for {PARLAY_CAL_MIN}+ graded auto-parlays over "
                                            f"{PARLAY_CAL_DAYS}+ days per group"))
-    shrink = [f"{SEGMENT_LABELS[n]} ×{segs[n]['pick_shrink']['k']:.2f} (said {segs[n]['pick_shrink']['said']:.0%}, "
-              f"hit {segs[n]['pick_shrink']['hit']:.0%})" for n in SEGMENTS if (segs.get(n) or {}).get("pick_shrink")]
+    shrink = []
+    for n in SEGMENTS:
+        ps = (segs.get(n) or {}).get("pick_shrink")
+        if not ps:
+            continue
+        own = "".join(f"; {sp} ×{v['k']:.2f} (said {v['said']:.0%}, hit {v['hit']:.0%}, {v['n']} picks)"
+                      for sp, v in sorted((ps.get("sports") or {}).items()))
+        shrink.append(f"{SEGMENT_LABELS[n]} ×{ps['k']:.2f} (said {ps['said']:.0%}, hit {ps['hit']:.0%}{own})")
     shrink += [f"{SEGMENT_LABELS[n]} ×{v:.2f} (starting value)" for n, v in PICK_SHRINK_START.items()
                if not (segs.get(n) or {}).get("pick_shrink")]
     if shrink:
@@ -755,6 +799,8 @@ def current_summary() -> str:
                f"{MANUAL_LIFT_MIN}+ shadow picks in profit)" for m in sorted(manual_pauses()) if m not in lifted]
     if paused:
         out.append("Paused markets: " + ", ".join(paused))
+    if no_pick_markets():
+        out.append("Never picked (one-play lines, still tracked): " + ", ".join(sorted(no_pick_markets())))
     if w.get("bias"):
         out.append("Projection corrections: " + ", ".join(f"{k} ×{v:.2f}" for k, v in sorted(w["bias"].items())))
     return "\n".join(out)
