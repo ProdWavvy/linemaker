@@ -42,9 +42,9 @@ def bankroll() -> Optional[float]:
 def bankroll_pl() -> float:
     """Profit / loss of your real (not practice) settled bets since the bankroll was set."""
     since = os.environ.get("LINEMAKER_BANKROLL_SINCE", "").strip()
-    from .bets import load_bets
+    from .bets import load_bets, owners_bet
     return sum(b.get("profit", 0.0) for b in load_bets()
-               if b.get("status") in ("won", "lost", "push") and not b.get("paper")
+               if b.get("status") in ("won", "lost", "push") and not b.get("paper") and owners_bet(b)
                and (not since or (b.get("settled") or b.get("placed", "")) >= since))
 
 

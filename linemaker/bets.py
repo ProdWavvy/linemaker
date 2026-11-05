@@ -69,6 +69,21 @@ def _whose(user: Optional[str]) -> Optional[str]:
     return user if user is not None else (CURRENT_USER.get() or "")
 
 
+OWNER_NAMES = set()   # the bot owner's Discord name(s), filled in at startup (bot.on_ready)
+
+
+def viewer() -> Optional[str]:
+    """Whose bets a screen shows: the person asking (None = everyone's, or per-user off)."""
+    return CURRENT_USER.get() if per_user_on() else None
+
+
+def owners_bet(bet: dict) -> bool:
+    """The bankroll is the owner's: with per-user bets only their bets move it."""
+    if not per_user_on() or not OWNER_NAMES:
+        return True
+    return (bet.get("user") or "") in OWNER_NAMES or not bet.get("user")
+
+
 def mine(bet: dict, user: Optional[str]) -> bool:
     return user is None or (bet.get("user") or "") == user
 

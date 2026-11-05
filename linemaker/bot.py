@@ -470,12 +470,47 @@ class BonusModal(discord.ui.Modal):
             ephemeral=True)
 
 
+async def _learn_owner_names():
+    """The owner's Discord name(s), so only their bets move the bankroll (bets.owners_bet)."""
+    from .bets import OWNER_NAMES
+    try:
+        raw = os.environ.get("LINEMAKER_OWNER_IDS", "").strip()
+        if raw:
+            for x in raw.split(","):
+                if x.strip().isdigit():
+                    OWNER_NAMES.add(str(await bot.fetch_user(int(x.strip()))))
+        else:
+            info = await bot.application_info()
+            if info.owner:
+                OWNER_NAMES.add(str(info.owner))
+            if info.team:
+                OWNER_NAMES.update(str(m) for m in info.team.members)
+        log.info("bankroll follows the owner's bets: %s", ", ".join(sorted(OWNER_NAMES)) or "unknown")
+    except Exception as e:
+        log.warning("couldn't look up the owner's name: %s", e)
+
+
+async def _own_bet(interaction: discord.Interaction, bet: dict) -> bool:
+    """Only the person who logged a bet (or the bot's owner) can change, undo or mark it."""
+    from .bets import per_user_on
+    who = bet.get("user") or ""
+    if not per_user_on() or not who or who == str(interaction.user):
+        return True
+    from .admin import is_owner
+    if await is_owner(bot, interaction.user):
+        return True
+    await interaction.response.send_message(f"That's {who}'s bet, so only they can change it.", ephemeral=True)
+    return False
+
+
 def _bonus(bet_id: str):
     async def callback(interaction: discord.Interaction):
         from .bets import load_bets
         bet = next((b for b in load_bets() if b["id"] == bet_id), None)
         if bet is None:
             await interaction.response.send_message("That bet isn't logged anymore.", ephemeral=True)
+            return
+        if not await _own_bet(interaction, bet):
             return
         await interaction.response.send_modal(BonusModal(bet))
     return callback
@@ -487,6 +522,8 @@ def _restake(bet_id: str):
         bet = next((b for b in load_bets() if b["id"] == bet_id), None)
         if bet is None or bet.get("status") != "open":
             await interaction.response.send_message("That bet is settled or no longer logged.", ephemeral=True)
+            return
+        if not await _own_bet(interaction, bet):
             return
         await interaction.response.send_modal(StakeModal(bet))
     return callback
@@ -546,7 +583,10 @@ def _no_parlay_pick(key: str, i: int, value: str):
 
 def _unlog(bet_id: str):
     async def callback(interaction: discord.Interaction):
-        from .bets import remove_bet
+        from .bets import load_bets, remove_bet
+        bet = next((b for b in load_bets() if b["id"] == bet_id), None)
+        if bet is not None and not await _own_bet(interaction, bet):
+            return
         ok = remove_bet(bet_id)
         await interaction.response.send_message("↩️ Removed from your log." if ok else "That bet was already removed.",
                                                 ephemeral=True)
@@ -1780,6 +1820,9 @@ def in_home(channel, home: Optional[int]) -> bool:
 
 class HomeChannelTree(app_commands.CommandTree):
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        from .bets import CURRENT_USER
+        if getattr(interaction, "user", None) is not None:   # slash commands run in their own task: "your bets" = the caller
+            CURRENT_USER.set(str(interaction.user))
         home = home_channel()
         if in_home(interaction.channel, home):
             return True
@@ -1884,6 +1927,7 @@ class LinemakerBot(discord.Client):
         if _spend(local_today()).get("start_remaining") is None:   # restarted before today's check
             asyncio.get_running_loop().create_task(_refresh_budget())
         asyncio.get_running_loop().create_task(_catch_up_bets())
+        asyncio.get_running_loop().create_task(_learn_owner_names())
         grade_at = os.environ.get("LINEMAKER_AUTOGRADE_TIME", "09:30").strip()
         missed = grade_catch_up_day(dt.datetime.now(TZ), grade_at) if grade_at else None
         if missed and not getattr(self, "_grade_caught_up", False):   # down or restarted at grade time
@@ -2422,6 +2466,8 @@ def _my_bet(bet_id: str):
         bet = next((b for b in load_bets() if b["id"] == bet_id), None)
         if bet is None or bet.get("status") != "open":
             await interaction.response.send_message("That bet is settled or no longer logged.", ephemeral=True)
+            return
+        if not await _own_bet(interaction, bet):
             return
         legs = "\n".join(f"• {l.get('label', '')} ({fmt_odds(l['odds'])})" if l.get("odds") is not None
                          else f"• {l.get('label', '')}" for l in bet["legs"])

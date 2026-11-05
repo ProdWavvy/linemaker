@@ -57,10 +57,11 @@ def weekly_lines(today: str) -> list:
     if c["n"]:
         out.append(f"**Closing-line value:** beat the close {c['beat']:.0%} of the time, "
                    f"{c['avg_prob'] * 100:+.2f} pts on average ({c['n']} picks)")
-    from .bets import summary
-    b = summary(7, today)
+    from .bets import per_user_on, summary, viewer
+    who = viewer()   # /weekly: the caller's bets; the Monday post: everyone's
+    b = summary(7, today, user=who)
     if b["settled"]:
-        out.append(f"**Your bets:** {b['won']}-{b['lost']}" + (f"-{b['push']}" if b["push"] else "")
+        out.append(f"**{'Your' if who or not per_user_on() else 'Everyone' + chr(39) + 's'} bets:** {b['won']}-{b['lost']}" + (f"-{b['push']}" if b["push"] else "")
                    + f" · staked ${b['staked']:,.2f} · {fmt_money(b['profit'])}"
                    + (f" · ROI {b['roi']:+.1%}" if b["roi"] is not None else ""))
     if b["open"]:
@@ -218,10 +219,11 @@ def alltime_sections(today: str) -> list:
     except Exception:
         pass
     try:
-        from .bets import summary
-        s = summary(None, today)
+        from .bets import per_user_on, summary, viewer
+        who = viewer()
+        s = summary(None, today, user=who)
         if s["settled"]:
-            other.append(f"🧾 Your bets: **{s['won']}-{s['lost']}** · ${s['staked']:,.2f} staked · "
+            other.append(f"🧾 {'Your' if who or not per_user_on() else 'Everyone' + chr(39) + 's'} bets: **{s['won']}-{s['lost']}** · ${s['staked']:,.2f} staked · "
                          f"{s['profit']:+,.2f}" + (f" · ROI {s['roi']:+.1%}" if s["roi"] is not None else "")
                          + " (`/record` for more)")
     except Exception:

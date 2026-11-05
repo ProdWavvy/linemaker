@@ -245,3 +245,33 @@ class PerUserBetsTest(unittest.TestCase):
         self.assertNotEqual(other, key)
         self.assertEqual(other, again)
         self.assertNotIn("card_msg", bot.PICK_DETAILS[other])
+
+
+class PerUserGuardsTest(unittest.TestCase):
+    def test_only_the_bettor_changes_a_bet(self):
+        from types import SimpleNamespace as NS
+        from linemaker import bot
+        sent = []
+
+        class Resp:
+            async def send_message(self, msg, **kw):
+                sent.append(msg)
+
+        async def go(user):
+            inter = NS(user=user, response=Resp())
+            with mock.patch("linemaker.admin.is_owner", return_value=False):
+                return await bot._own_bet(inter, {"user": "me"})
+        with mock.patch.dict("os.environ", {"LINEMAKER_PER_USER_BETS": "on"}):
+            async def owner_false(*a):
+                return False
+            with mock.patch("linemaker.admin.is_owner", side_effect=owner_false):
+                self.assertTrue(asyncio.run(bot._own_bet(NS(user="me", response=Resp()), {"user": "me"})))
+                self.assertFalse(asyncio.run(bot._own_bet(NS(user="friend", response=Resp()), {"user": "me"})))
+        self.assertIn("me's bet", sent[-1])
+
+    def test_bankroll_counts_only_the_owners_bets(self):
+        from linemaker import bets
+        with mock.patch.dict("os.environ", {"LINEMAKER_PER_USER_BETS": "on"}), \
+                mock.patch.object(bets, "OWNER_NAMES", {"me"}):
+            self.assertTrue(bets.owners_bet({"user": "me"}))
+            self.assertFalse(bets.owners_bet({"user": "friend"}))

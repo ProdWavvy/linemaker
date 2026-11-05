@@ -70,7 +70,9 @@ def today_embed(date: str) -> discord.Embed:
         lines.append("💰 No bankroll set (`/bankroll amount:30` sizes every stake to it)")
     lines.append("🧪 **Practice mode on**: bets you log are practice" if paper_on()
                  else "💵 Practice mode off: bets you log are real")
-    bets = load_bets()
+    from .bets import mine as _is_mine, viewer
+    who = viewer()   # the person who asked: their own bets
+    bets = [b for b in load_bets() if _is_mine(b, who)]
     for paper, label in ((False, "Real"), (True, "Practice")):
         mine = [b for b in bets if bool(b.get("paper")) == paper]
         open_ = [b for b in mine if b["status"] == "open"]
