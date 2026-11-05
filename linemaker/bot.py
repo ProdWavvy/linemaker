@@ -770,7 +770,8 @@ class CompactView(discord.ui.View):
                                             options=options, row=0, custom_id=f"lm:pick:{options[0].value}"))
         boxes = [d for _e, d in parlays if "parlays" in d]
         if boxes:   # the live board behind the parlay menu: every parlay, in card order
-            board = {"parlays": [], "numbers": [], "pool": []}
+            from .bets import CURRENT_USER
+            board = {"parlays": [], "numbers": [], "pool": [], "owner": CURRENT_USER.get()}
             seen = set()
             for d in boxes:
                 board["parlays"] += d["parlays"]
@@ -1241,6 +1242,28 @@ def _board_bet(key: str, j: int):
     return callback
 
 
+async def _board_for(bkey: str, user) -> str:
+    """The parlay board this person bets from. The card's asker (the owner, for the 11 AM
+    post) uses the card's own board, so their bets redraw the posted card; anyone else gets
+    a private copy, so their tickets change only their board, never the shared card."""
+    from .bets import per_user_on
+    board = PICK_DETAILS[bkey]
+    if not per_user_on():
+        return bkey
+    who, owner = str(user), board.get("owner")
+    if owner == who:
+        return bkey
+    if owner is None:
+        from .admin import is_owner
+        if await is_owner(bot, user):
+            return bkey
+    copies = board.setdefault("copies", {})
+    if copies.get(who) not in PICK_DETAILS:
+        copies[who] = _remember({"parlays": list(board["parlays"]), "numbers": list(board.get("numbers") or []),
+                                 "pool": board.get("pool") or [], "owner": who, "copy_of": bkey})
+    return copies[who]
+
+
 def _parlay_bet_card(value: str):
     """One auto-parlay from a card, privately: its price at the book, a one-tap Bet button
     (the slip opens with every leg) and Log."""
@@ -1253,11 +1276,13 @@ def _parlay_bet_card(value: str):
             return
         if detail.get("board") in PICK_DETAILS:   # every parlay on the card, live
             try:
+                bkey = await _board_for(detail["board"], interaction.user)
                 msg = getattr(interaction, "message", None)
-                if msg is not None and getattr(msg, "id", None):   # the posted card, redrawn after each bet
-                    PICK_DETAILS[detail["board"]]["card_msg"] = (getattr(interaction, "channel_id", None)
-                                                                or msg.channel.id, msg.id)
-                embed, view = parlay_board(detail["board"])
+                if bkey == detail["board"] and msg is not None and getattr(msg, "id", None):
+                    # the card's own asker: the posted card is redrawn after each of their bets
+                    PICK_DETAILS[bkey]["card_msg"] = (getattr(interaction, "channel_id", None)
+                                                      or msg.channel.id, msg.id)
+                embed, view = parlay_board(bkey)
                 await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
                 await asyncio.to_thread(save_details)
             except Exception as e:
@@ -1839,6 +1864,8 @@ class LinemakerBot(discord.Client):
         return int(raw) if raw else None
 
     async def on_interaction(self, interaction: discord.Interaction):
+        from .bets import CURRENT_USER
+        CURRENT_USER.set(str(interaction.user))   # "your open bets" = whoever tapped (bets.py)
         if interaction.type == discord.InteractionType.component:
             try:
                 await route_component(interaction)
@@ -1880,6 +1907,8 @@ class LinemakerBot(discord.Client):
     async def on_message(self, message: discord.Message):
         if message.author.bot:
             return
+        from .bets import CURRENT_USER
+        CURRENT_USER.set(str(message.author))   # the card leaves out the asker's own open bets
         _spend_as("chat asks")
         from .busy import busy
         with busy():   # the auto-updater waits while a reply is in progress
@@ -2275,15 +2304,19 @@ async def ufc_cmd(interaction: discord.Interaction):
 
 @bot.tree.command(name="record", description="Your logged bets: open bets, record, profit and ROI")
 @app_commands.describe(days="How many days back (default 30; 0 = all time)",
-                       practice="Show your practice (paper) bets instead of real ones")
-async def record_cmd(interaction: discord.Interaction, days: Optional[int] = 30, practice: bool = False):
+                       practice="Show your practice (paper) bets instead of real ones",
+                       everyone="Everyone's bets together instead of just yours")
+async def record_cmd(interaction: discord.Interaction, days: Optional[int] = 30, practice: bool = False,
+                     everyone: bool = False):
     await interaction.response.defer(thinking=True)
     try:
-        from .bets import settle, summary
+        from .bets import per_user_on, settle, summary
         from .staking import _money
+        who = None if everyone or not per_user_on() else str(interaction.user)
         await asyncio.to_thread(settle)
-        s = await asyncio.to_thread(summary, days or None, today(), practice)
-        span = (f"last {days} days" if days else "all time") + (" · 🧪 practice bets" if practice else "")
+        s = await asyncio.to_thread(summary, days or None, today(), practice, who)
+        span = (f"last {days} days" if days else "all time") + (" · 🧪 practice bets" if practice else "") + (
+            " · everyone" if who is None and per_user_on() else "")
         lines = []
         if s["settled"]:
             roi = f"{s['roi']:+.1%}" if s["roi"] is not None else "—"
@@ -2308,7 +2341,7 @@ async def record_cmd(interaction: discord.Interaction, days: Optional[int] = 30,
             lines.append("No settled bets yet. Tap **Bet** on a parlay (it logs it for you) or **📝 I bet this** on a pick "
                          "after you place it, and it settles automatically after grading.")
         from .bets import clv_summary
-        c = await asyncio.to_thread(clv_summary, days or None, today())
+        c = await asyncio.to_thread(clv_summary, days or None, today(), who)
         if c["n"]:
             lines += ["", f"📉 **Vs the closing line:** you beat it on **{c['beat']:.0%}** of {c['n']} legs, "
                           f"**{c['avg'] * 100:+.2f} pts** on average. Beating the close over time is the "
@@ -2341,10 +2374,12 @@ async def today_cmd(interaction: discord.Interaction):
 
 
 @bot.tree.command(name="bets", description="Your open bets: change the stake or odds, or undo one")
-async def bets_cmd(interaction: discord.Interaction):
-    from .bets import load_bets
+@app_commands.describe(everyone="Everyone's open bets instead of just yours")
+async def bets_cmd(interaction: discord.Interaction, everyone: bool = False):
+    from .bets import load_bets, mine, per_user_on
     from .staking import _money
-    open_ = [b for b in load_bets() if b.get("status") == "open"]
+    who = None if everyone or not per_user_on() else str(interaction.user)
+    open_ = [b for b in load_bets() if b.get("status") == "open" and mine(b, who)]
     if not open_:
         await interaction.response.send_message("No open bets. Bets you log with **Bet** or **I bet this** "
                                                 "show up here until they settle.", ephemeral=True)

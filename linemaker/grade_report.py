@@ -303,6 +303,15 @@ def bets_embed(date: str, settled_now: int) -> Optional[discord.Embed]:
         l = sum(b["status"] == "lost" for b in done)
         lines.append(f"**{w}-{l}** · staked ${staked:,.2f} · **{fmt_money(profit)}**"
                      + (f" · settled {settled_now} just now" if settled_now else ""))
+    people = sorted({b.get("user") or "?" for b in mine})
+    several = len(people) > 1   # a shared bot: each person's line, and a name on every bet
+    if several and done:
+        for who in people:
+            hers = [b for b in done if (b.get("user") or "?") == who]
+            if hers:
+                lines.append(f"• **{who}**: {sum(b['status'] == 'won' for b in hers)}-"
+                             f"{sum(b['status'] == 'lost' for b in hers)} · "
+                             f"{fmt_money(sum(b.get('profit', 0) for b in hers))}")
     for b in done[:12]:
         mark = {"won": "✅", "lost": "❌", "push": "➖"}[b["status"]]
         what = b["legs"][0]["label"] if b["kind"] == "single" else f"{len(b['legs'])}-leg {b['kind']}"
@@ -310,15 +319,15 @@ def bets_embed(date: str, settled_now: int) -> Optional[discord.Embed]:
         if b["kind"] != "single":
             legs = " (" + " ".join({"won": "✅", "lost": "❌", "push": "➖"}.get(l.get("outcome"), "⏳")
                                    for l in b["legs"]) + ")"
-        lines.append(f"{mark} {what} {fmt_odds(b['odds'])} · ${b['stake']:,.2f} → "
-                     f"{fmt_money(b.get('profit', 0))}{legs}")
+        lines.append(f"{mark} {(b.get('user') or '?') + ': ' if several else ''}{what} {fmt_odds(b['odds'])} · "
+                     f"${b['stake']:,.2f} → {fmt_money(b.get('profit', 0))}{legs}")
     still = [b for b in mine if b["status"] == "open"]
     if still:
         lines.append("")
         lines.append(f"⏳ **Still open ({len(still)}):** " + "; ".join(
             (b["legs"][0]["label"] if b["kind"] == "single" else f"{len(b['legs'])}-leg {b['kind']}")
             for b in still[:6]) + " (a game isn't final, or a leg wasn't tracked)")
-    return discord.Embed(title="🧾 Your Bets", description="\n".join(lines)[:4000],
+    return discord.Embed(title="🧾 Bets" if several else "🧾 Your Bets", description="\n".join(lines)[:4000],
                          color=GREEN if profit >= 0 else RED)
 
 

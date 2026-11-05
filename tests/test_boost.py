@@ -198,3 +198,50 @@ class PickShrinkPerSportTest(unittest.TestCase):
         with mock.patch.dict("os.environ", {"LINEMAKER_NO_PICK_MARKETS": ""}):
             with mock.patch.object(autotune, "segment", return_value={}):
                 self.assertFalse(autotune.pruned("NFL", "longest reception"))
+
+
+class PerUserBetsTest(unittest.TestCase):
+    def setUp(self):
+        import tempfile
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        env = mock.patch.dict("os.environ", {"LINEMAKER_PER_USER_BETS": "on", "LINEMAKER_BETS_DIR": self.tmp.name,
+                                             "LINEMAKER_CACHE_DIR": self.tmp.name})
+        env.start()
+        self.addCleanup(env.stop)
+
+    def _leg(self, player):
+        return {"key": f"NBA|g1|{player}|points|10.5", "side": "A", "label": f"{player} o10.5",
+                "bet_type": "prop", "odds": -110}
+
+    def test_each_person_has_their_own_open_bets(self):
+        from linemaker import bets
+        with mock.patch.object(bets, "bets_path", return_value=self.tmp.name + "/bets.json"):
+            bets.add_bet([self._leg("A"), self._leg("B")], 250, 1, "FanDuel", "me")
+            bets.add_bet([self._leg("C"), self._leg("D")], 250, 1, "FanDuel", "friend")
+            self.assertEqual({k[1] for k in bets.open_exposure("me")}, {"A", "B"})
+            self.assertEqual({k[1] for k in bets.open_exposure("friend")}, {"C", "D"})
+            tok = bets.CURRENT_USER.set("friend")
+            try:
+                self.assertEqual({k[1] for k in bets.open_exposure()}, {"C", "D"})   # whoever tapped
+                self.assertIsNone(bets.find_open("FanDuel", [self._leg("A"), self._leg("B")]))   # not hers
+            finally:
+                bets.CURRENT_USER.reset(tok)
+            self.assertEqual(bets.open_exposure(), {})   # no one asking (the 11 AM post): nothing held
+            self.assertEqual(len(bets.summary(None, user="me")["open"]), 1)
+            self.assertEqual(len(bets.summary(None)["open"]), 2)
+
+    def test_board_copy_for_someone_else(self):
+        from linemaker import bot
+
+        async def go():
+            key = bot._remember({"parlays": [], "numbers": [], "pool": [], "owner": "me"})
+            same = await bot._board_for(key, "me")
+            other = await bot._board_for(key, "friend")
+            again = await bot._board_for(key, "friend")
+            return key, same, other, again
+        key, same, other, again = asyncio.run(go())
+        self.assertEqual(same, key)
+        self.assertNotEqual(other, key)
+        self.assertEqual(other, again)
+        self.assertNotIn("card_msg", bot.PICK_DETAILS[other])

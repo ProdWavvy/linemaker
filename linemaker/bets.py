@@ -47,10 +47,38 @@ def leg_from_eval(ev, live: Optional[bool] = None, odds: Optional[int] = None, b
             "book": book or s.best_book, "live": live, "model_prob": round(s.blended, 4)}
 
 
-def find_open(book: str, legs: list) -> Optional[dict]:
-    """An open logged bet with exactly these legs at this book (a second tap on Bet)."""
+# ---- whose bets ---------------------------------------------------------------------
+# The bot is shared: each person's open bets are theirs. CURRENT_USER is set for whoever
+# sent the ask or tapped the button (bot.on_message / on_interaction; it follows the work
+# into worker threads), so "players already in your open bets" means that person's bets,
+# and a friend's ticket never strips legs from your cards. With no one set (the 11 AM
+# post, pre-tip scans) nothing is left out. LINEMAKER_PER_USER_BETS=off: one shared list.
+import contextvars
+
+CURRENT_USER = contextvars.ContextVar("linemaker_user", default=None)
+
+
+def per_user_on() -> bool:
+    return os.environ.get("LINEMAKER_PER_USER_BETS", "on").strip().lower() not in ("off", "0", "no", "false")
+
+
+def _whose(user: Optional[str]) -> Optional[str]:
+    """The user to filter bets by, or None for everyone's (per-user off)."""
+    if not per_user_on():
+        return None
+    return user if user is not None else (CURRENT_USER.get() or "")
+
+
+def mine(bet: dict, user: Optional[str]) -> bool:
+    return user is None or (bet.get("user") or "") == user
+
+
+def find_open(book: str, legs: list, user: Optional[str] = None) -> Optional[dict]:
+    """An open logged bet with exactly these legs at this book (a second tap on Bet), of
+    this user (default: whoever tapped)."""
+    who = _whose(user)
     want = sorted(f"{l['key']}|{l['side']}" for l in legs)
-    return next((b for b in load_bets() if b.get("status") == "open" and b.get("book") == book
+    return next((b for b in load_bets() if b.get("status") == "open" and b.get("book") == book and mine(b, who)
                  and sorted(f"{l['key']}|{l['side']}" for l in b.get("legs", [])) == want), None)
 
 
@@ -79,11 +107,15 @@ def leg_exposure(leg: dict) -> tuple:
     return (gid, subject) if (leg.get("bet_type") or "prop") == "prop" else (gid, "game line")
 
 
-def open_exposure() -> dict:
-    """exposure -> {"n": open bets it's in, "label"} across your logged, unsettled bets."""
+def open_exposure(user: Optional[str] = None) -> dict:
+    """exposure -> {"n": open bets it's in, "label"} across this user's logged, unsettled
+    bets (default: whoever asked or tapped; no one = nothing held)."""
+    who = _whose(user)
+    if who == "":
+        return {}
     out = {}
     for b in load_bets():
-        if b.get("status") != "open":
+        if b.get("status") != "open" or not mine(b, who):
             continue
         for x in {leg_exposure(l): l for l in b.get("legs", [])}.items():
             e = out.setdefault(x[0], {"n": 0, "label": x[1].get("label", "")})
@@ -207,11 +239,13 @@ def settle() -> int:
     return n
 
 
-def summary(days: Optional[int] = 30, today: Optional[str] = None, paper: bool = False) -> dict:
-    """Your record: real bets, or with paper=True the practice bets (kept apart)."""
+def summary(days: Optional[int] = 30, today: Optional[str] = None, paper: bool = False,
+            user: Optional[str] = None) -> dict:
+    """Your record: real bets, or with paper=True the practice bets (kept apart). user: just
+    that person's bets (None = everyone's)."""
     end = dt.date.fromisoformat(today) if today else dt.date.today()
     start = end - dt.timedelta(days=days) if days else None
-    rows = [b for b in load_bets() if bool(b.get("paper")) == paper
+    rows = [b for b in load_bets() if bool(b.get("paper")) == paper and mine(b, user)
             and (not start or dt.date.fromisoformat(b["placed"][:10]) >= start)]
     done = [b for b in rows if b["status"] != "open"]
     staked = sum(risked(b) for b in done)
@@ -260,12 +294,14 @@ def leg_clv(leg: dict, cache: dict) -> Optional[float]:
     return None
 
 
-def clv_summary(days: Optional[int] = 30, today: Optional[str] = None) -> dict:
+def clv_summary(days: Optional[int] = 30, today: Optional[str] = None, user: Optional[str] = None) -> dict:
     """Closing-line value across your logged legs (live bets left out: they close in-game)."""
     end = dt.date.fromisoformat(today) if today else dt.date.today()
     start = end - dt.timedelta(days=days) if days else None
     cache, vals = {}, []
     for b in load_bets():
+        if not mine(b, user):
+            continue
         if start and dt.date.fromisoformat(b["placed"][:10]) < start:
             continue
         for leg in b.get("legs", []):

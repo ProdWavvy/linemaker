@@ -14,3 +14,4 @@ os.environ.setdefault("LINEMAKER_SKIP_STARTED", "off")   # fixture games have fi
 os.environ.setdefault("LINEMAKER_PRETIP_MINUTES", "")   # no pre-tip arming unless a test opts in
 os.environ.setdefault("LINEMAKER_OFFLINE", "1")   # no live roster lookups from parlay correlation
 os.environ.setdefault("LINEMAKER_CALIBRATION_PRIORS", "off")   # tests use raw hit chances unless they opt in
+os.environ.setdefault("LINEMAKER_PER_USER_BETS", "off")   # one shared bet list; PerUserBetsTest turns it on
