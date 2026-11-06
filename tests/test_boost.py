@@ -275,3 +275,38 @@ class PerUserGuardsTest(unittest.TestCase):
                 mock.patch.object(bets, "OWNER_NAMES", {"me"}):
             self.assertTrue(bets.owners_bet({"user": "me"}))
             self.assertFalse(bets.owners_bet({"user": "friend"}))
+
+
+class UnderdogTest(unittest.TestCase):
+    def test_asks(self):
+        from linemaker.chat import quick_kind, quick_plays_request
+        self.assertEqual(quick_kind("underdog nba"), "ud")
+        self.assertEqual(quick_kind("best underdog fantasy picks nfl"), "ud")
+        self.assertEqual(quick_kind("prizepicks nba"), "pp")
+        self.assertNotEqual(quick_kind("underdog ml parlay nba"), "ud")   # plus-money moneylines
+        self.assertEqual(quick_plays_request("underdog nba"), ["NBA"])
+
+    def test_tables_and_names(self):
+        from linemaker import pp
+        with pp.use_app("ud"):
+            self.assertEqual(pp.book(), "Underdog")
+            self.assertEqual(pp.power_table()[3], 6.0)
+            self.assertEqual(pp.entry_name("Power"), "Standard")
+        self.assertEqual(pp.book(), "PrizePicks")
+        self.assertEqual(pp.power_table()[3], 5.0)
+
+    def test_settles_on_underdog_table(self):
+        from linemaker import pp
+        bet = {"stake": 10, "book": "Underdog", "pp_kind": "Power", "legs": [{}, {}, {}]}
+        self.assertEqual(pp.settle_entry(bet, ["won", "won", "won"]), ("won", 50.0))   # 6x
+        bet["book"] = "PrizePicks"
+        self.assertEqual(pp.settle_entry(bet, ["won", "won", "won"]), ("won", 40.0))   # 5x
+
+    def test_only_underdog_lines_kept(self):
+        from types import SimpleNamespace as NS
+        from linemaker import pp
+        fm = NS(books=[("Underdog Fantasy", [-120, None]), ("PrizePicks", [-110, None])],
+                multipliers={"Underdog Fantasy": [1.0]})
+        with pp.use_app("ud"):
+            out = pp._pp_only([fm])
+        self.assertEqual([b for b, _p in out[0].books], ["Underdog"])

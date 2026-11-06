@@ -936,53 +936,64 @@ def parlay_box(p, num: Optional[int] = None, note: str = "") -> discord.Embed:
 
 
 def pp_messages(sections: list, date: str, title: str = "") -> list:
-    """[(embeds, detail)] for a PrizePicks scan: header, legs board, best entries."""
-    from .pp import best_entries, break_even, leg_mult, leg_value, line_gap, power_table, tier_icon
+    """[(embeds, detail)] for a pick'em scan (PrizePicks or Underdog): header, legs board,
+    best entries."""
+    from .pp import use_app
     sections = _norm_sections(sections)
+    which = next((getattr(res, "dfs_app", "") for _s, res, _e in sections if getattr(res, "dfs_app", "")), "prizepicks")
+    with use_app(which):
+        return _pp_messages(sections, date, title)
+
+
+def _pp_messages(sections: list, date: str, title: str = "") -> list:
+    from .pp import (app, best_entries, break_even, entry_name, leg_mult, leg_value, line_gap, power_table,
+                     side_word, tier_icon)
+    a = app()
+    app_name, icon = a["book"], a["icon"]
+    colour = 0x8E44AD if app_name == "PrizePicks" else 0xF1C40F
     legs = sorted((ev for _s, res, _e in sections for ev in res.picks), key=leg_value, reverse=True)
     name = "Cross-Sport" if len(sections) > 1 else SPORT_NAMES.get(sections[0][0], sections[0][0])
     be = break_even()
     priced = sum(len(res.evaluated) for _s, res, _e in sections)
-    intro = [f"PrizePicks lines scored with the props model ({priced} lines priced, goblins 🟢 "
-             f"and demons 😈 included). Every leg below has hit chance × payout multiplier of "
-             f"**{be:.1%}+**, the break-even for {min(power_table() or {2: 3})}-pick Power. Where "
-             "FanDuel/DraftKings post the same number, their no-vig price is blended in; "
-             "PrizePicks' own price isn't counted."]
+    intro = [f"{app_name} lines scored with the props model ({priced} lines priced, {a['easier']} 🟢 "
+             f"and {a['harder']} 😈 lines included). Every leg below has hit chance × payout multiplier of "
+             f"**{be:.1%}+**, the break-even for {min(power_table() or {2: 3})}-pick {entry_name('Power')}. "
+             f"Where FanDuel/DraftKings post the same number, their no-vig price is blended in; "
+             f"{app_name}'s own price isn't counted."]
     if not legs:
-        intro.append("**No PrizePicks legs cleared the break-even rate.** Lines may not be up yet, "
+        intro.append(f"**No {app_name} legs cleared the break-even rate.** Lines may not be up yet, "
                      "or they match the books closely tonight.")
-    header = discord.Embed(title=f"🟣 {title or name + ' PrizePicks'} · {_day(date)}",
-                           description="\n\n".join(intro), color=0x8E44AD if legs else GREY)
+    header = discord.Embed(title=f"{icon} {title or name + ' ' + app_name} · {_day(date)}",
+                           description="\n\n".join(intro), color=colour if legs else GREY)
     header.set_footer(text=odds_age_note(sections))
     out = [([header], None)]
     if legs:
         rows = []
         for i, ev in enumerate(legs[:25], 1):
-            side = "More" if ev.best.side == "A" else "Less"
             gap = line_gap(ev)
             gtxt = f" · books' line {gap:+.1f}" if gap is not None else ""
-            rows.append(f"**{i}.** {tier_icon(ev)}{ev.market.subject} {side} {ev.market.line:g} {ev.market.market}\n"
+            rows.append(f"**{i}.** {tier_icon(ev)}{ev.market.subject} {side_word(ev)} {ev.market.line:g} {ev.market.market}\n"
                         f"\u2003**{_pct(ev.best.blended)}** hit · {leg_mult(ev):.2g}x{gtxt}")
-        board = discord.Embed(title="✅ PrizePicks Legs", color=0x8E44AD, description=_clip("\n".join(rows), 4096))
-        board.set_footer(text="🟢 goblin · 😈 demon · x = payout multiplier · books' line = FanDuel/DraftKings "
-                              "main line minus PrizePicks' (+ = PrizePicks lower: easier More)")
+        board = discord.Embed(title=f"✅ {app_name} Legs", color=colour, description=_clip("\n".join(rows), 4096))
+        board.set_footer(text=f"🟢 {a['easier']} · 😈 {a['harder']} · x = payout multiplier · books' line = "
+                              f"FanDuel/DraftKings main line minus {app_name}'s (+ = {app_name} lower: "
+                              f"easier {a['over']})")
         out.append(([board], None))
         entries = best_entries(legs)
         entries.sort(key=lambda e: (e.size, e.kind))
         if entries:
-            e_embed = discord.Embed(title="🎟️ Best Entries", color=0x8E44AD)
+            e_embed = discord.Embed(title="🎟️ Best Entries", color=colour)
             for en in entries[:10]:
-                legs_txt = "\n".join(f"• {tier_icon(ev)}{ev.market.subject} "
-                                     f"{'More' if ev.best.side == 'A' else 'Less'} "
+                legs_txt = "\n".join(f"• {tier_icon(ev)}{ev.market.subject} {side_word(ev)} "
                                      f"{ev.market.line:g} {ev.market.market} · {_pct(ev.best.blended)}"
                                      for ev in en.legs)
                 pays = (f"pays {en.payouts[0]:.3g}x" if en.kind == "Power" else
                         "pays " + " / ".join(f"{m:.3g}x" for m in en.payouts) + " (all hit / 1 miss…)")
                 e_embed.add_field(
-                    name=f"🟣 {en.size}-pick {en.kind} · {_pct(en.p_all)} hit all · EV {en.ev:+.0f}%",
+                    name=f"{icon} {en.label} · {_pct(en.p_all)} hit all · EV {en.ev:+.0f}%",
                     value=_clip(f"{legs_txt}\n💵 {pays}", 1024), inline=False)
-            e_embed.set_footer(text="Payouts from LINEMAKER_PP_POWER / LINEMAKER_PP_FLEX: check them "
-                                    "against your app. Legs are treated as independent.")
+            e_embed.set_footer(text=f"Payouts from LINEMAKER_{a['env']}_POWER / LINEMAKER_{a['env']}_FLEX: check "
+                                    "them against your app (they differ by state). Legs are treated as independent.")
             out.append(([e_embed], {"pp": entries[:10]}))
     out.append(([_scoping([(s, r, ex["profiles"]) for s, r, ex in sections])], None))
     return out

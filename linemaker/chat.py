@@ -184,12 +184,12 @@ TOOLS = [
                          "description": "only when the user asks for one sportsbook's picks "
                                         "(e.g. best FanDuel picks): price and parlay at that "
                                         "book only"},
-                "kind": {"type": "string", "enum": ["props", "games", "live", "live_props", "pp"],
+                "kind": {"type": "string", "enum": ["props", "games", "live", "live_props", "pp", "ud"],
                          "description": "props (default); games = pre-game moneyline, spread, "
                                         "total; live = in-game moneyline/spread/total for games "
                                         "in progress (score + clock model); live_props = in-game "
                                         "player props (box score so far + projection for the rest); "
-                                        "pp = PrizePicks "
+                                        "pp = PrizePicks; ud = Underdog Fantasy pick'em "
                                         "lines with Power/Flex entries"},
                 "game_parlay_types": {"type": "array", "items": {"type": "string",
                                                                  "enum": ["moneyline", "spread"]},
@@ -367,9 +367,10 @@ class LinemakerChat:
                 from .pro import ml_parlay_config
                 cfg = ml_parlay_config(game_types)   # live: live_settings below adds the live gates
             freezer, tracker = (None if mode == "market" else Freezer(snaps, date)), None
-            if kind == "pp":
-                from .pp import pp_config
+            if kind in ("pp", "ud"):   # pick'em: PrizePicks or Underdog Fantasy
+                from .pp import APP, app_of, pp_config
                 from .tracking import Tracker
+                APP.set(app_of(kind))
                 cfg, freezer = pp_config(), None
                 if os.environ.get("LINEMAKER_TRACKING", "on").lower() not in ("off", "0", "false", "no"):
                     tracker = Tracker(os.path.join(os.environ.get("LINEMAKER_TRACKING_DIR", "tracking"), "pp"), date)
@@ -377,7 +378,7 @@ class LinemakerChat:
                 from .live import live_settings
                 cfg, tracker = live_settings(cfg, date)
                 freezer = None
-            book = args.get("book") if kind != "pp" else None
+            book = args.get("book") if kind not in ("pp", "ud") else None
             if book in ("FanDuel", "DraftKings"):
                 # Same odds pull (no extra credits), only that book's prices are bettable.
                 # Still tracked (one record per market, so no double counting): your bets
@@ -392,10 +393,11 @@ class LinemakerChat:
             if book:
                 for ev in res.evaluated:
                     ev.shown_books = res.books   # write-ups and odds views: that book only
-            if kind == "pp":
+            if kind in ("pp", "ud"):
                 from .pp import select_legs
                 res.picks = select_legs(res.picks, cfg.pp_floor)
-            if mode == "volume" and kind != "pp":
+                res.dfs_app = app_of(kind)
+            if mode == "volume" and kind not in ("pp", "ud"):
                 res.edge_legs = edge_legs(rows, date, kind, cfg, game_types,
                                           {ev.market.key: ev.sim for ev in res.evaluated})
             if mode in ("smart", "volume") and kind in ("props", "games"):
@@ -404,7 +406,7 @@ class LinemakerChat:
             res.focus = " vs ".join(focus) if focus else ""
             res.source_warning = warning
             res.projection_source = source
-            res.kind = "live" if kind == "live_props" else kind
+            res.kind = "live" if kind == "live_props" else "pp" if kind == "ud" else kind   # res.dfs_app: which pick'em app
             res.odds_age = slate_age_minutes(sport, date, kind)
             res.news_note = news_note(sport, date, {norm(ev.market.game) for ev in res.picks})
             res.scan_args = {"sport": sport, "kind": kind, "teams": focus, "book": book, "mode": mode,
@@ -529,7 +531,7 @@ class LinemakerChat:
                 quick = sports   # "best props for the knicks": that team's game only
         if quick:
             mode, kind = quick_mode(text), quick_kind(text)
-            book = None if kind == "pp" else quick_book(text)
+            book = None if kind in ("pp", "ud") else quick_book(text)
             refresh = bool(REFRESH_WORDS.search(text))
             log.info("quick path: %s %s %s%s, no AI model", ",".join(quick), mode, kind,
                      f" ({book} only)" if book else "")
@@ -752,17 +754,19 @@ def _slate_for(sport: str, date: str, kind: str, refresh: bool) -> tuple:
         return (hit[1], hit[2], hit[3], note if not hit[4] else f"{hit[4]} {note}", hit[5])
     from .live import run_best, run_games, run_live_games
     snaps = os.environ.get("LINEMAKER_SNAPSHOTS", "snapshots")
-    if kind == "pp":
-        # PrizePicks lines, joined to the props projections (bought or reused first).
-        from .pp import run_pp
+    if kind in ("pp", "ud"):
+        # Pick'em lines (PrizePicks or Underdog), joined to the props projections (bought or reused first).
+        from .pp import APPS, app_of, run_pp, use_app
+        a = APPS[app_of(kind)]
         props_rows = slate_for(sport, date, "props")[0]
-        rows, feed = run_pp(OddsAPI(bookmakers="prizepicks"), sport, date, _tz(), props_rows)
-        log.info("prizepicks %s: %d lines, %d matched to projections", sport, len(feed), len(rows))
+        with use_app(kind):
+            rows, feed = run_pp(OddsAPI(bookmakers=a["key"]), sport, date, _tz(), props_rows)
+        log.info("%s %s: %d lines, %d matched to projections", a["key"], sport, len(feed), len(rows))
         from .live import _log_link_sample
         _log_link_sample(feed)
         props = _SLATES.get((sport, date, "props"))
         _SLATES[key] = (time.time(), rows, props[2] if props else [], None, None,
-                        "PrizePicks lines vs the props model")
+                        f"{a['book']} lines vs the props model")
         save_slate_cache(sport, date, _SLATES[key], kind)
         return tuple(_SLATES[key][1:])
     if kind == "live_props":
@@ -1192,7 +1196,8 @@ def game_parlay_types(text: str) -> list:
         return []
     return (["moneyline"] if ML_ONLY.search(text) else []) + (["spread"] if SPREAD_WORDS.search(text) else [])
 REFRESH_WORDS = re.compile(r"\b(fresh|refresh|updated?|latest|new odds|re-?pull)\b", re.I)
-PP_WORDS = re.compile(r"\b(prize ?picks?|pp|pick ?em)\b", re.I)
+PP_WORDS = re.compile(r"\b(prize ?picks?|pp|pick ?em|under ?dog fantasy|ud)\b", re.I)
+UD_WORDS = re.compile(r"\b(under ?dog( fantasy)?|ud)\b", re.I)
 BOOK_WORDS = {"FanDuel": re.compile(r"\b(fan ?duel|fd)\b", re.I),
               "DraftKings": re.compile(r"\b(draft ?kings?|dk)\b", re.I)}
 LIVE_WORDS = re.compile(r"\b(live|in[- ]?game|in[- ]?play|right now|currently on)\b", re.I)
@@ -1249,6 +1254,9 @@ def quick_mode(text: str) -> str:
 
 def quick_kind(text: str) -> str:
     """games for moneyline/spread/total questions, props otherwise."""
+    if UD_WORDS.search(text) and (not GAME_LINE_WORDS.search(text)
+                                  or re.search(r"under ?dog fantasy|pick ?em", text, re.I)):
+        return "ud"   # Underdog Fantasy pick'em ("underdog ml" means plus-money moneylines)
     if PP_WORDS.search(text):
         return "pp"
     if LIVE_WORDS.search(text):
@@ -1341,7 +1349,8 @@ def quick_plays_request(text: str) -> Optional[list]:
                   and not QUESTION_WORDS.search(text))   # "ufc props", "nhl picks"
     boost = parse_boost(text) is not None   # "30% nfl boost": a ticket to put a profit boost on
     if not (PLAYS_INTENT.search(text) or GAMES_INTENT.search(text) or LIVE_INTENT.search(text)
-            or PP_WORDS.search(text) or quick_mode(text) in ("volume", "market") or league_ask or boost):
+            or PP_WORDS.search(text) or quick_kind(text) == "ud" or quick_mode(text) in ("volume", "market")
+            or league_ask or boost):
         return None
     if not boost and re.search(r"\b(i have|i think|i got|projection|my number|at \d)", text, re.I):
         return None   # the user supplied their own number: let the model read it

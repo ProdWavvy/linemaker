@@ -262,7 +262,7 @@ def model_embed(main: dict) -> Optional[discord.Embed]:
 def side_book_embed(records: dict) -> Optional[discord.Embed]:
     """Live reads and PrizePicks lines, briefly."""
     lines = []
-    for kind, title in (("live", "🔴 Live reads"), ("pp", "🟣 PrizePicks lines")):
+    for kind, title in (("live", "🔴 Live reads"), ("pp", "🟣 Pick'em lines (PrizePicks / Underdog)")):
         recs = [r for r in records[kind].values() if r.get("result")]
         if not recs:
             continue
@@ -279,7 +279,7 @@ def side_book_embed(records: dict) -> Optional[discord.Embed]:
         lines.append(line)
     if not lines:
         return None
-    return discord.Embed(title="📡 Live & PrizePicks", description="\n".join(lines), color=PURPLE)
+    return discord.Embed(title="📡 Live & Pick'em", description="\n".join(lines), color=PURPLE)
 
 
 def bets_embed(date: str, settled_now: int) -> Optional[discord.Embed]:
@@ -335,7 +335,7 @@ def segments_embed(records: dict) -> Optional[discord.Embed]:
     """One line per tracked segment (phase x league x props/game lines): each is tracked,
     weighed and calibrated on its own."""
     from .tracking import record_segment
-    phases = (("main", "Pre-game"), ("live", "Live"), ("pp", "PrizePicks"))
+    phases = (("main", "Pre-game"), ("live", "Live"), ("pp", "Pick'em"))
     lines = []
     for kind, phase in phases:
         groups = {}
@@ -445,7 +445,7 @@ def overview_embed(date: str, records: dict, newly: int) -> discord.Embed:
              + (f" (**{newly}** new this run)" if newly else ""),
              f"• Player props: **{props}** (from ESPN box scores)",
              f"• Game lines: **{len(graded) - props}** (moneylines, spreads, totals from final scores)"]
-    for kind, label in (("live", "Live reads"), ("pp", "PrizePicks lines")):
+    for kind, label in (("live", "Live reads"), ("pp", "Pick'em lines")):
         n = sum(1 for r in records[kind].values() if r.get("result"))
         if n:
             lines.append(f"• {label}: **{n}**")

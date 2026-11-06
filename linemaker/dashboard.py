@@ -19,7 +19,7 @@ ASKS = [
     ("🔴 Live", "`live props nba` · `live props parlay nfl` · `live ml parlay nba` · "
                "`live ml and spread parlay nfl`"),
     ("⚡ Edges & books", "`market edges` (every main league; the ⚡ button does the same) · `market edges nba` · "
-                       "`best fanduel props` · `dk parlay` · `prizepicks nba`"),
+                       "`best fanduel props` · `dk parlay` · `prizepicks nba` · `underdog nba`"),
     ("🔄 Fresh odds", "add **fresh** to any ask (`fresh nba props parlay`) to buy new odds instead of "
                      "reusing ones from the last few minutes"),
 ]

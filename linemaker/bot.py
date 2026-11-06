@@ -608,7 +608,7 @@ class PPLogModal(discord.ui.Modal):
     """Log a PrizePicks entry: just the amount (payouts come from the entry's table)."""
 
     def __init__(self, entry):
-        super().__init__(title=f"Log {entry.size}-pick {entry.kind}", timeout=600)
+        super().__init__(title=f"Log {getattr(entry, 'label', f'{entry.size}-pick {entry.kind}')}"[:45], timeout=600)
         self.entry = entry
         self.stake = discord.ui.TextInput(label="Entry amount ($)", placeholder="5", max_length=10)
         self.add_item(self.stake)
@@ -624,14 +624,16 @@ class PPLogModal(discord.ui.Modal):
             await interaction.response.send_message("Enter an amount like 5.", ephemeral=True)
             return
         e = self.entry
-        from .pp import leg_mult
-        legs = [dict(leg_from_eval(ev, book="PrizePicks"), folder="pp", pp_mult=leg_mult(ev))
-                for ev in e.legs]
-        add_bet(legs, decimal_to_american(e.payouts[0]), stake, "PrizePicks", str(interaction.user),
+        from .pp import leg_mult, use_app
+        app_book = getattr(e, "book", "PrizePicks")
+        with use_app(app_book):
+            legs = [dict(leg_from_eval(ev, book=app_book), folder="pp", pp_mult=leg_mult(ev))
+                    for ev in e.legs]
+        add_bet(legs, decimal_to_american(e.payouts[0]), stake, app_book, str(interaction.user),
                 kind="pp", pp_kind=e.kind)
         await interaction.response.send_message(
-            f"✅ Logged **${stake:,.2f}** {e.size}-pick {e.kind}. It settles after grading; "
-            "`/record` shows your results.", ephemeral=True)
+            f"✅ Logged **${stake:,.2f}** {app_book} {getattr(e, 'label', f'{e.size}-pick {e.kind}')}. "
+            "It settles after grading; `/record` shows your results.", ephemeral=True)
 
 
 def _remember(detail: dict) -> str:
@@ -842,13 +844,17 @@ class CompactView(discord.ui.View):
             from .pp import board_link, entry_link
             key = _remember(detail)
             links = [(e, entry_link(e)) for e in detail["pp"]]
+            first = detail["pp"][0] if detail["pp"] else None
+            app_book = getattr(first, "book", "PrizePicks")
+            icon = "🐶" if app_book == "Underdog" else "🟣"
             if not any(u for _e, u in links):
-                self.add_item(discord.ui.Button(label="Open PrizePicks", url=board_link(), row=1, emoji="🟣"))
+                self.add_item(discord.ui.Button(label=f"Open {app_book}", url=board_link(app_book), row=1, emoji=icon))
             for i, (e, url) in enumerate(links[:5]):
+                lab = getattr(e, "label", f"{e.size}-pick {e.kind}")
                 if url and len(url) <= 512 and sum(1 for c in self.children if c.row == 1) < 5:
-                    self.add_item(discord.ui.Button(label=f"{e.size}-pick {e.kind}", url=url, row=1, emoji="🟣"))
+                    self.add_item(discord.ui.Button(label=lab, url=url, row=1, emoji=icon))
                 if sum(1 for c in self.children if c.row == 2) < 5:
-                    self.add_item(discord.ui.Button(label=f"Log {e.size}-pick {e.kind}", emoji="📝", row=2,
+                    self.add_item(discord.ui.Button(label=f"Log {lab}", emoji="📝", row=2,
                                                     style=discord.ButtonStyle.success,
                                                     custom_id=f"lm:pplog:{key}:{i}"))
         pool = [d for _e, d in picks[:25]] or list(legs or [])[:25]
@@ -1758,7 +1764,8 @@ FP_CHOICES = [app_commands.Choice(name=k, value=k)
 KIND_CHOICES = [app_commands.Choice(name="Player props", value="props"),
                 app_commands.Choice(name="Moneylines, spreads, totals", value="games"),
                 app_commands.Choice(name="Live in-game lines", value="live"),
-                app_commands.Choice(name="PrizePicks", value="pp")]
+                app_commands.Choice(name="PrizePicks", value="pp"),
+                app_commands.Choice(name="Underdog Fantasy", value="ud")]
 
 
 ARMED_NOW = []   # leagues whose pre-tip scans the last /picks switched on
@@ -1781,21 +1788,24 @@ def build_auto(sports: list, date: str, cfg: ProConfig, kind: str = "props",
             from .live import live_settings
             cfg, tracker = live_settings(ProConfig(), date)
             freezer = None
-        if kind == "pp":
-            from .pp import pp_config
+        dfs = kind in ("pp", "ud")
+        if dfs:
+            from .pp import APP, app_of, pp_config
             from .tracking import Tracker
+            APP.set(app_of(kind))
             cfg, freezer = pp_config(), None
             tracker = Tracker(os.path.join(TRACKING, "pp"), date)
         res = run_pro(rows_to_markets(rows), date, cfg, freezer, tracker)
-        if kind == "pp":
+        if dfs:
             from .pp import select_legs
             res.picks = select_legs(res.picks, cfg.pp_floor)
+            res.dfs_app = app_of(kind)
         res.slate, res.source_warning, res.projection_source = slate, warning, source
-        res.kind = kind
+        res.kind = "pp" if dfs else kind
         from .chat import slate_age_minutes
         res.odds_age = slate_age_minutes(sport, date, kind)
         sections.append((sport, res, enrich(res, sport, date)))
-    if kind == "pp":
+    if kind in ("pp", "ud"):
         from .scan_format import pp_messages
         return pp_messages(sections, date), None
     return scan_messages(sections, date, cfg), None
@@ -2159,7 +2169,7 @@ def cards_for(results: list) -> list:
 def card_keys(results: list) -> tuple:
     """(market-edges key, fresh-odds key) for a card's buttons: the scans behind it."""
     scans = [r.scan_args for _s, r, _ex in results if getattr(r, "scan_args", None)]
-    edges = [a for a in scans if a["mode"] != "market" and a["kind"] != "pp"]
+    edges = [a for a in scans if a["mode"] != "market" and a["kind"] not in ("pp", "ud")]
     return (_remember({"market_scans": edges}) if edges else None,
             _remember({"fresh_scans": scans}) if scans else None)
 

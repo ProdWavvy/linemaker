@@ -26,15 +26,61 @@ Check them against your PrizePicks app.
 
 Costs about 5 credits per game (one bookmaker, main markets), on demand only.
 """
+import contextvars
 import itertools
 import math
 import os
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from typing import Optional
 
 from .oddsapi import norm
 
-BOOK = "PrizePicks"
+# ---- pick'em apps -----------------------------------------------------------------------
+# PrizePicks and Underdog Fantasy work the same way (a fixed payout table, no odds), so one
+# engine serves both: APP says which app's lines, payout tables, names and links are in use.
+# Underdog's tables (LINEMAKER_UD_POWER / LINEMAKER_UD_FLEX) differ by state: check them
+# against your Underdog app.
+APPS = {
+    "prizepicks": {"book": "PrizePicks", "key": "prizepicks", "env": "PP", "kind": "pp",
+                   "power": "2:3,3:5,4:10,5:20,6:37.5", "flex": "3:2.25/1.25,4:5/1.5,5:10/2/0.4,6:25/2/0.4",
+                   "names": {"Power": "Power", "Flex": "Flex"}, "home": "https://app.prizepicks.com/",
+                   "easier": "goblin", "harder": "demon", "icon": "🟣", "over": "More", "under": "Less"},
+    "underdog": {"book": "Underdog", "key": "underdog", "env": "UD", "kind": "ud",
+                 "power": "2:3,3:6,4:10,5:20,6:37.5", "flex": "3:3/1,4:6/1.5,5:10/2.5,6:25/2.6",
+                 "names": {"Power": "Standard", "Flex": "Flex"}, "home": "https://underdogfantasy.com/pick-em",
+                 "easier": "discounted", "harder": "boosted", "icon": "🐶", "over": "Higher", "under": "Lower"},
+}
+APP = contextvars.ContextVar("linemaker_pickem_app", default="prizepicks")
+BOOK = "PrizePicks"   # kept for older imports; use book() for the app in use
+
+
+def app_of(kind_or_book: str) -> str:
+    """"prizepicks" / "underdog" from a scan kind ("pp" / "ud") or a book name."""
+    k = (kind_or_book or "").lower()
+    return "underdog" if k in ("ud", "underdog") else "prizepicks"
+
+
+def app() -> dict:
+    return APPS[APP.get()]
+
+
+def book() -> str:
+    return app()["book"]
+
+
+def entry_name(kind: str) -> str:
+    """Power / Flex as the app calls them (Underdog's all-correct entry is "Standard")."""
+    return app()["names"].get(kind, kind)
+
+
+@contextmanager
+def use_app(name: str):
+    tok = APP.set(app_of(name))
+    try:
+        yield
+    finally:
+        APP.reset(tok)
 
 
 def _env(name: str, default: str) -> str:
@@ -44,7 +90,8 @@ def _env(name: str, default: str) -> str:
 def power_table() -> dict:
     """picks -> payout multiplier when every pick hits."""
     out = {}
-    for part in _env("LINEMAKER_PP_POWER", "2:3,3:5,4:10,5:20,6:37.5").split(","):
+    a = app()
+    for part in _env(f"LINEMAKER_{a['env']}_POWER", a["power"]).split(","):
         k, _, v = part.partition(":")
         try:
             out[int(k)] = float(v)
@@ -56,7 +103,8 @@ def power_table() -> dict:
 def flex_table() -> dict:
     """picks -> [payout with all hits, all-1, all-2, ...]."""
     out = {}
-    for part in _env("LINEMAKER_PP_FLEX", "3:2.25/1.25,4:5/1.5,5:10/2/0.4,6:25/2/0.4").split(","):
+    a = app()
+    for part in _env(f"LINEMAKER_{a['env']}_FLEX", a["flex"]).split(","):
         k, _, v = part.partition(":")
         try:
             out[int(k)] = [float(x) for x in v.split("/") if x]
@@ -88,12 +136,15 @@ def leg_value(ev) -> float:
 
 
 def tier(ev) -> str:
+    """goblin / demon (PrizePicks) or discounted / boosted (Underdog): an easier line that
+    pays less, or a harder one that pays more."""
     m = leg_mult(ev)
-    return "goblin" if m < 0.999 else "demon" if m > 1.001 else ""
+    return app()["easier"] if m < 0.999 else app()["harder"] if m > 1.001 else ""
 
 
 def tier_icon(ev) -> str:
-    return {"goblin": "🟢 ", "demon": "😈 "}.get(tier(ev), "")
+    m = leg_mult(ev)
+    return "🟢 " if m < 0.999 else "😈 " if m > 1.001 else ""
 
 
 def break_even() -> float:
@@ -124,6 +175,16 @@ class Entry:
     payouts: list                 # [all hit, all-1, ...] multipliers
     p_all: float = 0.0
     expected: float = 0.0         # expected return per $1 staked (1.0 = break even)
+    app: str = "prizepicks"       # which pick'em app (APPS key)
+
+    @property
+    def label(self) -> str:
+        """"3-pick Power" / "3-pick Standard" as the app calls it."""
+        return f"{self.size}-pick {APPS[self.app]['names'].get(self.kind, self.kind)}"
+
+    @property
+    def book(self) -> str:
+        return APPS[self.app]["book"]
 
     @property
     def ev(self) -> float:
@@ -144,7 +205,7 @@ def price_entry(kind: str, legs: list) -> Optional[Entry]:
     payouts = [m * scale for m in payouts]
     dist = hits_distribution([ev.best.blended for ev in legs])
     expected = sum(payouts[i] * dist[n - i] for i in range(len(payouts)) if n - i >= 0)
-    return Entry(kind=kind, legs=list(legs), payouts=payouts, p_all=dist[n], expected=expected)
+    return Entry(kind=kind, legs=list(legs), payouts=payouts, p_all=dist[n], expected=expected, app=APP.get())
 
 
 def _games_ok(legs: list) -> bool:
@@ -177,7 +238,7 @@ def pp_config():
     gap (there are no odds), a hit-chance floor at the break-even rate."""
     from .pro import ProConfig
     floor = os.environ.get("LINEMAKER_PP_MIN_PROB", "").strip()
-    cfg = ProConfig(bet_books=(BOOK,), rank_by="prob", require_model_edge=False, min_gap=-1.0,
+    cfg = ProConfig(bet_books=(book(),), rank_by="prob", require_model_edge=False, min_gap=-1.0,
                     max_gap=None, min_ev=None, min_odds=None, max_odds=None, min_prob=None,
                     max_picks=10000, one_per_stat=False, over_min_gap=None, sport_settings=False, calibrate=True,
                     max_per_player=0)   # every line priced: select_legs picks per player-stat
@@ -232,12 +293,17 @@ def book_lines(slate_rows: list) -> dict:
 
 
 def _pp_only(feed: list) -> list:
-    out = []
+    """Only the pick'em app's own lines (its key or its name, e.g. "underdog" / "Underdog")."""
+    out, a = [], app()
+    key = a["key"]
+
+    def ours(b: str) -> bool:   # "Underdog Fantasy" / "underdog" / "PrizePicks"
+        return "".join(ch for ch in norm(b) if ch.isalnum()).startswith(key)
     for fm in feed:
-        books = [(BOOK, p) for b, p in fm.books if norm(b) == "prizepicks"]
+        books = [(a["book"], p) for b, p in fm.books if ours(b)]
         if books:
             fm.books = books
-            fm.multipliers = {BOOK: v for b, v in fm.multipliers.items() if norm(b) == "prizepicks"}
+            fm.multipliers = {a["book"]: v for b, v in fm.multipliers.items() if ours(b)}
             out.append(fm)
     return out
 
@@ -254,20 +320,20 @@ def run_pp(odds, sport: str, date: str, tz, slate_rows: list):
     for fm in feed:
         fm.pp_mult = 1.0
         standard[(norm(fm.subject), fm.market.lower())] = fm.line
-    goblins, demons = _on("LINEMAKER_PP_GOBLINS"), _on("LINEMAKER_PP_DEMONS")
+    goblins, demons = _on(f"LINEMAKER_{app()['env']}_GOBLINS"), _on(f"LINEMAKER_{app()['env']}_DEMONS")
     if (goblins or demons) and ALT_MARKETS.get(family):
         alts = _pp_only(fetch_slate(odds, sport, date, tz, props=True, game_lines=False,
                                     prop_markets=list(ALT_MARKETS[family])))
         for fm in alts:
-            m = (fm.multipliers.get(BOOK) or [None])[0]
+            m = (fm.multipliers.get(book()) or [None])[0]
             base = standard.get((norm(fm.subject), fm.market.lower()))
             easier = (m < 1) if m is not None else (base is not None and fm.line < base)
             if m is None:   # no multiplier from the API: use the .env fallback, or skip
-                m = _fallback("LINEMAKER_PP_GOBLIN_MULT" if easier else "LINEMAKER_PP_DEMON_MULT")
+                m = _fallback(f"LINEMAKER_{app()['env']}_GOBLIN_MULT" if easier else f"LINEMAKER_{app()['env']}_DEMON_MULT")
             if m is None or (easier and not goblins) or (not easier and not demons):
                 continue
             fm.pp_mult = m
-            fm.books = [(BOOK, [p[0], None]) for _b, p in fm.books]   # More only
+            fm.books = [(book(), [p[0], None]) for _b, p in fm.books]   # More only
             feed.append(fm)
     index = book_lines(slate_rows)
     rows, _missing = merge(feed, proj_rows(slate_rows))
@@ -305,8 +371,10 @@ def entry_link(entry: Entry) -> Optional[str]:
     import urllib.parse
     from .betlinks import fill_state, leg
     ids, first = [], None
+    if getattr(entry, "app", "prizepicks") != "prizepicks":   # Underdog: no shareable multi-pick link
+        return None
     for ev in entry.legs:
-        e = leg(ev.market, ev.best.side, BOOK)
+        e = leg(ev.market, ev.best.side, book())
         if not e:
             return None
         url = fill_state(e.get("link") or "")
@@ -323,8 +391,13 @@ def entry_link(entry: Entry) -> Optional[str]:
     return f"{base}?projections={','.join(ids)}"
 
 
-def board_link() -> str:
-    return "https://app.prizepicks.com/"
+def board_link(name: str = "") -> str:
+    return APPS[app_of(name)]["home"] if name else app()["home"]
+
+
+def side_word(ev) -> str:
+    """More / Less (PrizePicks) or Higher / Lower (Underdog)."""
+    return app()["over"] if ev.best.side == "A" else app()["under"]
 
 
 def settle_entry(bet: dict, outcomes: list) -> Optional[tuple]:
@@ -337,6 +410,11 @@ def settle_entry(bet: dict, outcomes: list) -> Optional[tuple]:
     stake = bet["stake"]
     if n < 2:
         return "push", 0.0
+    with use_app(bet.get("book") or "PrizePicks"):   # that app's payout tables
+        return _settle(bet, live, n, hits, stake)
+
+
+def _settle(bet: dict, live: list, n: int, hits: int, stake: float) -> tuple:
     scale = math.prod(float(leg.get("pp_mult") or 1.0) for _o, leg in live)
     if bet.get("pp_kind") == "Flex":
         table = flex_table().get(n) or []
