@@ -2546,7 +2546,8 @@ async def books_cmd(interaction: discord.Interaction, days: Optional[int] = 14):
     try:
         from .book_report import book_lines
         from .tracking import load_records
-        recs = await asyncio.to_thread(load_records, TRACKING, days or None, today())
+        recs = await asyncio.to_thread(lambda: load_records(TRACKING, days or None, today(),
+                                                            graded_only=True, last_prices=True))
         lines = await asyncio.to_thread(book_lines, recs)
         embed = discord.Embed(title=f"📚 Sharpest Books · last {days} days", color=0x3498DB,
                               description="\n".join(lines)[:4000])
@@ -2563,7 +2564,8 @@ async def calibrate_cmd(interaction: discord.Interaction, days: Optional[int] = 
     await interaction.response.defer(thinking=True)
     try:
         from .tracking import calibrate, load_records
-        report = await asyncio.to_thread(lambda: calibrate(load_records(TRACKING, days, today())))
+        report = await asyncio.to_thread(lambda: calibrate(load_records(TRACKING, days, today(),
+                                                                        graded_only=True, lean=True)))
         body = report.replace("# 🧪 Linemaker Calibration\n\n", "")
         embed = discord.Embed(title="🧪 Linemaker Calibration", color=0x9B59B6,
                               description=body[:4000])

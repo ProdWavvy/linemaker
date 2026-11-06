@@ -290,7 +290,8 @@ def _apply_results(path: str, results: list) -> int:
 
 
 def load_records(directory: str, days: Optional[int] = None, today: Optional[str] = None,
-                 segments: Optional[set] = None, graded_only: bool = False, lean: bool = False) -> list:
+                 segments: Optional[set] = None, graded_only: bool = False, lean: bool = False,
+                 last_prices: bool = False) -> list:
     """Every record of one phase (directory: tracking, tracking/live or tracking/pp), each
     tagged with its "segment" (e.g. NBA-props); segments= keeps only those.
     graded_only: just records with a result (all the tuner can use). lean: picks keep their
@@ -316,7 +317,11 @@ def load_records(directory: str, days: Optional[int] = None, today: Optional[str
             for key, rec in load_json(p).items():
                 if graded_only and not rec.get("result"):
                     continue
-                if lean:   # only what tuning and reports read
+                if last_prices:   # /books: the last price read and the result are all it scores
+                    rec = {"result": rec.get("result"), "inputs": {"bet_type": (rec.get("inputs") or {}).get("bet_type")},
+                           "history": (rec.get("history") or [])[-1:], "sport": rec.get("sport"),
+                           "market": rec.get("market")}
+                elif lean:   # only what tuning and reports read
                     hist = rec.get("history") or []
                     rec["history"] = (hist[:1] + hist[-2:] if len(hist) > 3 else hist) if rec.get("pick_time") else []
                     for k in ("books", "projection_steps", "sim"):

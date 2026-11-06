@@ -310,3 +310,24 @@ class UnderdogTest(unittest.TestCase):
         with pp.use_app("ud"):
             out = pp._pp_only([fm])
         self.assertEqual([b for b, _p in out[0].books], ["Underdog"])
+
+
+class BooksLoadTest(unittest.TestCase):
+    def test_last_prices_only(self):
+        import json, os, tempfile
+        from linemaker.tracking import load_records
+        from linemaker.book_report import book_scores
+        with tempfile.TemporaryDirectory() as d:
+            os.makedirs(os.path.join(d, "NBA-props"))
+            hist = [{"t": str(i), "A": {"FanDuel": -110, "DraftKings": -120}, "B": {"FanDuel": -110, "DraftKings": 100}}
+                    for i in range(30)]
+            recs = {"k1": {"history": hist, "result": {"winner": "A"}, "inputs": {"bet_type": "prop"},
+                           "sides": [{"side": "A"}], "books": {"x": 1}},
+                    "k2": {"history": hist, "inputs": {"bet_type": "prop"}}}
+            with open(os.path.join(d, "NBA-props", "2026-11-05.json"), "w") as f:
+                json.dump(recs, f)
+            got = load_records(d, 14, "2026-11-06", graded_only=True, last_prices=True)
+            self.assertEqual(len(got), 1)
+            self.assertEqual(len(got[0]["history"]), 1)
+            self.assertNotIn("sides", got[0])
+            self.assertIn("FanDuel", book_scores(got)["props"])
