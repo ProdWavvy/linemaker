@@ -68,14 +68,6 @@ def parse_box(summary: dict) -> dict:
     return players
 
 
-def _first(stats: dict, *keys) -> Optional[float]:
-    """First key present; a player missing from a table (no carries) counts as 0."""
-    for k in keys:
-        if stats.get(k) is not None:
-            return stats[k]
-    return None
-
-
 def _sum(stats: dict, *keys) -> Optional[float]:
     vals = [stats.get(k) for k in keys]
     if all(v is None for v in vals):

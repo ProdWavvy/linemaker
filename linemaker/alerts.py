@@ -22,7 +22,6 @@ from .oddsapi import norm
 
 log = logging.getLogger("linemaker.alerts")
 NEWS_SPORTS = ("NBA", "WNBA", "NFL")
-GOALIE_SPORTS = ("NHL",)
 
 
 def _env_int(name: str, default: Optional[int]) -> Optional[int]:

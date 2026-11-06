@@ -331,3 +331,45 @@ class BooksLoadTest(unittest.TestCase):
             self.assertEqual(len(got[0]["history"]), 1)
             self.assertNotIn("sides", got[0])
             self.assertIn("FanDuel", book_scores(got)["props"])
+
+
+class AuditRulesTest(unittest.TestCase):
+    def test_tune_band(self):
+        from linemaker import autotune
+        with mock.patch.dict("os.environ", {"LINEMAKER_TUNE_BAND": "0.2-0.8"}):
+            self.assertTrue(autotune.in_band({"market_prob_a": 0.55}))
+            self.assertFalse(autotune.in_band({"market_prob_a": 0.05}))   # a deep alt rung
+        with mock.patch.dict("os.environ", {"LINEMAKER_TUNE_BAND": "off"}):
+            self.assertTrue(autotune.in_band({"market_prob_a": 0.05}))
+
+    def test_side_pause_and_its_shadow_record(self):
+        from linemaker import autotune
+        with mock.patch.dict("os.environ", {"LINEMAKER_PAUSED_MARKETS": "NFL overs"}), \
+                mock.patch.object(autotune, "load_weights", return_value={}):
+            self.assertTrue(autotune.side_paused("NFL", "A"))
+            self.assertIsNone(autotune.side_paused("NFL", "B"))   # unders still picked
+            self.assertIsNone(autotune.side_paused("NBA", "A"))
+            self.assertIsNone(autotune.side_paused("NFL", "A", "total"))
+        over = {"sport": "NFL", "inputs": {"bet_type": "prop"}, "shadow_pick": {"side": "A"}}
+        under = dict(over, shadow_pick={"side": "B"})
+        self.assertTrue(autotune._pause_matches(over, "nfl overs"))
+        self.assertFalse(autotune._pause_matches(under, "nfl overs"))
+
+    def test_overs_capped_per_game(self):
+        from types import SimpleNamespace as NS
+        from linemaker import pro
+
+        def ev(game, player, side):
+            return NS(market=NS(key=f"{game}|{player}", game_id=game, bet_type="prop"),
+                      best=NS(side=side, label=f"{player} {side}"))
+        picks = [ev("g1", "a", "A"), ev("g1", "b", "A"), ev("g1", "c", "A"), ev("g1", "d", "B"), ev("g2", "e", "A")]
+        res = NS(picks=picks, passes=[])
+        with mock.patch.dict("os.environ", {"LINEMAKER_MAX_OVERS_PER_GAME": "2"}):
+            kept = pro._cap_overs(res)
+            self.assertEqual([e.best.label for e in kept], ["a A", "b A", "d B", "e A"])
+            tracker = NS(records={"g2|old": {"picked": True, "pick_side": "A", "game_id": "g2",
+                                              "inputs": {"bet_type": "prop"}},
+                                  "g2|old2": {"picked": True, "pick_side": "A", "game_id": "g2",
+                                              "inputs": {"bet_type": "prop"}}})
+            kept = pro._cap_overs(NS(picks=picks, passes=[]), tracker)
+            self.assertNotIn("e A", [e.best.label for e in kept])   # g2 already has 2 overs today

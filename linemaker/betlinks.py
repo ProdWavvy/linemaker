@@ -19,7 +19,6 @@ from typing import Optional
 
 FD_BASE = "https://sportsbook.fanduel.com/addToBetslip"
 DK_BASE = "https://sportsbook.draftkings.com/event/{event}"
-DISCORD_URL_LIMIT = 512
 
 
 def _key(name: str) -> str:

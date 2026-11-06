@@ -64,10 +64,6 @@ def provider() -> str:
     return "gemini" if os.environ.get("GEMINI_API_KEY") else "claude"
 
 
-def chat_configured() -> bool:
-    return bool(os.environ.get("GEMINI_API_KEY") or os.environ.get("ANTHROPIC_API_KEY"))
-
-
 SYSTEM = """You are Linemaker, a sports betting analysis assistant in a Discord server. You \
 answer in plain English and use your tools for every number.
 

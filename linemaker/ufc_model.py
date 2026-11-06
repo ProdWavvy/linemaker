@@ -363,22 +363,6 @@ def fighter_props(date: str) -> list:
     return out
 
 
-def fighter_prop_rows(date: str) -> list:
-    """Projection rows for the engine (joined to a fighter-props feed when one is connected)."""
-    rows = []
-    for f in fighter_props(date):
-        dist = f"ufccount|{f['early']:.4f}|{f['rounds']}"
-        for market, key in (("significant strikes", "sig_strikes"), ("takedowns", "takedowns")):
-            if f[key] is not None:
-                rows.append({"sport": "UFC", "subject": f["fighter"], "market": market, "dist": dist,
-                             "mean": f"{f[key]:.3f}", "stdev": "1",
-                             "notes": f"UFC model: {f['minutes']:.1f} expected minutes"})
-        rows.append({"sport": "UFC", "subject": f["fighter"], "market": "fight time", "dist": "ufcminutes",
-                     "mean": f"{f['early']:.4f}", "stdev": str(f["rounds"]),
-                     "notes": f"UFC model: {f['early']:.0%} chance it ends early"})
-    return rows
-
-
 def _stat(stats: dict, uid: str, category: str, label: str) -> Optional[float]:
     for c in stats.get("categories", []):
         if c.get("displayName", "").lower() != category:

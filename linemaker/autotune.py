@@ -91,6 +91,27 @@ def _graded(records: list) -> list:
             and r.get("inputs", {}).get("bet_type") != "1x2"]
 
 
+def tune_band() -> tuple:
+    """(low, high) market chance a record must sit in to count in the weight fits
+    (LINEMAKER_TUNE_BAND, default 0.2-0.8). Alt-line ladders put 10-15 lines on every
+    player-stat, mostly deep plus-money or heavy-favorite rungs the bot never bets; fitting on
+    them tuned the blend for prices nobody plays. "off" = every record."""
+    raw = os.environ.get("LINEMAKER_TUNE_BAND", "0.2-0.8").strip().lower()
+    if raw in ("off", "no", "0", "false", ""):
+        return 0.0, 1.0
+    try:
+        lo, hi = (float(x) for x in raw.replace(",", "-").split("-")[:2])
+        return min(lo, hi), max(lo, hi)
+    except ValueError:
+        return 0.2, 0.8
+
+
+def in_band(r: dict, band: Optional[tuple] = None) -> bool:
+    lo, hi = band or tune_band()
+    mk = r.get("market_prob_a")
+    return mk is not None and lo <= mk <= hi
+
+
 def _rows(recs: list) -> list:
     return [(r["model_prob_a"], r["market_prob_a"], 1.0 if r["result"]["winner"] == "A" else 0.0)
             for r in recs]
@@ -136,7 +157,8 @@ def tune(records: list, current: dict, priors: bool = True) -> tuple:
     """(new weights dict, [change descriptions]) from graded records of one segment.
     priors: sports start from their own start weight (UFC 0.35, LINEMAKER_<SPORT>_MODEL_WEIGHT);
     off for live, where every league starts from the live weight."""
-    graded = _graded(records)
+    band = tune_band()
+    graded = [r for r in _graded(records) if in_band(r, band)]   # the prices picks are made at
     min_total = int(_env("LINEMAKER_AUTOTUNE_MIN", 200))
     max_step = _env("LINEMAKER_AUTOTUNE_STEP", 0.10)
     new = {"model_weight": current.get("model_weight", _env("LINEMAKER_MODEL_WEIGHT", 0.5)),
@@ -363,12 +385,36 @@ def pruned(sport: str, market: str, phase: str = "pre", bet_type: str = "prop") 
     return segment(phase, bet_type).get("pruned", {}).get(f"{sport} {market}")
 
 
+SIDE_WORDS = {"overs": "A", "unders": "B"}
+
+
+def side_paused(sport: str, side: str, bet_type: str = "prop") -> Optional[str]:
+    """A whole side of a league's props you paused, e.g. "NFL overs" in LINEMAKER_PAUSED_MARKETS
+    (11/5: NFL overs 29-34, -13.8u over 63 picks, while NFL unders broke even). Its would-be
+    picks are graded as shadows and it comes back on its own once they're in profit."""
+    if bet_type != "prop":
+        return None
+    word = "overs" if side == "A" else "unders"
+    name = f"{sport} {word}".lower()
+    if name in manual_pauses() and name not in (load_weights().get("manual_lifted") or {}):
+        return f"{sport} {word} paused by you"
+    return None
+
+
+def _pause_matches(r: dict, name: str) -> bool:
+    sport, _, rest = name.partition(" ")
+    if rest in SIDE_WORDS:
+        return ((r.get("sport") or "").lower() == sport and (r.get("inputs") or {}).get("bet_type") == "prop"
+                and (r.get("shadow_pick") or {}).get("side") == SIDE_WORDS[rest])
+    return f"{r.get('sport')} {r.get('market')}".lower() == name
+
+
 def shadow_record(records: list, name: str) -> dict:
-    """The shadow picks' record (a paused market's would-be picks) for "NBA reb + ast"."""
+    """The shadow picks' record (a paused market's would-be picks) for "NBA reb + ast" or a
+    paused side such as "NFL overs"."""
     from .reports import pick_record
     return pick_record([_as_pick(r) for r in records if r.get("result") and r.get("shadow_pick")
-                        and r["shadow_pick"].get("odds") is not None
-                        and f"{r.get('sport')} {r.get('market')}".lower() == name])
+                        and r["shadow_pick"].get("odds") is not None and _pause_matches(r, name)])
 
 
 def tune_manual_pauses(records: list, current: dict) -> tuple:
@@ -507,6 +553,9 @@ def tune_calibration(records: list) -> tuple:
         res = r.get("result") or {}
         a = next((s for s in r.get("sides", []) if s.get("side") == "A"), None)
         if not a or res.get("winner") not in ("A", "B") or len(r.get("sides", [])) != 2:
+            continue
+        mk = r.get("market_prob_a")
+        if mk is not None and not 0.08 <= mk <= 0.92:   # deep alt rungs: never a leg or a pick
             continue
         by_sport.setdefault(r.get("sport"), []).append(
             (r.get("game_id"), (r.get("game_id"), r.get("subject"), r.get("market")),

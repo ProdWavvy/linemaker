@@ -1413,7 +1413,7 @@ def _rescan(key: str, field: str, mode: Optional[str] = None, refresh: bool = Fa
                                                          if mode != "market" else "No market edges found right now."))
                 return
             mkey, fkey = card_keys(results)
-            await _send_card(interaction.followup.send, cards_for(results), text=note,
+            await _send_card(interaction.followup.send, await asyncio.to_thread(cards_for, results), text=note,
                              market_key=mkey, fresh_key=fkey)
         except Exception as e:
             await _report_error(interaction, e)
@@ -2093,7 +2093,7 @@ class LinemakerBot(discord.Client):
             return
         chunks = split_for_discord(turn.text)
         files = [discord.File(io.BytesIO(md.encode()), filename=name) for name, md in turn.files]
-        cards = cards_for(turn.results)
+        cards = await asyncio.to_thread(cards_for, turn.results)   # parlay searches: off the main loop
         none = discord.AllowedMentions.none()
         # A short reply (the "I'll re-check before tip" note) rides on the card itself.
         inline = cards and not files and card_style() == "compact" and len(chunks) <= 1
@@ -2124,7 +2124,7 @@ async def _thread_send(dest, turn):
         return
     chunks = split_for_discord(turn.text)
     files = [discord.File(io.BytesIO(md.encode()), filename=name) for name, md in turn.files]
-    cards = cards_for(turn.results)
+    cards = await asyncio.to_thread(cards_for, turn.results)
     inline = cards and not files and card_style() == "compact" and len(chunks) <= 1
     if not inline:
         for i, chunk in enumerate(chunks):
@@ -2796,21 +2796,6 @@ async def _warm_up():
 async def budget_loop():
     """Just after midnight: today's credit budget from every key's balance (free check)."""
     await _refresh_budget()
-
-
-async def _autotune_today():
-    """Re-fit once a day at startup too (no credits: it reads graded tracking only), so a new
-    rule (pauses, pick corrections) applies right after an update, not at the next grade."""
-    try:
-        from .alerts import load_state, save_state
-        from .autotune import autotune_on, run_autotune
-        if not autotune_on() or load_state("autotune_startup.json", "") == today():
-            return
-        lines = await asyncio.to_thread(run_autotune, TRACKING, today())
-        save_state("autotune_startup.json", today())
-        log.info("startup re-fit: %s", "; ".join(lines)[:500])
-    except Exception as e:
-        log.warning("startup re-fit: %s", e)
 
 
 async def _catch_up_bets():

@@ -244,12 +244,6 @@ def _board(picks: list, profiles: dict) -> str:
                     f"vs {_pct(s.best_implied)} · gap **{_pts(s.gap)}**{proj}{why}")
     return "\n".join(rows)
 
-def _short_reason(ev, prof) -> str:
-    if prof and prof.season and prof.season.games >= MIN_SEASON_GAMES:
-        return (f"{_pct(prof.season.rate)} season hit rate over {prof.season.games} games, "
-                f"proj {ev.market.mean:.2f}")
-    return f"proj {ev.market.mean:.2f} vs line {ev.market.line:g}"
-
 
 def _norm_sections(sections: list) -> list:
     """Accept (sport, result, extras) or (sport, result, profiles) and return the first form."""

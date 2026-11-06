@@ -664,6 +664,39 @@ def evaluate(m: ProMarket, cfg: ProConfig, sim: Optional[SimResult] = None) -> O
     return ev
 
 
+def max_overs_per_game() -> int:
+    """LINEMAKER_MAX_OVERS_PER_GAME (default 2; 0 = no cap): prop overs picked in one game.
+    10/22-11/5: picks in games with 3+ overs went 105-95, -14.8u (3+ unders: +24.2u); keeping
+    each game's best two overs would have made +46.3u instead of +34.4u."""
+    v = _env_num("LINEMAKER_MAX_OVERS_PER_GAME", int)
+    return 2 if v is None else max(v, 0)
+
+
+def _cap_overs(res, tracker=None) -> list:
+    """The picks with at most max_overs_per_game() prop overs per game, counting overs picked
+    in that game earlier today (best-ranked kept)."""
+    cap = max_overs_per_game()
+    if not cap:
+        return res.picks
+    mine = {ev.market.key for ev in res.picks}
+    have = {}
+    for key, rec in ((tracker.records if tracker is not None else {}) or {}).items():
+        if (rec.get("picked") and rec.get("pick_side") == "A" and key not in mine
+                and (rec.get("inputs") or {}).get("bet_type") == "prop"):
+            have[rec.get("game_id")] = have.get(rec.get("game_id"), 0) + 1
+    out = []
+    for ev in res.picks:
+        if ev.market.bet_type == "prop" and ev.best.side == "A":
+            g = ev.market.game_id
+            if have.get(g, 0) >= cap:
+                res.passes.append((ev.best.label, f"{cap} overs already picked in this game "
+                                                  "(stacked overs in one game have lost)"))
+                continue
+            have[g] = have.get(g, 0) + 1
+        out.append(ev)
+    return out
+
+
 def shrink_pick(ev, k: float):
     """A pick's hit chances moved to market + k x (blend - market) (see autotune.pick_shrink),
     with gap, EV and fair odds re-derived. Its side stays the side that was picked."""
@@ -825,6 +858,9 @@ def run_pro(markets: list, slate_date: str, cfg: ProConfig, freezer=None,
         if c.min_prob is not None and best.blended < c.min_prob:
             res.passes.append((best.label, f"blended {best.blended:.1%} below {c.min_prob:.0%} floor"))
             continue
+        if not paused and cfg.pick_tag == "model" and cfg.sport_settings:
+            from .autotune import side_paused
+            paused = side_paused(m.sport, best.side, m.bet_type)
         if paused:   # would have been a pick: logged as a shadow pick, so the market can earn its way back
             res.passes.append((best.label, f"market paused, it keeps losing ({paused})"))
             shadows.append(ev)
@@ -875,6 +911,7 @@ def run_pro(markets: list, slate_date: str, cfg: ProConfig, freezer=None,
             else:
                 kept.append(ev)
         res.picks = kept
+        res.picks = _cap_overs(res, tracker)
     if freezer is not None:
         freezer.mark_picks(res.picks)
         freezer.save()
