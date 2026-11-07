@@ -664,6 +664,20 @@ def evaluate(m: ProMarket, cfg: ProConfig, sim: Optional[SimResult] = None) -> O
     return ev
 
 
+def sharp_disagree_cap() -> Optional[float]:
+    """LINEMAKER_MAX_SHARP_DISAGREE (default 0.02; "off" = none): a model pick may not be one the
+    sharp no-vig market rates more than this far below its price. 10/22-11/6: picks within 2
+    pts of the market went 154-108, +15.8u (worst day -5.4u); all picks 302-233, +7.9u (worst
+    day -20.4u on 11/6, where picks sat 2.4 pts against the sharps on average)."""
+    raw = os.environ.get("LINEMAKER_MAX_SHARP_DISAGREE", "0.02").strip().lower()
+    if raw in ("", "off", "no", "false", "none"):
+        return None
+    try:
+        return abs(float(raw))
+    except ValueError:
+        return 0.02
+
+
 def max_overs_per_game() -> int:
     """LINEMAKER_MAX_OVERS_PER_GAME (default 2; 0 = no cap): prop overs picked in one game.
     10/22-11/5: picks in games with 3+ overs went 105-95, -14.8u (3+ unders: +24.2u); keeping
@@ -835,6 +849,13 @@ def run_pro(markets: list, slate_date: str, cfg: ProConfig, freezer=None,
                 and best.gap <= c.over_min_gap):
             res.passes.append((best.label, f"over with a {best.gap:+.1%} gap: overs need more than "
                                            f"{c.over_min_gap:.0%}"))
+            continue
+        cap = sharp_disagree_cap()
+        if (cap is not None and cfg.pick_tag == "model" and cfg.sport_settings and cfg.force_model_weight != 0
+                and best.market_prob is not None and best.best_implied is not None
+                and best.market_prob - best.best_implied < -cap):
+            res.passes.append((best.label, f"sharp market rates it {(best.best_implied - best.market_prob) * 100:.1f} "
+                                           f"pts worse than the price (cap {cap * 100:.0f})"))
             continue
         if c.max_gap is not None and best.gap > c.max_gap:
             res.passes.append((best.label, f"gap {best.gap:+.1%} too large to trust: check injuries "

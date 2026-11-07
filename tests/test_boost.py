@@ -373,3 +373,23 @@ class AuditRulesTest(unittest.TestCase):
                                               "inputs": {"bet_type": "prop"}}})
             kept = pro._cap_overs(NS(picks=picks, passes=[]), tracker)
             self.assertNotIn("e A", [e.best.label for e in kept])   # g2 already has 2 overs today
+
+
+class SharpCapTest(unittest.TestCase):
+    def test_pick_too_far_against_the_sharps_is_dropped(self):
+        from linemaker.pro import ProConfig, rows_to_markets, run_pro
+        rows = [{"date": "2026-11-07", "sport": "NBA", "game_id": f"g{i}", "game": f"A{i} @ H{i}",
+                 "bet_type": "prop", "subject": f"Player {i}", "market": "points", "line": "15.5",
+                 "mean": "19", "stdev": "4", "books": books}
+                for i, books in enumerate(["FanDuel:-110/-110|DraftKings:-150/+125",      # sharps lean over: fine
+                                           "FanDuel:-110/-110|DraftKings:-110/-110"])]    # 50/50 at -110: 2.4 pts of juice
+        with mock.patch.dict("os.environ", {"LINEMAKER_MAX_SHARP_DISAGREE": "0.02"}):
+            res = run_pro(rows_to_markets(rows), "2026-11-07", ProConfig())
+        reasons = [why for _l, why in res.passes if "sharp market rates it" in why]
+        picked = {ev.market.subject for ev in res.picks}
+        self.assertIn("Player 0", picked)
+        self.assertNotIn("Player 1", picked)
+        self.assertTrue(reasons)
+        with mock.patch.dict("os.environ", {"LINEMAKER_MAX_SHARP_DISAGREE": "off"}):
+            res = run_pro(rows_to_markets(rows), "2026-11-07", ProConfig())
+        self.assertIn("Player 1", {ev.market.subject for ev in res.picks})

@@ -15,3 +15,4 @@ os.environ.setdefault("LINEMAKER_PRETIP_MINUTES", "")   # no pre-tip arming unle
 os.environ.setdefault("LINEMAKER_OFFLINE", "1")   # no live roster lookups from parlay correlation
 os.environ.setdefault("LINEMAKER_CALIBRATION_PRIORS", "off")   # tests use raw hit chances unless they opt in
 os.environ.setdefault("LINEMAKER_PER_USER_BETS", "off")   # one shared bet list; PerUserBetsTest turns it on
+os.environ.setdefault("LINEMAKER_MAX_SHARP_DISAGREE", "off")   # fixtures use big model gaps; SharpCapTest turns it on
