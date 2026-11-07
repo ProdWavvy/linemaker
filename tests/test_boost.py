@@ -468,3 +468,19 @@ class CommandSyncTest(unittest.TestCase):
         self.assertTrue(ok)
         self.assertTrue(again)
         self.assertEqual(before, after)
+
+
+class LoopGuardTest(unittest.TestCase):
+    def test_error_in_a_loop_body_is_logged_not_raised(self):
+        from linemaker import bot
+
+        @bot._keep_running
+        async def flaky():
+            raise ValueError("Discord said no")
+        self.assertIsNone(asyncio.run(flaky()))   # the loop's next round still runs
+
+    def test_every_background_loop_is_guarded(self):
+        from linemaker import bot
+        for loop in (bot.pretip_loop, bot.news_loop, bot.health_loop, bot.budget_loop,
+                     bot.daily_grade, bot.daily_post, bot.weekly_post):
+            self.assertTrue(hasattr(loop.coro, "__wrapped__"), loop.coro.__name__)

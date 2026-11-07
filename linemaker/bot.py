@@ -2847,7 +2847,26 @@ async def _warm_up():
             log.warning("warm-up %s: %s", sport, e)
 
 
+def _keep_running(fn):
+    """A background loop's body that can't stop the loop. discord.py ends a tasks.loop for
+    good on any unhandled error, until the next restart: one failed card post in the pre-tip
+    scan stopped every automatic scan from 11/2 night until the 11/4 update restarted the bot,
+    so 11/3 and 11/4 tracked nothing. Errors are logged (and count toward the error alert)."""
+    import functools
+
+    @functools.wraps(fn)
+    async def wrapper(*args, **kwargs):
+        try:
+            return await fn(*args, **kwargs)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            log.exception("%s failed this round; it keeps running", fn.__name__)
+    return wrapper
+
+
 @tasks.loop(time=dt.time(0, 2, tzinfo=TZ))
+@_keep_running
 async def budget_loop():
     """Just after midnight: today's credit budget from every key's balance (free check)."""
     await _refresh_budget()
@@ -2952,6 +2971,7 @@ def _todays_events(sport: str, date: str) -> list:
 
 
 @tasks.loop(minutes=5)
+@_keep_running
 async def pretip_loop():
     """Props for each game LINEMAKER_PRETIP_MINUTES before it tips; posts only real plays."""
     _spend_as("pre-tip scans & closing reads")
@@ -3020,6 +3040,7 @@ def news_posts() -> bool:
 
 
 @tasks.loop(minutes=12)
+@_keep_running
 async def news_loop():
     """Re-price a game when a rotation player is newly ruled Out (basketball, NFL) or an NHL
     team's starting goalie changes."""
@@ -3190,6 +3211,7 @@ async def _goalie_news(channel, date: str, now, sent: int, cap: int):
 
 
 @tasks.loop(minutes=30)
+@_keep_running
 async def health_loop():
     """Post a warning when credits run low, errors pile up, or an update was rolled back."""
     from .admin import due_alerts, health_problems
@@ -3210,6 +3232,7 @@ async def health_loop():
 
 
 @tasks.loop(time=dt.time(10, 0, tzinfo=TZ))
+@_keep_running
 async def weekly_post():
     """Monday (LINEMAKER_WEEKLY_DAY, 0 = Monday) summary of the last 7 days."""
     if dt.datetime.now(TZ).weekday() != int(os.environ.get("LINEMAKER_WEEKLY_DAY", "0") or 0):
@@ -3310,6 +3333,7 @@ def grade_catch_up_day(now: dt.datetime, grade_at: str = "09:30") -> Optional[st
 
 
 @tasks.loop(time=dt.time(9, 30, tzinfo=TZ))
+@_keep_running
 async def daily_grade():
     await morning_grade((dt.datetime.now(TZ).date() - dt.timedelta(days=1)).isoformat())
 
@@ -3385,6 +3409,7 @@ async def _morning_grade(day: str):
 
 
 @tasks.loop(time=dt.time(11, 0, tzinfo=TZ))
+@_keep_running
 async def daily_post():
     _spend_as("daily post")
     date = today()
