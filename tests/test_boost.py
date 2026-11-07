@@ -393,3 +393,34 @@ class SharpCapTest(unittest.TestCase):
         with mock.patch.dict("os.environ", {"LINEMAKER_MAX_SHARP_DISAGREE": "off"}):
             res = run_pro(rows_to_markets(rows), "2026-11-07", ProConfig())
         self.assertIn("Player 1", {ev.market.subject for ev in res.picks})
+
+
+class StuckScanTest(unittest.TestCase):
+    def test_oldest_busy_and_restart_threshold(self):
+        import time
+        from linemaker import bot, busy
+        with busy.busy():
+            self.assertLess(busy.oldest_seconds(), 5)
+            later = time.time() + 1500
+            with mock.patch.dict("os.environ", {"LINEMAKER_STUCK_SCAN_SECONDS": "1200"}):
+                self.assertGreater(bot.scan_stuck_for(later), 1200)
+                self.assertEqual(bot.scan_stuck_for(), 0.0)
+            with mock.patch.dict("os.environ", {"LINEMAKER_STUCK_SCAN_SECONDS": "0"}):
+                self.assertEqual(bot.scan_stuck_for(later), 0.0)
+        self.assertEqual(busy.oldest_seconds(), 0.0)
+
+    def test_nothing_tracked_alert(self):
+        import datetime as dt, tempfile
+        from zoneinfo import ZoneInfo
+        from linemaker import admin
+        tz = ZoneInfo("America/New_York")
+        with tempfile.TemporaryDirectory() as d, \
+                mock.patch.dict("os.environ", {"LINEMAKER_TRACKING": "on", "LINEMAKER_TRACKING_DIR": d,
+                                               "LINEMAKER_SPORTS": "NBA"}), \
+                mock.patch("linemaker.live_props.espn_games", return_value=[{}, {}]):
+            self.assertEqual(admin.nothing_tracked_today(dt.datetime(2026, 11, 3, 11, 0, tzinfo=tz)), "")   # too early
+            self.assertIn("Nothing has been tracked", admin.nothing_tracked_today(dt.datetime(2026, 11, 3, 16, 0, tzinfo=tz)))
+            import os
+            os.makedirs(os.path.join(d, "NBA-props"))
+            open(os.path.join(d, "NBA-props", "2026-11-03.json"), "w").write("{}")
+            self.assertEqual(admin.nothing_tracked_today(dt.datetime(2026, 11, 3, 16, 0, tzinfo=tz)), "")

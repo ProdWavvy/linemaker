@@ -2830,6 +2830,20 @@ def loop_stuck_for(last_beat: float, now: float) -> float:
     return now - last_beat
 
 
+def scan_stuck_for(now: Optional[float] = None) -> float:
+    """Seconds the oldest scan / answer has run if past LINEMAKER_STUCK_SCAN_SECONDS (1200; a
+    normal one finishes in under 4 minutes), else 0. 0 / blank turns this check off."""
+    from .busy import oldest_seconds
+    try:
+        limit = float(os.environ.get("LINEMAKER_STUCK_SCAN_SECONDS", "1200") or 0)
+    except ValueError:
+        limit = 1200
+    if not limit:
+        return 0.0
+    age = oldest_seconds(now)
+    return age if age > limit else 0.0
+
+
 def start_watchdog(loop, limit: Optional[float] = None, every: float = 30.0):
     """A frozen main loop still looks online (Discord's heartbeat runs on its own thread) but
     answers nothing. If the loop hasn't run a check-in for LINEMAKER_WATCHDOG_SECONDS (180),
@@ -2851,8 +2865,12 @@ def start_watchdog(loop, limit: Optional[float] = None, every: float = 30.0):
                 loop.call_soon_threadsafe(beat)
             except RuntimeError:   # the loop closed: the bot is shutting down
                 return
-            if loop_stuck_for(last[0], _t.time()) > limit:
-                log.error("watchdog: the main loop hasn't answered for %.0fs; restarting", _t.time() - last[0])
+            stuck_scan = scan_stuck_for()
+            if loop_stuck_for(last[0], _t.time()) > limit or stuck_scan:
+                if stuck_scan:
+                    log.error("watchdog: a scan or answer has been running for %.0f min; restarting", stuck_scan / 60)
+                else:
+                    log.error("watchdog: the main loop hasn't answered for %.0fs; restarting", _t.time() - last[0])
                 for h in logging.getLogger().handlers:
                     try:
                         h.flush()

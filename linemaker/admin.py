@@ -219,7 +219,43 @@ def changelog() -> list:
 # ---- health alerts ---------------------------------------------------------------------
 # Checked every 30 minutes; each kind of warning is posted at most once per HEALTH_QUIET
 # hours so a lasting problem doesn't flood the channel.
-HEALTH_QUIET = {"credits": 24, "errors": 6, "update": 24}
+HEALTH_QUIET = {"credits": 24, "errors": 6, "update": 24, "tracking": 24}
+
+
+def nothing_tracked_today(now=None) -> str:
+    """A warning when it's 3 PM ET or later, the main leagues have games today, and not one
+    market has been tracked (11/3 and 11/4 went by with no scans and nothing to grade).
+    LINEMAKER_TRACKING_ALERT_HOUR (15; blank = off)."""
+    import datetime as dt
+    from zoneinfo import ZoneInfo
+    raw = os.environ.get("LINEMAKER_TRACKING_ALERT_HOUR", "15").strip()
+    if not raw or os.environ.get("LINEMAKER_TRACKING", "on").lower() in ("off", "0", "false", "no"):
+        return ""
+    tz = ZoneInfo(os.environ.get("LINEMAKER_TZ", "America/New_York"))
+    now = now or dt.datetime.now(tz)
+    try:
+        if now.hour < int(raw):
+            return ""
+    except ValueError:
+        return ""
+    day = now.date().isoformat()
+    from .tracking import day_files
+    tdir = os.environ.get("LINEMAKER_TRACKING_DIR", "tracking")
+    if day_files(tdir, day):
+        return ""
+    sports = [x.strip().upper() for x in os.environ.get("LINEMAKER_SPORTS", "NBA,NFL").split(",") if x.strip()]
+    games = 0
+    try:
+        from .live_props import espn_games
+        for sp in sports:
+            games += len(espn_games(sp, day))
+    except Exception:
+        return ""
+    if not games:
+        return ""
+    return (f"🕳️ **Nothing has been tracked today** ({games} {'/'.join(sports)} games on the schedule). "
+            "No scan has bought and saved odds, so tonight can't be graded. If asks aren't answering, "
+            "the bot may be stuck: /restart, or tell Claude.")
 
 
 def health_problems(now: Optional[float] = None) -> list:
@@ -244,6 +280,9 @@ def health_problems(now: Optional[float] = None) -> list:
     if len(recent) >= int(os.environ.get("LINEMAKER_ERROR_ALERT", "5") or 0) > 0:
         out.append(("errors", f"⚠️ **{len(recent)} errors in the last hour.** Latest: "
                               f"`{_scrub(recent[-1])[:300]}` · /logs search:ERROR for the rest."))
+    quiet = nothing_tracked_today()
+    if quiet:
+        out.append(("tracking", quiet))
     bad = os.path.join(root_dir(), ".git", "linemaker-bad-commit")
     if os.path.exists(bad):
         try:
