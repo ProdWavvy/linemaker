@@ -102,7 +102,8 @@ def grade_day(date: str, rows: list, auto: bool):
             n_live = apply_results_day(live_base, date, live_rows)
             if n_live:
                 summary_live.append(f"- 🔴 Live reads graded: **{n_live}**")
-        remaining = api.quota.remaining
+        from .oddsapi import total_remaining
+        remaining = total_remaining() if total_remaining() is not None else api.quota.remaining   # every key
     # Player props: final box scores from ESPN (free), for tracked and frozen props alike.
     if auto:
         have = keys(rows)

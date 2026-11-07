@@ -484,3 +484,19 @@ class LoopGuardTest(unittest.TestCase):
         for loop in (bot.pretip_loop, bot.news_loop, bot.health_loop, bot.budget_loop,
                      bot.daily_grade, bot.daily_post, bot.weekly_post):
             self.assertTrue(hasattr(loop.coro, "__wrapped__"), loop.coro.__name__)
+
+
+class MultiKeyCreditsTest(unittest.TestCase):
+    def test_total_is_every_keys_balance(self):
+        import tempfile
+        from linemaker import oddsapi
+        with tempfile.TemporaryDirectory() as d, \
+                mock.patch.dict("os.environ", {"LINEMAKER_CACHE_DIR": d, "ODDS_API_KEYS": "aaaa1111,bbbb2222"}), \
+                mock.patch.object(oddsapi, "_spend_path", side_effect=lambda day: f"{d}/spend_{day}.json"), \
+                mock.patch.object(oddsapi, "local_today", return_value="2026-11-07"):
+            oddsapi.record_spend(0, 5000, "aaaa1111")       # /quota reads key 1
+            oddsapi.record_spend(0, 20000, "bbbb2222")      # and key 2
+            self.assertEqual(oddsapi.total_remaining(), 25000)
+            oddsapi.record_spend(30, 4970, "aaaa1111")      # a paid call on key 1
+            self.assertEqual(oddsapi.total_remaining(), 24970)   # not just key 1's 4,970
+            self.assertEqual(oddsapi.credits_today(), 30)

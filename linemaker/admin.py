@@ -157,9 +157,23 @@ def status_lines() -> list:
         f" of a {budget:,} daily budget" + (" (auto: credits left ÷ days until they refill)" if auto else "")
         + " · past it, pre-tip scans, news re-checks, alt lines and closing reads pause and asks reuse "
           "recent odds" if budget else ""))
-    left = _spend(local_today()).get("remaining")
-    if left is not None:
-        out.append(f"  ↳ {left:,} credits left on the account · {days_to_reset()} day(s) until they refill")
+    try:   # every key's balance (free), so the total isn't just the key used last
+        from .oddsapi import key_quotas
+        rows = key_quotas()
+    except Exception:
+        rows = []
+    known = [r for r in rows if r[2] is not None]
+    if known:
+        total = sum(r[2] for r in known)
+        per = " + ".join(f"key {r[0]} {r[2]:,}" for r in known) if len(rows) > 1 else ""
+        bad = [f"key {r[0]} unreadable" for r in rows if r[2] is None]
+        out.append(f"  ↳ {total:,} credits left across {len(rows)} key{'s' if len(rows) != 1 else ''}"
+                   + (f" ({per})" if per else "") + (f" · {', '.join(bad)}" if bad else "")
+                   + f" · {days_to_reset()} day(s) until they refill")
+    else:
+        left = _spend(local_today()).get("remaining")
+        if left is not None:
+            out.append(f"  ↳ {left:,} credits left on the account · {days_to_reset()} day(s) until they refill")
     by = spend_breakdown()
     if by:
         out.append("  ↳ " + " · ".join(f"{k} {v:,}" for k, v in by.items()))

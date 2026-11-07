@@ -247,7 +247,7 @@ class OddsAPI:
             if h.get(header) is not None:
                 setattr(self.quota, attr, int(float(h[header])))
         if h.get("x-requests-last") is not None:
-            record_spend(int(float(h["x-requests-last"])), self.quota.remaining)
+            record_spend(int(float(h["x-requests-last"])), self.quota.remaining, self.api_key)
         if self.quota.remaining is not None and self.quota.remaining <= 0:
             self._next_key("is out of credits")
         return json.loads(body)
@@ -416,7 +416,31 @@ def spend_breakdown(day: Optional[str] = None) -> dict:
     return dict(sorted(by.items(), key=lambda kv: -kv[1]))
 
 
-def record_spend(cost: int, remaining: Optional[int] = None):
+def key_slot(key: Optional[str]) -> Optional[str]:
+    """"1", "2", ... for a configured key (its place in configured_keys), else None."""
+    keys = configured_keys()
+    return str(keys.index(key) + 1) if key and key in keys else None
+
+
+def _balances(day: str, v: dict) -> dict:
+    """{slot: credits left} for every key: today's reads, else the last one seen yesterday."""
+    out = {}
+    yesterday = (dt.date.fromisoformat(day) - dt.timedelta(days=1)).isoformat()
+    out.update((_spend(yesterday).get("keys") or {}))
+    out.update(v.get("keys") or {})
+    n = len(configured_keys())
+    return {k: int(x) for k, x in out.items() if k.isdigit() and 1 <= int(k) <= max(n, 1)}
+
+
+def total_remaining(day: Optional[str] = None) -> Optional[int]:
+    """Credits left across every key (the last balance seen for each), or None if unknown."""
+    v = _spend(day or local_today())
+    return v.get("remaining")
+
+
+def record_spend(cost: int, remaining: Optional[int] = None, key: Optional[str] = None):
+    """Add a call's cost to today's total; remaining is that call's key balance (key: which
+    key made it, so each key's balance is kept and the account total is their sum)."""
     if not cost and remaining is None:
         return
     day = local_today()
@@ -427,9 +451,15 @@ def record_spend(cost: int, remaining: Optional[int] = None):
         with path_lock(path):
             v = _spend(day)
             if remaining is not None:
+                slot = key_slot(key) or ("1" if len(configured_keys()) <= 1 else None)
+                if slot:
+                    v.setdefault("keys", {})[slot] = int(remaining)
+                    total = sum(_balances(day, v).values())
+                else:   # a key we can't place: its own balance is all we know
+                    total = int(remaining)
                 # what the account had when the day began (the first call's balance + its cost)
-                v.setdefault("start_remaining", int(remaining) + int(cost or 0))
-                v["remaining"] = int(remaining)
+                v.setdefault("start_remaining", total + int(cost or 0))
+                v["remaining"] = total
             v["total"] = int(v.get("total", 0)) + int(cost or 0)
             src = SPEND_SOURCE.get()
             v.setdefault("by", {})[src] = v["by"].get(src, 0) + int(cost)
@@ -457,19 +487,23 @@ def days_to_reset(today: Optional[dt.date] = None) -> int:
     return max((nxt - today).days, 1)
 
 
-def set_day_start(remaining: int, day: Optional[str] = None) -> dict:
+def set_day_start(remaining: int, day: Optional[str] = None, keys: Optional[dict] = None) -> dict:
     """Record what the account has as the day begins (the midnight check), which today's
-    budget is worked out from. Kept as is if a paid call already set it today."""
+    budget is worked out from. Kept as is if a paid call already set it today. keys: each
+    key's balance ({"1": n, "2": m}), kept so later reads of one key update the total."""
     day = day or local_today()
     path = _spend_path(day)
     from .jsonio import path_lock, save_json
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
     with path_lock(path):
         v = _spend(day)
+        if keys:
+            v.setdefault("keys", {}).update({k: int(x) for k, x in keys.items()})
+            v["remaining"] = sum(_balances(day, v).values())
         if v.get("start_remaining") is None or not v.get("total"):
             v["start_remaining"] = int(remaining)
             v.setdefault("remaining", int(remaining))
-            save_json(path, v)
+        save_json(path, v)
     return v
 
 
@@ -480,7 +514,7 @@ def refresh_day_budget() -> Optional[int]:
     left = [r[2] for r in rows if r[2] is not None]
     if not left:
         return None
-    set_day_start(sum(left))
+    set_day_start(sum(left), keys={str(r[0]): r[2] for r in rows if r[2] is not None})
     return daily_budget()
 
 
