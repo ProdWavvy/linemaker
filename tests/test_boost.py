@@ -424,3 +424,47 @@ class StuckScanTest(unittest.TestCase):
             os.makedirs(os.path.join(d, "NBA-props"))
             open(os.path.join(d, "NBA-props", "2026-11-03.json"), "w").write("{}")
             self.assertEqual(admin.nothing_tracked_today(dt.datetime(2026, 11, 3, 16, 0, tzinfo=tz)), "")
+
+
+class CommandSyncTest(unittest.TestCase):
+    def test_failure_doesnt_crash_and_unchanged_is_skipped(self):
+        import tempfile
+        from types import SimpleNamespace as NS
+        from linemaker import bot
+        calls = []
+
+        class Tree:
+            fail = False
+
+            def get_commands(self, guild=None):
+                return [NS(name="grade", description="Score a day", parameters=[])]
+
+            def copy_global_to(self, guild):
+                pass
+
+            def clear_commands(self, guild=None):
+                pass
+
+            async def sync(self, guild=None):
+                calls.append(guild)
+                if self.fail:
+                    raise RuntimeError("429 rate limited")
+
+        client = NS(tree=Tree())
+
+        async def go():
+            with mock.patch("asyncio.sleep", side_effect=asyncio.CancelledError):
+                client.tree.fail = True
+                ok_fail = await bot.sync_commands(client)        # must not raise
+                client.tree.fail = False
+                ok = await bot.sync_commands(client)
+                n = len(calls)
+                again = await bot.sync_commands(client)          # unchanged: no API call
+                return ok_fail, ok, again, n, len(calls)
+        with tempfile.TemporaryDirectory() as d, mock.patch.dict("os.environ", {"LINEMAKER_CACHE_DIR": d,
+                                                                               "LINEMAKER_GUILD_ID": ""}):
+            ok_fail, ok, again, before, after = asyncio.run(go())
+        self.assertFalse(ok_fail)
+        self.assertTrue(ok)
+        self.assertTrue(again)
+        self.assertEqual(before, after)

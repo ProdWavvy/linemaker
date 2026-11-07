@@ -1828,6 +1828,69 @@ def in_home(channel, home: Optional[int]) -> bool:
     return getattr(channel, "id", None) == home or getattr(channel, "parent_id", None) == home
 
 
+def commands_signature(tree, guild=None) -> str:
+    """A fingerprint of the slash commands as Discord would see them (names, descriptions,
+    options): equal fingerprints mean there's nothing to sync."""
+    import hashlib
+    import json as _json
+    items = []
+    for c in sorted(tree.get_commands(guild=guild), key=lambda c: c.name):
+        params = [(p.name, str(getattr(p, "type", "")), bool(getattr(p, "required", False)),
+                   getattr(p, "description", ""), [str(ch.value) for ch in (getattr(p, "choices", None) or [])])
+                  for p in getattr(c, "parameters", [])]
+        items.append((c.name, getattr(c, "description", ""), params))
+    return hashlib.sha1(_json.dumps(items, default=str).encode()).hexdigest()
+
+
+def _sync_state_path() -> str:
+    return os.path.join(os.environ.get("LINEMAKER_CACHE_DIR", "cache"), "commands_synced.json")
+
+
+async def sync_commands(client, attempt: int = 1) -> bool:
+    """Sync the slash commands if they changed since the last good sync. Never raises: on a
+    failure it logs, keeps the commands Discord already has, and retries in the background
+    (10, 20, 40... minutes, up to 6 tries)."""
+    from .jsonio import load_json, save_json
+    guild_id = os.environ.get("LINEMAKER_GUILD_ID")
+    guild = discord.Object(id=int(guild_id)) if guild_id else None
+    if guild is not None:
+        client.tree.copy_global_to(guild=guild)
+    sig = commands_signature(client.tree, guild)
+    key = str(guild_id or "global")
+    try:
+        state = load_json(_sync_state_path()) if os.path.exists(_sync_state_path()) else {}
+    except Exception:
+        state = {}
+    if state.get(key) == sig and os.environ.get("LINEMAKER_FORCE_SYNC", "").lower() not in ("1", "on", "yes", "true"):
+        log.info("slash commands unchanged since the last sync: not re-registering")
+        return True
+    try:
+        if guild is not None:
+            await client.tree.sync(guild=guild)
+            # Clear old global commands too, or they'd show up next to the server ones.
+            client.tree.clear_commands(guild=None)
+            await client.tree.sync()
+        else:
+            await client.tree.sync()
+    except Exception as e:
+        delay = 600 * 2 ** (attempt - 1)
+        log.error("slash command sync failed (try %d): %s; the bot keeps running, retrying in %d min",
+                  attempt, e, delay // 60)
+        if attempt < 6:
+            async def retry():
+                await asyncio.sleep(delay)
+                await sync_commands(client, attempt + 1)
+            asyncio.get_running_loop().create_task(retry())
+        return False
+    state[key] = sig
+    try:
+        save_json(_sync_state_path(), state)
+    except Exception as e:
+        log.warning("couldn't save the command sync state: %s", e)
+    log.info("slash commands synced: %s", ", ".join(sorted(c.name for c in client.tree.get_commands(guild=guild))))
+    return True
+
+
 class HomeChannelTree(app_commands.CommandTree):
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         from .bets import CURRENT_USER
@@ -1868,20 +1931,12 @@ class LinemakerBot(discord.Client):
         start_watchdog(asyncio.get_running_loop())
         await asyncio.to_thread(load_details)   # buttons on earlier cards keep working
         # Linemaker owns this application: each sync replaces the whole command list, so
-        # commands left over from whatever the bot ran before are removed.
-        guild_id = os.environ.get("LINEMAKER_GUILD_ID")
-        if guild_id:
-            guild = discord.Object(id=int(guild_id))
-            self.tree.copy_global_to(guild=guild)
-            await self.tree.sync(guild=guild)
-            # Clear old global commands too, or they'd show up next to the server ones.
-            self.tree.clear_commands(guild=None)
-            await self.tree.sync()
-        else:
-            await self.tree.sync()
-        log.info("slash commands synced: %s",
-                 ", ".join(sorted(c.name for c in self.tree.get_commands(
-                     guild=discord.Object(id=int(guild_id)) if guild_id else None))))
+        # commands left over from whatever the bot ran before are removed. A failed sync must
+        # never stop startup (a crash here kept the bot in a restart loop with no daily post,
+        # 11/3-11/4): the commands Discord already has keep working and the sync is retried.
+        # It only runs when the command list changed, so routine updates don't re-register
+        # everything (which also briefly confuses Discord apps: "This field is required").
+        await sync_commands(self)
         # The daily post spends credits every day, so it only runs when a time is set.
         if os.environ.get("LINEMAKER_POST_TIME", "").strip() and (
                 os.environ.get("LINEMAKER_CHANNEL_ID") or self.home) and (
