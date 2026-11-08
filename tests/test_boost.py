@@ -500,3 +500,15 @@ class MultiKeyCreditsTest(unittest.TestCase):
             oddsapi.record_spend(30, 4970, "aaaa1111")      # a paid call on key 1
             self.assertEqual(oddsapi.total_remaining(), 24970)   # not just key 1's 4,970
             self.assertEqual(oddsapi.credits_today(), 30)
+
+
+class BetNamesTest(unittest.TestCase):
+    def test_underscore_names_dont_turn_into_italics(self):
+        from linemaker import grade_report
+        bets = [{"user": "certifiedseller_", "status": "won", "kind": "parlay", "odds": 113, "stake": 0.8, "profit": 0.9,
+                 "legs": [{"date": "2026-11-07", "outcome": "won", "label": "a"}, {"date": "2026-11-07", "outcome": "won", "label": "b"}]},
+                {"user": "yupii.", "status": "lost", "kind": "parlay", "odds": 186, "stake": 0.8, "profit": -0.8,
+                 "legs": [{"date": "2026-11-07", "outcome": "lost", "label": "c"}, {"date": "2026-11-07", "outcome": "won", "label": "d"}]}]
+        with mock.patch("linemaker.bets.load_bets", return_value=bets):
+            e = grade_report.bets_embed("2026-11-07", 0)
+        self.assertIn("certifiedseller\\_", e.description)
