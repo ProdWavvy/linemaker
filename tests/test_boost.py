@@ -538,7 +538,7 @@ class PolymarketBookTest(unittest.TestCase):
     def test_style_and_home(self):
         from linemaker.betlinks import book_home
         from linemaker.discord_format import book_emoji
-        self.assertEqual(book_emoji("Polymarket"), "🟪")
+        self.assertEqual(book_emoji("Polymarket"), "🟧")
         self.assertIn("polymarket.com", book_home("Polymarket"))
 
 
