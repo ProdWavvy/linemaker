@@ -512,3 +512,59 @@ class BetNamesTest(unittest.TestCase):
         with mock.patch("linemaker.bets.load_bets", return_value=bets):
             e = grade_report.bets_embed("2026-11-07", 0)
         self.assertIn("certifiedseller\\_", e.description)
+
+
+class PolymarketBookTest(unittest.TestCase):
+    def test_polymarket_is_a_parlay_book_by_default(self):
+        from linemaker.pro import parlay_books
+        with mock.patch.dict("os.environ", {"LINEMAKER_BET_BOOKS": "", "LINEMAKER_PARLAY_BOOKS": ""}):
+            import os
+            os.environ.pop("LINEMAKER_BET_BOOKS")
+            self.assertEqual(parlay_books(), ("FanDuel", "DraftKings", "Polymarket"))
+        with mock.patch.dict("os.environ", {"LINEMAKER_BET_BOOKS": "all", "LINEMAKER_PARLAY_BOOKS": ""}):
+            self.assertEqual(parlay_books(), ("FanDuel", "DraftKings"))
+
+    def test_parlay_priced_at_polymarket(self):
+        from linemaker import parlay
+        legs = [leg(f"g{i}", f"P{i}", "points", p=0.6, odds=-110) for i in range(3)]
+        for ev in legs:
+            ev.market.books = [("FanDuel", [-120, 100]), ("Polymarket", [-105, -105])]
+        with mock.patch("linemaker.autotune.parlay_calibrated", side_effect=lambda p, *a: p):
+            out = parlay.custom_parlays(legs, ("FanDuel", "Polymarket"))
+        books = {p.book: p for p, _missing in out}
+        self.assertIn("Polymarket", books)
+        self.assertGreater(books["Polymarket"].decimal, books["FanDuel"].decimal)   # better leg prices
+
+    def test_style_and_home(self):
+        from linemaker.betlinks import book_home
+        from linemaker.discord_format import book_emoji
+        self.assertEqual(book_emoji("Polymarket"), "🟪")
+        self.assertIn("polymarket.com", book_home("Polymarket"))
+
+
+class PickemParlayTest(unittest.TestCase):
+    def _ev(self, game, player, p, side="A"):
+        from types import SimpleNamespace as NS
+        return NS(market=NS(game_id=game, subject=player, market="points", line=15.5, sport="NBA", multiplier=None,
+                            notes=""),
+                  best=NS(side=side, blended=p))
+
+    def test_ladder_has_safest_and_value(self):
+        from linemaker import pp
+        legs = [self._ev(f"g{i}", f"P{i}", 0.62 + 0.01 * (i % 3)) for i in range(8)]
+        ladder = pp.entry_ladder(legs, sizes=(2, 3))
+        labels = [l for l, _e in ladder]
+        self.assertIn("🔒 Safest", labels)
+        safest = [e for l, e in ladder if l == "🔒 Safest"]
+        self.assertTrue(all(e.expected >= 1.0 for e in safest))
+        self.assertTrue(all(len({x.market.game_id for x in e.legs}) >= 2 for _l, e in ladder))
+
+    def test_parlay_card(self):
+        from types import SimpleNamespace as NS
+        from linemaker.scan_format import pp_messages
+        legs = [self._ev(f"g{i}", f"P{i}", 0.64) for i in range(6)]
+        res = NS(picks=legs, evaluated=legs, dfs_app="prizepicks", slate=[], games=3, odds_age=0)
+        with mock.patch("linemaker.scan_format.odds_age_note", return_value=""):
+            msgs = pp_messages([("NBA", res, {"profiles": {}, "context": {}, "history": {}})], "2026-11-11", parlay=True)
+        self.assertIn("Parlays", msgs[0][0][0].title)
+        self.assertTrue(any(d and d.get("pp") for _e, d in msgs))

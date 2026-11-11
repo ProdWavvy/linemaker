@@ -176,6 +176,7 @@ class Entry:
     p_all: float = 0.0
     expected: float = 0.0         # expected return per $1 staked (1.0 = break even)
     app: str = "prizepicks"       # which pick'em app (APPS key)
+    p_cash: float = 0.0           # chance the entry pays back at least the stake (Flex: misses allowed)
 
     @property
     def label(self) -> str:
@@ -205,7 +206,9 @@ def price_entry(kind: str, legs: list) -> Optional[Entry]:
     payouts = [m * scale for m in payouts]
     dist = hits_distribution([ev.best.blended for ev in legs])
     expected = sum(payouts[i] * dist[n - i] for i in range(len(payouts)) if n - i >= 0)
-    return Entry(kind=kind, legs=list(legs), payouts=payouts, p_all=dist[n], expected=expected, app=APP.get())
+    p_cash = sum(dist[n - i] for i in range(len(payouts)) if n - i >= 0 and payouts[i] >= 1)
+    return Entry(kind=kind, legs=list(legs), payouts=payouts, p_all=dist[n], expected=expected, app=APP.get(),
+                 p_cash=p_cash)
 
 
 def _games_ok(legs: list) -> bool:
@@ -230,6 +233,37 @@ def best_entries(legs: list, sizes=(2, 3, 4, 5, 6), pool: int = 10) -> list:
                     best = e
             if best:
                 out.append(best)
+    return out
+
+
+def entry_ladder(legs: list, sizes=(2, 3, 4, 5, 6), pool: int = 12) -> list:
+    """[(label, Entry)] for a pick'em parlay card: per size, the 🔒 safest entry (best chance
+    to pay back at least the stake while still +EV, Power or Flex) and the 💰 best value one
+    (highest expected return), each searched over every combination of the best legs (two
+    games or more, one line per player). The same entry isn't listed twice."""
+    legs = sorted(legs, key=leg_value, reverse=True)[:pool]
+    out = []
+    for n in sizes:
+        if len(legs) < n:
+            continue
+        safest = value = None
+        for combo in itertools.islice(itertools.combinations(legs, n), 5000):
+            if not _games_ok(combo) or len({(e.market.game_id, e.market.subject) for e in combo}) < n:
+                continue
+            for kind in ("Power", "Flex"):
+                e = price_entry(kind, combo)
+                if e is None:
+                    continue
+                if value is None or e.expected > value.expected:
+                    value = e
+                key = (e.expected >= 1.0, e.p_cash, e.expected)
+                if safest is None or key > (safest.expected >= 1.0, safest.p_cash, safest.expected):
+                    safest = e
+        if safest is not None:
+            out.append(("🔒 Safest", safest))
+        if value is not None and (safest is None or value.kind != safest.kind
+                                  or {id(x) for x in value.legs} != {id(x) for x in safest.legs}):
+            out.append(("💰 Best value", value))
     return out
 
 

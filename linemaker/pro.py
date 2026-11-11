@@ -118,9 +118,21 @@ def _over_min_gap() -> Optional[float]:
         return 0.04
 
 
+DEFAULT_BET_BOOKS = "FanDuel,DraftKings,Polymarket"
+
+
+def parlay_books() -> tuple:
+    """Books picks and parlays are priced and bet at (LINEMAKER_PARLAY_BOOKS, else the bet
+    books; FanDuel and DraftKings when every book is allowed). Polymarket takes parlays too."""
+    raw = os.environ.get("LINEMAKER_PARLAY_BOOKS", "").strip()
+    if raw:
+        return tuple(b.strip() for b in raw.split(",") if b.strip())
+    return _default_bet_books() or ("FanDuel", "DraftKings")
+
+
 def _default_bet_books() -> Optional[tuple]:
     """Books you can actually bet at. LINEMAKER_BET_BOOKS="all" allows every book."""
-    raw = os.environ.get("LINEMAKER_BET_BOOKS", "FanDuel,DraftKings")
+    raw = os.environ.get("LINEMAKER_BET_BOOKS", DEFAULT_BET_BOOKS)
     if raw.strip().lower() in ("", "all", "*"):
         return None
     return tuple(b.strip() for b in raw.split(",") if b.strip())

@@ -264,7 +264,8 @@ def books_of(results: list) -> tuple:
     """The books a scan was priced at: just one when you asked for FanDuel or DraftKings."""
     out = []
     for res in results:
-        for b in getattr(res, "books", None) or ("FanDuel", "DraftKings"):
+        from .pro import parlay_books
+        for b in getattr(res, "books", None) or parlay_books():
             if b not in out:
                 out.append(b)
     return tuple(out)
@@ -809,7 +810,7 @@ def volume_messages(sections: list, date: str, cfg, title: str = "") -> list:
     vol_legs, legs = legs, legs + extra
     edge_keys = {(ev.market.key, ev.best.side) for ev in edge_all}
     if legs:
-        short = {"FanDuel": "FD", "DraftKings": "DK"}
+        from .discord_format import BOOK_TAGS as short
         from .parlay import leg_price
         from .parlay_format import short_label
         rows = []
@@ -929,14 +930,53 @@ def parlay_box(p, num: Optional[int] = None, note: str = "") -> discord.Embed:
                          description="\n".join(lines)[:4096])
 
 
-def pp_messages(sections: list, date: str, title: str = "") -> list:
+def pp_messages(sections: list, date: str, title: str = "", parlay: bool = False) -> list:
     """[(embeds, detail)] for a pick'em scan (PrizePicks or Underdog): header, legs board,
-    best entries."""
+    best entries. parlay: "prizepicks parlay" asks get the entries card instead (safest and
+    best value at each size, every league in the ask)."""
     from .pp import use_app
     sections = _norm_sections(sections)
     which = next((getattr(res, "dfs_app", "") for _s, res, _e in sections if getattr(res, "dfs_app", "")), "prizepicks")
     with use_app(which):
-        return _pp_messages(sections, date, title)
+        return _pp_parlay_messages(sections, date) if parlay else _pp_messages(sections, date, title)
+
+
+def _pp_parlay_messages(sections: list, date: str) -> list:
+    from .pp import app, break_even, entry_ladder, leg_value, side_word, tier_icon
+    a = app()
+    app_name, icon = a["book"], a["icon"]
+    colour = 0x8E44AD if app_name == "PrizePicks" else 0xF1C40F
+    legs = sorted((ev for _s, res, _e in sections for ev in res.picks), key=leg_value, reverse=True)
+    name = "Cross-Sport" if len(sections) > 1 else SPORT_NAMES.get(sections[0][0], sections[0][0])
+    leagues = ", ".join(f"{SPORT_NAMES.get(sp, sp)} ({len(res.picks)} legs)" for sp, res, _e in sections)
+    ladder = entry_ladder(legs)
+    lines = [f"Every leg clears **{break_even():.1%}** (hit chance × multiplier) · {leagues}",
+             "🔒 **Safest**: the best chance to get at least your stake back while still +EV "
+             "(Flex can win with a miss) · 💰 **Best value**: the highest expected return."]
+    if not ladder:
+        lines.append(f"**Not enough {app_name} legs cleared the break-even rate for an entry.** Lines may "
+                     "not be up yet; try again closer to game time.")
+    header = discord.Embed(title=f"{icon} {name} {app_name} Parlays · {_day(date)}", color=colour if ladder else GREY,
+                           description="\n".join(lines))
+    header.set_footer(text=odds_age_note(sections))
+    out = [([header], None)]
+    if ladder:
+        e_embed = discord.Embed(title="🎟️ Entries by size", color=colour)
+        for label, en in ladder[:10]:
+            legs_txt = "\n".join(f"• {tier_icon(ev)}{ev.market.subject} {side_word(ev)} {ev.market.line:g} "
+                                 f"{ev.market.market} ({ev.market.sport}) · {_pct(ev.best.blended)}" for ev in en.legs)
+            pays = (f"pays {en.payouts[0]:.3g}x" if en.kind == "Power" else
+                    "pays " + " / ".join(f"{m:.3g}x" for m in en.payouts) + " (all hit / 1 miss…)")
+            e_embed.add_field(name=f"{label} · {en.label} · {_pct(en.p_cash)} to cash · EV {en.ev:+.0f}%",
+                              value=_clip(f"{legs_txt}\n💵 {pays}", 1024), inline=False)
+        e_embed.set_footer(text=f"Payouts from LINEMAKER_{a['env']}_POWER / _FLEX: check them against your app. "
+                                "Legs from different games are treated as independent.")
+        out.append(([e_embed], {"pp": [en for _l, en in ladder[:10]]}))
+        rows = [f"**{i}.** {tier_icon(ev)}{ev.market.subject} {side_word(ev)} {ev.market.line:g} {ev.market.market} "
+                f"({ev.market.sport}) · **{_pct(ev.best.blended)}**" for i, ev in enumerate(legs[:20], 1)]
+        out.append(([discord.Embed(title=f"✅ {app_name} legs used", color=colour,
+                                   description=_clip("\n".join(rows), 4096))], None))
+    return out
 
 
 def _pp_messages(sections: list, date: str, title: str = "") -> list:

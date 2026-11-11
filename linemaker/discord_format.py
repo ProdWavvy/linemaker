@@ -156,7 +156,14 @@ def chunk_embeds(embeds: list, max_chars: int = 5800, max_count: int = 10) -> li
 BOOK_STYLE = {   # book key -> (display name, short tag, emoji, embed colour)
     "fanduel": ("FanDuel", "FD", "🟦", 0x1493FF),
     "draftkings": ("DraftKings", "DK", "🟩", 0x53D337),
+    "polymarket": ("Polymarket", "PM", "🟪", 0x6C5CE7),
 }
+BOOK_TAGS = {"FanDuel": "FD", "DraftKings": "DK", "Polymarket": "PM"}
+
+
+def book_emoji(book) -> str:
+    """🟦 FanDuel · 🟩 DraftKings · 🟪 Polymarket (🎟️ anything else)."""
+    return BOOK_STYLE.get(_book_key(book or ""), (None, None, "🎟️"))[2]
 GOLD = 0xF1C40F
 
 
@@ -182,7 +189,8 @@ def _kickoff(commence: str) -> str:
 
 def shown_book_keys(ev) -> tuple:
     """fanduel / draftkings keys to show for a pick: just one when the ask named one book."""
-    books = getattr(ev, "shown_books", None) or ("FanDuel", "DraftKings")
+    from .pro import parlay_books
+    books = getattr(ev, "shown_books", None) or parlay_books()
     return tuple(k for k in ("fanduel", "draftkings") if k in {_book_key(b) for b in books})
 
 

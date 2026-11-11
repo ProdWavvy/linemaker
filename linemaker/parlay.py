@@ -13,7 +13,8 @@ from typing import Optional
 from .odds import american_to_decimal, decimal_to_american
 from .pro import book_prices
 
-PARLAY_BOOKS = ("FanDuel", "DraftKings")
+from .pro import parlay_books as _parlay_books
+PARLAY_BOOKS = _parlay_books()   # FanDuel, DraftKings, Polymarket (LINEMAKER_BET_BOOKS)
 
 
 def _key(name: str) -> str:

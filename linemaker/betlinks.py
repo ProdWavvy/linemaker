@@ -119,6 +119,8 @@ def combine(book: str, legs: list, event: str = "") -> Optional[str]:
 
 def book_home(book: str, live: bool = False) -> str:
     """The book's sportsbook page (live section for in-game bets), for when no slip can be built."""
+    if _key(book) == "polymarket":
+        return "https://polymarket.com/sports/live" if live else "https://polymarket.com/sports"
     if _key(book) == "draftkings":
         return "https://sportsbook.draftkings.com/live" if live else "https://sportsbook.draftkings.com/"
     return "https://sportsbook.fanduel.com/live" if live else "https://sportsbook.fanduel.com/"
@@ -134,8 +136,11 @@ def parlay_link(parlay) -> Optional[str]:
     return combine(parlay.book, legs, parlay.legs[0][0].market.game_id)
 
 
-def pick_links(ev, books=("FanDuel", "DraftKings")) -> list:
+def pick_links(ev, books=None) -> list:
     """[(book, url)] for a single pick's chosen side."""
+    if books is None:
+        from .pro import parlay_books
+        books = parlay_books()
     out = []
     for book in books:
         url = leg_link(ev.market, ev.best.side, book)

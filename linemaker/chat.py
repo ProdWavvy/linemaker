@@ -176,7 +176,7 @@ TOOLS = [
                 "teams": {"type": "array", "items": {"type": "string"},
                           "description": "only these teams' games, full names (e.g. New York Knicks); "
                                          "two teams = that matchup"},
-                "book": {"type": "string", "enum": ["FanDuel", "DraftKings"],
+                "book": {"type": "string", "enum": ["FanDuel", "DraftKings", "Polymarket"],
                          "description": "only when the user asks for one sportsbook's picks "
                                         "(e.g. best FanDuel picks): price and parlay at that "
                                         "book only"},
@@ -375,7 +375,8 @@ class LinemakerChat:
                 cfg, tracker = live_settings(cfg, date)
                 freezer = None
             book = args.get("book") if kind not in ("pp", "ud") else None
-            if book in ("FanDuel", "DraftKings"):
+            from .pro import parlay_books
+            if book in parlay_books():
                 # Same odds pull (no extra credits), only that book's prices are bettable.
                 # Still tracked (one record per market, so no double counting): your bets
                 # from this card settle from those records, and tuning reads the model and
@@ -385,7 +386,7 @@ class LinemakerChat:
             else:
                 book = None
             res = run_pro(rows_to_markets(rows), date, cfg, freezer, tracker)
-            res.books = (book,) if book else ("FanDuel", "DraftKings")
+            res.books = (book,) if book else parlay_books()
             if book:
                 for ev in res.evaluated:
                     ev.shown_books = res.books   # write-ups and odds views: that book only
@@ -1195,7 +1196,8 @@ REFRESH_WORDS = re.compile(r"\b(fresh|refresh|updated?|latest|new odds|re-?pull)
 PP_WORDS = re.compile(r"\b(prize ?picks?|pp|pick ?em|under ?dog fantasy|ud)\b", re.I)
 UD_WORDS = re.compile(r"\b(under ?dog( fantasy)?|ud)\b", re.I)
 BOOK_WORDS = {"FanDuel": re.compile(r"\b(fan ?duel|fd)\b", re.I),
-              "DraftKings": re.compile(r"\b(draft ?kings?|dk)\b", re.I)}
+              "DraftKings": re.compile(r"\b(draft ?kings?|dk)\b", re.I),
+              "Polymarket": re.compile(r"\b(poly ?market|poly)\b", re.I)}
 LIVE_WORDS = re.compile(r"\b(live|in[- ]?game|in[- ]?play|right now|currently on)\b", re.I)
 LIVE_INTENT = re.compile(LIVE_WORDS.pattern + r".*\b(bets?|edges?|plays?|picks?|lines?|games?|odds|"
                          r"money ?lines?|ml|spreads?|totals?|value|props?)\b|\b(bets?|edges?|plays?|"
@@ -1357,6 +1359,9 @@ def quick_plays_request(text: str) -> Optional[list]:
         if re.search(pat, rest, re.I):
             sports.append(s)
             rest = re.sub(pat, " ", rest, flags=re.I)
+    if not sports and quick_kind(text) in ("pp", "ud"):   # pick'em asks: every league the app posts
+        env = [x.strip().upper() for x in os.environ.get("LINEMAKER_PP_SPORTS", "NBA,NFL,NHL").split(",")]
+        sports = [x for x in env if x in SPORT_WORDS]
     if not sports:
         env = [x.strip().upper() for x in os.environ.get("LINEMAKER_SPORTS", "").split(",")]
         sports = [x for x in env if x in SPORT_WORDS] or ["NBA"]

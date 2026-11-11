@@ -45,7 +45,7 @@ from discord.ext import tasks
 
 from .config import Config
 from .devig import hold, no_vig, overround
-from .discord_format import chunk_embeds, lite_embeds
+from .discord_format import book_emoji, chunk_embeds, lite_embeds
 from .scan_format import (chart_page, movement_page, odds_page, scan_messages,
                           stats_page, SPORT_NAMES)
 from .freeze import Freezer, grade
@@ -205,10 +205,10 @@ class PickView(discord.ui.View):
         # Bet buttons open the book with the slip loaded (Discord caps button URLs at 512).
         for label, url in (detail.get("links") or [])[:5]:
             if url and len(url) <= 512:
-                book = next((b for b in ("FanDuel", "DraftKings") if b in label), label)
-                text = f"Bet on {label}" if label in ("FanDuel", "DraftKings") else label
+                book = next((b for b in PARLAY_BOOKS if b in label), label)
+                text = f"Bet on {label}" if label in PARLAY_BOOKS else label
                 self.add_item(discord.ui.Button(label=text[:80], url=url, row=1,
-                                                emoji="🟦" if book == "FanDuel" else "🟩"))
+                                                emoji=book_emoji(book)))
         if "ev" in detail:
             button = discord.ui.Button(label="I bet this", emoji="📝", row=1,
                                        style=discord.ButtonStyle.success, custom_id=f"lm:bet:{key}")
@@ -335,7 +335,7 @@ def bet_button(key: str, i: int, p, label: Optional[str] = None, row: Optional[i
     """'Bet': logs the parlay (your suggested stake) and hands back its one-tap slip, with
     Change stake and Undo, so every parlay you place from the bot is tracked."""
     return discord.ui.Button(label=(label or f"Bet on {p.book} {fmt_odds(p.american)}")[:80], row=row,
-                             emoji="🟦" if p.book == "FanDuel" else "🟩", style=discord.ButtonStyle.success,
+                             emoji=book_emoji(p.book), style=discord.ButtonStyle.success,
                              custom_id=f"lm:betgo:{key}:{i}")
 
 
@@ -380,7 +380,7 @@ def _bet_go(key: str, i: int):
             live = any(getattr(ev, "phase", "pre") == "live" for ev, _o in p.legs)
             if url and len(url) <= 512:
                 view.add_item(discord.ui.Button(label=f"Open the slip on {p.book}", url=url,
-                                                emoji="🟦" if p.book == "FanDuel" else "🟩"))
+                                                emoji=book_emoji(p.book)))
             else:
                 view.add_item(discord.ui.Button(label=f"Open {p.book}" + (" live" if live else ""),
                                                 url=book_home(p.book, live)))
@@ -835,7 +835,7 @@ class CompactView(discord.ui.View):
                 for i, p in enumerate(detail.get("parlays") or []):
                     label, desc = parlay_option_text(p, nums[i] if i < len(nums) else None)
                     options.append(discord.SelectOption(label=label, description=desc, value=f"{key}:{i}",
-                                                        emoji="🟦" if p.book == "FanDuel" else "🟩"))
+                                                        emoji=book_emoji(p.book)))
             if options:
                 self.add_item(discord.ui.Select(placeholder="🎰 Pick a parlay #1, #2 ... to bet it (logs it for you)",
                                                 options=options[:25], row=1,
@@ -925,7 +925,8 @@ class CompactView(discord.ui.View):
         return callback
 
 
-PARLAY_BOOKS = ("FanDuel", "DraftKings")
+from .pro import parlay_books as _parlay_books
+PARLAY_BOOKS = _parlay_books()   # FanDuel, DraftKings, Polymarket (LINEMAKER_BET_BOOKS)
 
 
 def parlay_card(legs: list, books: Optional[tuple] = None, boost: float = 0.0,
@@ -938,7 +939,7 @@ def parlay_card(legs: list, books: Optional[tuple] = None, boost: float = 0.0,
     from .parlay_format import header, money_line, short_label
     from .parlay_math import hit_chance, leg_value
     books = tuple(books or PARLAY_BOOKS)
-    short = {"FanDuel": "FD", "DraftKings": "DK"}
+    from .discord_format import BOOK_TAGS as short
     lines = []
     for ev in legs:
         quotes = [(b, leg_price(ev, b)) for b in books]
@@ -1142,7 +1143,7 @@ def parlay_board(key: str) -> tuple:
         p = current[j]
         num = f"#{nums[j]}" if j < len(nums) and nums[j] else f"#{j + 1}"
         view.add_item(discord.ui.Button(label=f"Bet {num} {fmt_odds(p.american)}", row=n // 5,
-                                        emoji="🟦" if p.book == "FanDuel" else "🟩", style=discord.ButtonStyle.success,
+                                        emoji=book_emoji(p.book), style=discord.ButtonStyle.success,
                                         custom_id=f"lm:bboard:{key}:{j}"))
     last = d.get("last")
     if last in placed:   # the slip for the one just logged
@@ -1151,7 +1152,7 @@ def parlay_board(key: str) -> tuple:
         url = parlay_link(lp) if lp is not None else None
         if url and len(url) <= 512:
             view.add_item(discord.ui.Button(label=f"Open the slip on {b.get('book', '')}", url=url, row=4,
-                                            emoji="🟦" if b.get("book") == "FanDuel" else "🟩"))
+                                            emoji=book_emoji(b.get("book"))))
     return embed, view
 
 
@@ -1478,7 +1479,7 @@ def _targets_bet(tkey: str, k: str):
             url = parlay_link(p)
             if url and len(url) <= 512 and len(view.children) < 25:
                 view.add_item(discord.ui.Button(label=f"Open the slip on {p.book}", url=url, row=4,
-                                                emoji="🟦" if p.book == "FanDuel" else "🟩"))
+                                                emoji=book_emoji(p.book)))
             note = (f"{'Already logged' if again else '📝 Logged'} **{_money(bet['stake'])}** on the "
                     f"{len(p.legs)}-leg {p.book} at **{fmt_odds(bet['odds'])}**"
                     + (f" (🔄 {'; '.join(notes)})" if notes else "") + ". Open the slip below; ✏️ / ↩️ / 🎁 in /bets.")
@@ -1624,7 +1625,7 @@ def slip_message(key: str, mask: int = 0, page: int = 0, boost_i: int = 0) -> tu
     page = min(max(page, 0), pages - 1)
     view = discord.ui.View(timeout=None)
     base = f"lm:slip:{key}:{mask:x}:{page}:{boost_i}"
-    short = {"FanDuel": "FD", "DraftKings": "DK"}
+    from .discord_format import BOOK_TAGS as short
     for n, i in enumerate(range(page * SLIP_PAGE, min(len(picks), (page + 1) * SLIP_PAGE))):
         ev, on = picks[i]["ev"], mask >> i & 1
         price = next((f"{short.get(b, b)} {fmt_odds(o)}" for b in (books or PARLAY_BOOKS)
@@ -2197,8 +2198,8 @@ def cards_for(results: list) -> list:
     if not results:
         return []
     if all(getattr(r, "kind", "") == "pp" for _s, r, _ex in results):
-        from .scan_format import pp_messages
-        return pp_messages(results, today())
+        from .scan_format import pp_messages   # "prizepicks parlay": the entries card
+        return pp_messages(results, today(), parlay=any((ex or {}).get("mode") == "volume" for _s, _r, ex in results))
     spec = next(((ex or {}).get("boost") for _s, _r, ex in results if (ex or {}).get("boost")), None)
     if spec is not None:   # "30% nfl boost": the tickets to put the boost on
         from .pro import volume_config
