@@ -3389,24 +3389,84 @@ async def _morning_grade(day: str):
             if channel is not None:
                 await channel.send(f"💾⚠️ Nightly backup failed: {str(e)[:300]}")
     await _warm_up()
-    if channel is None or not (summary or tracked):
+    if channel is None:
         _set_grade_state(posted=True)
         return
-    embeds[0].title = f"📈 Morning Grade · {day}"
+    if not (summary or tracked):   # never silent: say why there's no grade
+        note = await asyncio.to_thread(empty_grade_note, day)
+        if note:
+            await channel.send(note)
+    else:
+        embeds[0].title = f"📈 Morning Grade · {day}"
+        await _post_grade(channel, day, embeds, table)
+    _set_grade_state(posted=True)
+    await _late_grades(channel, day)
+
+
+def empty_grade_note(day: str) -> str:
+    """Why a morning grade has nothing to show: nothing tracked (only said on a day with games),
+    or markets tracked but no results back yet (retried by the next mornings' late grades)."""
+    from .tracking import load_day
+    n = len(load_day(TRACKING, day, lean=True))
+    if n:
+        return (f"⏳ **{day}:** {n:,} markets were tracked but none could be graded yet (no final box "
+                f"scores or scores came back). The bot retries them the next two mornings; or "
+                f"`/grade date:{day}` later.")
+    try:
+        from .live_props import espn_games
+        games = sum(len(espn_games(sp, day)) for sp in _alert_sports())
+    except Exception:
+        games = 0
+    if not games:
+        return ""
+    return (f"📭 **{day}:** nothing was tracked ({games} games on the schedule), so there's nothing to grade. "
+            "Pre-tip scans normally track every game; if this repeats, tell Claude.")
+
+
+def late_grade_days(day: str, back: int = 2) -> list:
+    """The days before `day` (up to `back`) that have tracked markets mostly still ungraded:
+    a grade that came back empty, a missed morning, results that arrived late."""
+    from .tracking import load_day
+    out = []
+    for i in range(1, back + 1):
+        d = (dt.date.fromisoformat(day) - dt.timedelta(days=i)).isoformat()
+        recs = load_day(TRACKING, d, lean=True)
+        if recs and sum(1 for r in recs.values() if r.get("result")) < 0.5 * len(recs):
+            out.append(d)
+    return out
+
+
+async def _late_grades(channel, day: str):
+    """Grade (and post) the last two days that still sit mostly ungraded, so a missed or empty
+    morning grade (11/8 and 11/9) catches up by itself."""
+    from .grade_report import day_records, grade_report, graded_keys
+    for d in late_grade_days(day):
+        try:
+            before = await asyncio.to_thread(lambda: graded_keys(day_records(d)))
+            summary, remaining, tracked = await asyncio.to_thread(grade_day, d, [], True)
+            if not (summary or tracked):
+                continue
+            embeds, table = await asyncio.to_thread(grade_report, d, summary, before, remaining)
+            embeds[0].title = f"📈 Late Grade · {d}"
+            await _post_grade(channel, d, embeds, table)
+        except Exception as e:
+            log.warning("late grade %s: %s", d, e)
+
+
+async def _post_grade(channel, day: str, embeds: list, table):
     groups = chunk_embeds(embeds)
     for i, group in enumerate(groups):
         files = [grade_file(table, day)] if i == len(groups) - 1 and table else []
         try:
             await channel.send(embeds=group, files=files)
         except discord.HTTPException as e:   # the file still too big, or an embed refused
-            log.error("posting the morning grade failed (%s): %s", e.status, str(e)[:300])
+            log.error("posting the grade failed (%s): %s", e.status, str(e)[:300])
             try:
                 await channel.send(embeds=group, content=(f"⚠️ The grade file wouldn't attach ({str(e)[:150]})."
                                                           if files else None))
             except discord.HTTPException:
-                await channel.send(f"⚠️ Part of the morning grade for {day} couldn't be posted "
+                await channel.send(f"⚠️ Part of the grade for {day} couldn't be posted "
                                    f"({str(e)[:200]}). Try `/grade date:{day}`.")
-    _set_grade_state(posted=True)
 
 
 @tasks.loop(time=dt.time(11, 0, tzinfo=TZ))

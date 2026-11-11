@@ -568,3 +568,32 @@ class PickemParlayTest(unittest.TestCase):
             msgs = pp_messages([("NBA", res, {"profiles": {}, "context": {}, "history": {}})], "2026-11-11", parlay=True)
         self.assertIn("Parlays", msgs[0][0][0].title)
         self.assertTrue(any(d and d.get("pp") for _e, d in msgs))
+
+
+class LateGradeTest(unittest.TestCase):
+    def test_empty_note_and_late_days(self):
+        import json, os, tempfile
+        from linemaker import bot
+        with tempfile.TemporaryDirectory() as d, mock.patch.object(bot, "TRACKING", d):
+            os.makedirs(os.path.join(d, "NBA-props"))
+            json.dump({"k1": {"result": None}, "k2": {"result": None}},
+                      open(os.path.join(d, "NBA-props", "2026-11-08.json"), "w"))
+            json.dump({"k1": {"result": {"winner": "A"}}, "k2": {"result": {"winner": "B"}}},
+                      open(os.path.join(d, "NBA-props", "2026-11-09.json"), "w"))
+            self.assertIn("2 markets were tracked", bot.empty_grade_note("2026-11-08"))
+            with mock.patch("linemaker.live_props.espn_games", return_value=[{}]):
+                self.assertIn("nothing was tracked", bot.empty_grade_note("2026-11-07"))
+            with mock.patch("linemaker.live_props.espn_games", return_value=[]):
+                self.assertEqual(bot.empty_grade_note("2026-11-07"), "")   # no games: say nothing
+            self.assertEqual(bot.late_grade_days("2026-11-10"), ["2026-11-08"])   # 11/9 already graded
+
+    def test_weekly_weights_not_repeated(self):
+        from linemaker import reports
+        hist = [{"date": "2026-11-0%d" % i, "changes": ["NBA points ×0.92 → ×0.93", "Still collecting x"]} for i in range(3, 9)]
+        with mock.patch("linemaker.autotune.load_weights", return_value={"history": hist}), \
+                mock.patch("linemaker.autotune.current_summary", return_value=""), \
+                mock.patch.object(reports, "load_records", return_value=[]):
+            lines = reports.weekly_lines("2026-11-09")
+        w = next(l for l in lines if l.startswith("**Weights:**"))
+        self.assertEqual(w.count("NBA points"), 1)
+        self.assertIn("6 re-fits this week", w)

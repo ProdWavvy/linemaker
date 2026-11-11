@@ -68,10 +68,13 @@ def weekly_lines(today: str) -> list:
         out.append(f"**Open bets:** {len(b['open'])}")
     from .autotune import current_summary, load_weights
     start = (dt.date.fromisoformat(today) - dt.timedelta(days=7)).isoformat()
-    changes = [c for h in load_weights().get("history", []) if h.get("date", "") >= start
-               for c in h.get("changes", [])]
-    out.append("**Weights:** " + ("; ".join(changes) if changes else "no changes this week")
-               + f"\n{current_summary()}")
+    week = [h for h in load_weights().get("history", []) if h.get("date", "") >= start]
+    # Each re-fit's list repeats most of the one before, so the week is the latest re-fit's
+    # changes (minus "still collecting" notes) and how many re-fits ran, not every list glued.
+    latest = [c for c in (week[-1].get("changes", []) if week else []) if not c.startswith("Still collecting")]
+    note = (f"{len(week)} re-fit{'s' if len(week) != 1 else ''} this week; latest ({week[-1].get('date', '')}): "
+            + ("; ".join(latest) if latest else "no changes") if week else "no changes this week")
+    out.append("**Weights:** " + (note[:1200] + ("…" if len(note) > 1200 else "")) + f"\n{current_summary()}")
     graded = sum(1 for r in recs if r.get("result"))
     from .parlay_track import load_range, summary_lines
     parlay_lines = summary_lines(load_range(7, today))
