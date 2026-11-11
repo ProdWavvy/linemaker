@@ -2322,9 +2322,11 @@ async def grade_cmd(interaction: discord.Interaction, results: Optional[discord.
         from .grade_report import day_records, grade_report, graded_keys
         if GRADE_LOCK.locked():
             await interaction.followup.send("⏳ Another grade is running; this one starts when it's done.")
+        recent = date >= (dt.date.fromisoformat(today()) - dt.timedelta(days=1)).isoformat()
         async with GRADE_LOCK:   # one grade at a time: each loads a whole day of markets
             before = await asyncio.to_thread(lambda: graded_keys(day_records(date)))
-            summary, remaining, tracked = await asyncio.to_thread(grade_day, date, rows, auto)
+            # an older day skips the 60-day re-fit (the next morning's re-fit includes it)
+            summary, remaining, tracked = await asyncio.to_thread(grade_day, date, rows, auto, recent)
             embeds, table = await asyncio.to_thread(grade_report, date, summary, before, remaining)
         if not summary and not tracked and table is None:
             await interaction.followup.send(f"Nothing graded for {date} yet: games may not be "
@@ -2334,7 +2336,12 @@ async def grade_cmd(interaction: discord.Interaction, results: Optional[discord.
         for i, group in enumerate(groups):
             last = i == len(groups) - 1
             files = [grade_file(table, date)] if last and table else []
-            await interaction.followup.send(embeds=group, files=files)
+            try:
+                await interaction.followup.send(embeds=group, files=files)
+            except discord.HTTPException:   # past Discord's 15-minute reply window: post it in the channel
+                if interaction.channel is None:
+                    raise
+                await interaction.channel.send(embeds=group, files=[grade_file(table, date)] if last and table else [])
     except Exception as e:
         await _report_error(interaction, e)
 
@@ -3443,7 +3450,7 @@ async def _late_grades(channel, day: str):
     for d in late_grade_days(day):
         try:
             before = await asyncio.to_thread(lambda: graded_keys(day_records(d)))
-            summary, remaining, tracked = await asyncio.to_thread(grade_day, d, [], True)
+            summary, remaining, tracked = await asyncio.to_thread(grade_day, d, [], True, False)
             if not (summary or tracked):
                 continue
             embeds, table = await asyncio.to_thread(grade_report, d, summary, before, remaining)

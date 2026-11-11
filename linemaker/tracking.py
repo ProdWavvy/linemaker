@@ -289,6 +289,32 @@ def _apply_results(path: str, results: list) -> int:
     return n
 
 
+def _lean_path(path: str) -> str:
+    """tracking/NBA-props/2026-11-08.json -> tracking/.lean/NBA-props/2026-11-08.json"""
+    seg_dir = os.path.dirname(path)
+    return os.path.join(os.path.dirname(seg_dir), ".lean", os.path.basename(seg_dir), os.path.basename(path))
+
+
+def _lean_cache(path: str) -> Optional[dict]:
+    """The day file's graded records, slimmed (see load_records lean), if saved after the file
+    last changed: re-reading 60 days of full files (every price snapshot) made each re-fit,
+    and so each /grade, take minutes."""
+    cp = _lean_path(path)
+    try:
+        if os.path.getmtime(cp) >= os.path.getmtime(path):
+            return load_json(cp)
+    except (OSError, ValueError):
+        pass
+    return None
+
+
+def _save_lean_cache(path: str, slim: dict):
+    try:
+        save_json(_lean_path(path), slim)
+    except (OSError, TypeError, ValueError):
+        pass
+
+
 def load_records(directory: str, days: Optional[int] = None, today: Optional[str] = None,
                  segments: Optional[set] = None, graded_only: bool = False, lean: bool = False,
                  last_prices: bool = False) -> list:
@@ -313,22 +339,31 @@ def load_records(directory: str, days: Optional[int] = None, today: Optional[str
     out = []
     for p in paths:
         seg = os.path.basename(os.path.dirname(p))
-        if True:
-            for key, rec in load_json(p).items():
-                if graded_only and not rec.get("result"):
-                    continue
-                if last_prices:   # /books: the last price read and the result are all it scores
-                    rec = {"result": rec.get("result"), "inputs": {"bet_type": (rec.get("inputs") or {}).get("bet_type")},
-                           "history": (rec.get("history") or [])[-1:], "sport": rec.get("sport"),
-                           "market": rec.get("market")}
-                elif lean:   # only what tuning and reports read
-                    hist = rec.get("history") or []
-                    rec["history"] = (hist[:1] + hist[-2:] if len(hist) > 3 else hist) if rec.get("pick_time") else []
-                    for k in ("books", "projection_steps", "sim"):
-                        rec.pop(k, None)
-                rec["segment"] = seg
-                rec["key"] = key
-                out.append(rec)
+        if graded_only and lean and not last_prices:   # the re-fit and reports: slim copy when it's current
+            cached = _lean_cache(p)
+            if cached is not None:
+                out.extend(dict(r, segment=seg, key=k) for k, r in cached.items())
+                continue
+        slim = {}
+        for key, rec in load_json(p).items():
+            if graded_only and not rec.get("result"):
+                continue
+            if last_prices:   # /books: the last price read and the result are all it scores
+                rec = {"result": rec.get("result"), "inputs": {"bet_type": (rec.get("inputs") or {}).get("bet_type")},
+                       "history": (rec.get("history") or [])[-1:], "sport": rec.get("sport"),
+                       "market": rec.get("market")}
+            elif lean:   # only what tuning and reports read
+                hist = rec.get("history") or []
+                rec["history"] = (hist[:1] + hist[-2:] if len(hist) > 3 else hist) if rec.get("pick_time") else []
+                for k in ("books", "projection_steps", "sim"):
+                    rec.pop(k, None)
+                if graded_only:
+                    slim[key] = dict(rec)
+            rec["segment"] = seg
+            rec["key"] = key
+            out.append(rec)
+        if graded_only and lean and not last_prices:
+            _save_lean_cache(p, slim)
     return out
 
 

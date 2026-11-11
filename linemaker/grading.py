@@ -75,7 +75,7 @@ def regrade_live(date: str, api=None) -> int:
     return apply_results_day(live_base, date, rows)
 
 
-def grade_day(date: str, rows: list, auto: bool):
+def grade_day(date: str, rows: list, auto: bool, refit: bool = True):
     """Score the day's picks and attach results to every tracked market, phase by phase
     (pre-game, live, PrizePicks), each league and kind in its own file.
     Returns (summary lines, remaining credits, number of tracked markets graded)."""
@@ -135,7 +135,9 @@ def grade_day(date: str, rows: list, auto: bool):
         summary.append(f"- 🎰 Auto-parlays graded: **{n_parlays}**")
     if settled:
         summary.append(f"- 🧾 Settled **{settled}** of your logged bets (`/record` for your P/L)")
-    if tracked:
+    if tracked and not refit:
+        summary.append("- ⚖️ Weights not re-fit for an older day; tomorrow morning's re-fit includes these results")
+    elif tracked:
         from .autotune import run_autotune
         try:
             summary += ["- ⚖️ " + line for line in run_autotune(TRACKING, date)]

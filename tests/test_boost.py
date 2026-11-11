@@ -597,3 +597,39 @@ class LateGradeTest(unittest.TestCase):
         w = next(l for l in lines if l.startswith("**Weights:**"))
         self.assertEqual(w.count("NBA points"), 1)
         self.assertIn("6 re-fits this week", w)
+
+
+class LeanCacheTest(unittest.TestCase):
+    def test_slim_copy_used_and_refreshed(self):
+        import json, os, tempfile, time
+        from linemaker import tracking
+        with tempfile.TemporaryDirectory() as d:
+            os.makedirs(os.path.join(d, "NBA-props"))
+            src = os.path.join(d, "NBA-props", "2026-11-08.json")
+            json.dump({"k1": {"result": {"winner": "A"}, "history": [{"t": str(i)} for i in range(30)], "books": {}},
+                       "k2": {"result": None}}, open(src, "w"))
+            first = tracking.load_records(d, 5, "2026-11-09", graded_only=True, lean=True)
+            self.assertTrue(os.path.exists(os.path.join(d, ".lean", "NBA-props", "2026-11-08.json")))
+            with mock.patch.object(tracking, "load_json", wraps=tracking.load_json) as lj:
+                again = tracking.load_records(d, 5, "2026-11-09", graded_only=True, lean=True)
+                self.assertTrue(all(".lean" in c.args[0] for c in lj.call_args_list))   # the slim copy only
+            self.assertEqual([r["key"] for r in again], [r["key"] for r in first])
+            time.sleep(0.01)
+            json.dump({"k1": {"result": {"winner": "A"}}, "k2": {"result": {"winner": "B"}}}, open(src, "w"))
+            os.utime(src, (time.time() + 5, time.time() + 5))
+            fresh = tracking.load_records(d, 5, "2026-11-09", graded_only=True, lean=True)
+            self.assertEqual(sorted(r["key"] for r in fresh), ["k1", "k2"])   # the newer file wins
+
+    def test_older_day_skips_refit(self):
+        from linemaker import grading
+        with mock.patch("linemaker.tracking.load_day", return_value={"k": {"x": 1}}), \
+                mock.patch("linemaker.tracking.apply_results_day", return_value=5), \
+                mock.patch("linemaker.bets.settle", return_value=0), \
+                mock.patch("linemaker.parlay_track.grade_parlays", return_value=0), \
+                mock.patch("linemaker.autotune.run_autotune") as refit:
+            grading.grade_day("2026-11-08", [{"game_id": "g", "subject": "s", "market": "m", "line": "1", "actual": "2"}],
+                              False, refit=False)
+            refit.assert_not_called()
+            grading.grade_day("2026-11-10", [{"game_id": "g", "subject": "s", "market": "m", "line": "1", "actual": "2"}],
+                              False, refit=True)
+            refit.assert_called_once()

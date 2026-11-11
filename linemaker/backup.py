@@ -54,7 +54,8 @@ def _sources(root: str) -> list:
     out = []
     for base in (tdir, sdir):
         full = base if os.path.isabs(base) else os.path.join(root, base)
-        for dirpath, _dirs, files in os.walk(full):
+        for dirpath, dirs, files in os.walk(full):
+            dirs[:] = [d for d in dirs if not d.startswith(".")]   # .lean: slim copies, rebuilt from the files
             for name in files:
                 if name.endswith(".json"):
                     src = os.path.join(dirpath, name)
