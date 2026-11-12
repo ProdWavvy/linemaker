@@ -633,3 +633,14 @@ class LeanCacheTest(unittest.TestCase):
             grading.grade_day("2026-11-10", [{"game_id": "g", "subject": "s", "market": "m", "line": "1", "actual": "2"}],
                               False, refit=True)
             refit.assert_called_once()
+
+
+class PlainAskTest(unittest.TestCase):
+    def test_short_props_asks_skip_the_ai(self):
+        from linemaker.chat import quick_book, quick_plays_request
+        self.assertIsNotNone(quick_plays_request("player props polymarket"))
+        self.assertEqual(quick_book("polymarket player props"), "Polymarket")
+        self.assertIsNotNone(quick_plays_request("fanduel picks"))
+        self.assertIsNone(quick_plays_request("how do parlays work"))
+        self.assertIsNone(quick_plays_request("why did my picks lose"))
+        self.assertIsNotNone(quick_plays_request("what are the best props tonight?"))

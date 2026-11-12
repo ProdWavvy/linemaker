@@ -1346,10 +1346,16 @@ def quick_plays_request(text: str) -> Optional[list]:
                   and (BET_WORDS.search(text) or GAME_LINE_WORDS.search(text))
                   and not QUESTION_WORDS.search(text))   # "ufc props", "nhl picks"
     boost = parse_boost(text) is not None   # "30% nfl boost": a ticket to put a profit boost on
+    # A short ask that just names props / picks ("player props polymarket", "fanduel picks"):
+    # a scan of today's main leagues, never the AI model (which can be overloaded).
+    plain = (BET_WORDS.search(text) is not None and not QUESTION_WORDS.search(text)
+             and len(re.findall(r"[a-z0-9+%']+", text.lower())) <= 6)
     if not (PLAYS_INTENT.search(text) or GAMES_INTENT.search(text) or LIVE_INTENT.search(text)
             or PP_WORDS.search(text) or quick_kind(text) == "ud" or quick_mode(text) in ("volume", "market")
-            or league_ask or boost):
+            or league_ask or boost or plain):
         return None
+    if QUESTION_WORDS.match(text.strip()) and not PLAYS_INTENT.search(text) and not boost:
+        return None   # "how do parlays work?": a question for the model, not a scan
     if not boost and re.search(r"\b(i have|i think|i got|projection|my number|at \d)", text, re.I):
         return None   # the user supplied their own number: let the model read it
     if ALL_SPORTS_WORDS.search(text):   # "all sports": every league with a model, empty ones drop off

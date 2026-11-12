@@ -3351,7 +3351,14 @@ GRADE_LOCK = asyncio.Lock()
 
 async def morning_grade(day: str):
     async with GRADE_LOCK:
-        await _morning_grade(day)
+        try:
+            await _morning_grade(day)
+        except Exception as e:   # anything outside the grade's own error report: say so in the channel
+            log.exception("morning grade %s failed", day)
+            channel = bot.get_channel(int(os.environ.get("LINEMAKER_CHANNEL_ID") or bot.home or 0))
+            if channel is not None:
+                await channel.send(f"⚠️ Morning grade for {day} stopped: {type(e).__name__}: {str(e)[:300]}. "
+                                   f"Try `/grade date:{day}`.")
 
 
 async def _morning_grade(day: str):
@@ -3387,6 +3394,16 @@ async def _morning_grade(day: str):
                                f"Try `/grade date:{day}`.")
         return
     log.info("daily grade %s: %d tracked markets graded", day, tracked)
+    # Post first: the backup and warm-up below can be slow, and nothing should hold up the grade.
+    if channel is not None:
+        if not (summary or tracked):   # never silent: say why there's no grade
+            note = await asyncio.to_thread(empty_grade_note, day)
+            if note:
+                await channel.send(note)
+        else:
+            embeds[0].title = f"📈 Morning Grade · {day}"
+            await _post_grade(channel, day, embeds, table)
+    _set_grade_state(posted=True)
     from .backup import configured, run_backup
     if configured():   # everything learned overnight goes to the private backup repo
         try:
@@ -3395,19 +3412,9 @@ async def _morning_grade(day: str):
             log.error("backup failed: %s", e)
             if channel is not None:
                 await channel.send(f"💾⚠️ Nightly backup failed: {str(e)[:300]}")
+    if channel is not None:
+        await _late_grades(channel, day)
     await _warm_up()
-    if channel is None:
-        _set_grade_state(posted=True)
-        return
-    if not (summary or tracked):   # never silent: say why there's no grade
-        note = await asyncio.to_thread(empty_grade_note, day)
-        if note:
-            await channel.send(note)
-    else:
-        embeds[0].title = f"📈 Morning Grade · {day}"
-        await _post_grade(channel, day, embeds, table)
-    _set_grade_state(posted=True)
-    await _late_grades(channel, day)
 
 
 def empty_grade_note(day: str) -> str:
@@ -3447,7 +3454,7 @@ async def _late_grades(channel, day: str):
     """Grade (and post) the last two days that still sit mostly ungraded, so a missed or empty
     morning grade (11/8 and 11/9) catches up by itself."""
     from .grade_report import day_records, grade_report, graded_keys
-    for d in late_grade_days(day):
+    for d in await asyncio.to_thread(late_grade_days, day):   # reads two days of files: off the main loop
         try:
             before = await asyncio.to_thread(lambda: graded_keys(day_records(d)))
             summary, remaining, tracked = await asyncio.to_thread(grade_day, d, [], True, False)
