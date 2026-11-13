@@ -560,8 +560,10 @@ class LinemakerChat:
                 except Exception as e:
                     errors[sport] = friendly_error(sport, e)
             await asyncio.gather(*(scan(s) for s in quick))   # leagues at once: 4 leagues ~ the time of 1
+            idle = []
             if len(quick) > 1 and ctx.get("results"):   # leagues with no games today drop off the card
                 playing = [r for r in ctx["results"] if getattr(r[1], "slate", None) or getattr(r[1], "games", 0)]
+                idle = [r[0] for r in ctx["results"] if r not in playing]
                 ctx["results"] = playing or ctx["results"][:1]
             spec = parse_boost(text)
             if spec is not None:   # the card becomes "where to put this boost" (bot.cards_for)
@@ -572,6 +574,9 @@ class LinemakerChat:
             if ctx.get("results"):
                 ctx["results"].sort(key=lambda r: order.get(r[0], 99))
             reply = "\n".join(errors[s] for s in quick if s in errors)   # the pick cards carry the answer
+            if idle:   # say which leagues were checked but aren't on the card, so none goes missing quietly
+                reply = (reply + "\n" if reply else "") + ("Also checked, no games left to price today: "
+                                                          + ", ".join(idle) + ".")
 
         elif self.provider == "gemini":
             reply = await self._gemini_reply(list(history), f"{author}: {text}", system, ctx)
