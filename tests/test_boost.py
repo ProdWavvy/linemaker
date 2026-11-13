@@ -644,3 +644,28 @@ class PlainAskTest(unittest.TestCase):
         self.assertIsNone(quick_plays_request("how do parlays work"))
         self.assertIsNone(quick_plays_request("why did my picks lose"))
         self.assertIsNotNone(quick_plays_request("what are the best props tonight?"))
+
+
+class PolymarketMoneylineTest(unittest.TestCase):
+    def test_bare_ml_ask_is_the_moneyline_board(self):
+        from linemaker.chat import game_parlay_types, quick_book, quick_kind, quick_mode, quick_plays_request
+        t = "polymarket ml"
+        self.assertIsNotNone(quick_plays_request(t))
+        self.assertEqual((quick_kind(t), quick_mode(t), quick_book(t), game_parlay_types(t)),
+                         ("games", "volume", "Polymarket", ["moneyline"]))
+        self.assertEqual(quick_mode("nba totals"), "smart")
+        self.assertIsNone(quick_plays_request("how does ml work"))
+
+    def test_moneyline_legs_priced_at_polymarket_only(self):
+        from dataclasses import replace
+        from linemaker.pro import ml_parlay_config, rows_to_markets, run_pro
+        rows = []
+        for i, f in enumerate([-200, -250, -300, -180]):
+            base = {"date": "2026-11-13", "sport": "NBA", "game_id": f"g{i}", "game": f"A{i} @ H{i}",
+                    "subject": f"H{i}", "opponent": f"A{i}", "mean": str(6 + i), "stdev": "12"}
+            books = f"FanDuel:{f}/{int(-f * .8)}|DraftKings:{f - 5}/{int(-f * .8) - 5}|Polymarket:{f + 10}/{int(-f * .8) + 5}"
+            rows.append(dict(base, bet_type="moneyline", market="moneyline", line="0", books=books))
+        cfg = replace(ml_parlay_config(track=False), bet_books=("Polymarket",))
+        res = run_pro(rows_to_markets(rows), "2026-11-13", cfg)
+        self.assertTrue(res.picks)
+        self.assertTrue(all(ev.best.best_book == "Polymarket" for ev in res.picks))

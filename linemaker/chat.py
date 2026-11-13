@@ -1247,6 +1247,10 @@ def quick_mode(text: str) -> str:
         return "market"
     if STRONG_VOLUME.search(text) or (SOFT_VOLUME.search(text) and BET_WORDS.search(text)):
         return "volume"
+    if game_parlay_types(text) and not LIVE_WORDS.search(text) and not BET_WORDS.search(text):
+        # "polymarket ml", "nba spreads": each game's likelier winner / best spread and their
+        # parlays (model picks on game lines are rare, so that card was usually empty)
+        return "volume"
     return "smart"
 
 
@@ -1348,8 +1352,8 @@ def quick_plays_request(text: str) -> Optional[list]:
     boost = parse_boost(text) is not None   # "30% nfl boost": a ticket to put a profit boost on
     # A short ask that just names props / picks ("player props polymarket", "fanduel picks"):
     # a scan of today's main leagues, never the AI model (which can be overloaded).
-    plain = (BET_WORDS.search(text) is not None and not QUESTION_WORDS.search(text)
-             and len(re.findall(r"[a-z0-9+%']+", text.lower())) <= 6)
+    plain = ((BET_WORDS.search(text) is not None or GAME_LINE_WORDS.search(text) is not None)
+             and not QUESTION_WORDS.search(text) and len(re.findall(r"[a-z0-9+%']+", text.lower())) <= 6)
     if not (PLAYS_INTENT.search(text) or GAMES_INTENT.search(text) or LIVE_INTENT.search(text)
             or PP_WORDS.search(text) or quick_kind(text) == "ud" or quick_mode(text) in ("volume", "market")
             or league_ask or boost or plain):
