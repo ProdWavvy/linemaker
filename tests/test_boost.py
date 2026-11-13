@@ -756,3 +756,43 @@ class SlipLinksTest(unittest.TestCase):
             sports = quick_plays_request("crosssport parlay")
         self.assertIn("NHL", sports)
         self.assertNotIn("NCAAF", sports)   # no college props in NY: not on a props card
+
+
+class SlipButtonsTest(unittest.TestCase):
+    def test_polymarket_gets_a_button_per_leg_and_fanduel_one_slip(self):
+        from types import SimpleNamespace as NS
+        from linemaker import bot
+
+        def ev(i, book, entry):
+            m = NS(game_id=f"g{i}", side_keys=("A", "B"), links={book: [entry, None]}, line=1.5)
+            return NS(market=m, best=NS(side="A", label=f"Team {i} ML"))
+
+        async def go():
+            pm = NS(book="Polymarket", legs=[(ev(i, "Polymarket", {"link": "", "sid": "", "msid": "",
+                                                                    "mlink": f"https://polymarket.com/event/g{i}",
+                                                                    "elink": ""}), -150) for i in range(3)])
+            fd = NS(book="FanDuel", legs=[(ev(i, "FanDuel", {"link": "", "sid": f"s{i}", "msid": f"m{i}",
+                                                              "mlink": "", "elink": ""}), -150) for i in range(2)])
+            v1, v2 = discord.ui.View(), discord.ui.View()
+            return bot.slip_buttons(pm, v1), [c.label for c in v1.children], bot.slip_buttons(fd, v2), [c.label for c in v2.children]
+        import discord
+        n_pm, pm_labels, n_fd, fd_labels = asyncio.run(go())
+        self.assertEqual(n_pm, 3)
+        self.assertTrue(pm_labels[0].startswith("Leg 1: Team 0 ML"))
+        self.assertEqual((n_fd, fd_labels), (1, ["Open the slip on FanDuel"]))
+
+    def test_cards_no_longer_carry_leg_links(self):
+        from types import SimpleNamespace as NS
+        from linemaker.scan_format import parlay_box
+        ev = NS(market=NS(game_id="g", side_keys=("A", "B"), line=1.5,
+                          links={"Polymarket": [{"link": "", "sid": "", "msid": "", "mlink": "https://polymarket.com/event/g",
+                                                 "elink": ""}, None]}),
+                best=NS(side="A", label="Team ML", blended=0.6))
+        p = NS(book="Polymarket", legs=[(ev, -150)], style="safest", kind="", prob=0.6, indep_prob=0.6,
+               decimal=1.67, american=-150, ev=0.0, boost=0.0, sgp_estimated=False, listed_decimal=1.67)
+        with mock.patch("linemaker.parlay_format.money_line", return_value="money"), \
+                mock.patch("linemaker.parlay_format.legs_lines", return_value=["• Team ML"]), \
+                mock.patch("linemaker.parlay_format.odds_text", return_value="-150"), \
+                mock.patch("linemaker.parlay_format.sgp_line", return_value=""):
+            e = parlay_box(p)
+        self.assertNotIn("polymarket.com", e.description)

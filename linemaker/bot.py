@@ -331,6 +331,29 @@ class BetModal(discord.ui.Modal):
             ephemeral=True)
 
 
+def slip_buttons(p, view: discord.ui.View, row: Optional[int] = None, limit: int = 25) -> int:
+    """The slip buttons for a parlay you just logged: "Open the slip on X" where the book takes
+    a one-tap slip (FanDuel, DraftKings), else one "Leg N" button per leg opening that bet's
+    page (Polymarket builds parlays in the app, one leg at a time). Returns how many it added."""
+    from .betlinks import leg_links, parlay_link
+    from .parlay_format import short_label
+    url = parlay_link(p)
+    if url and len(url) <= 512:
+        if len(view.children) < limit:
+            view.add_item(discord.ui.Button(label=f"Open the slip on {p.book}", url=url, row=row,
+                                            emoji=book_emoji(p.book)))
+            return 1
+        return 0
+    added = 0
+    for i, (label, u) in enumerate(leg_links(p), 1):
+        if len(u) > 512 or len(view.children) >= limit:
+            continue
+        view.add_item(discord.ui.Button(label=f"Leg {i}: {short_label(label)}"[:80], url=u,
+                                        emoji=book_emoji(p.book)))
+        added += 1
+    return added
+
+
 def bet_button(key: str, i: int, p, label: Optional[str] = None, row: Optional[int] = None) -> discord.ui.Button:
     """'Bet': logs the parlay (your suggested stake) and hands back its one-tap slip, with
     Change stake and Undo, so every parlay you place from the bot is tracked."""
@@ -378,10 +401,9 @@ def _bet_go(key: str, i: int):
             view = discord.ui.View(timeout=None)
             url = parlay_link(p)
             live = any(getattr(ev, "phase", "pre") == "live" for ev, _o in p.legs)
-            if url and len(url) <= 512:
-                view.add_item(discord.ui.Button(label=f"Open the slip on {p.book}", url=url,
-                                                emoji=book_emoji(p.book)))
-            else:
+            leg_buttons = 0 if url and len(url) <= 512 else len(p.legs)
+            if not slip_buttons(p, view, limit=20):
+                leg_buttons = 0
                 view.add_item(discord.ui.Button(label=f"Open {p.book}" + (" live" if live else ""),
                                                 url=book_home(p.book, live)))
             view.add_item(discord.ui.Button(label="Change stake / odds", emoji="✏️", style=discord.ButtonStyle.secondary,
@@ -402,8 +424,8 @@ def _bet_go(key: str, i: int):
             head = head0 + ("Already logged" if again else "📝 Logged") + (
                 f" **{_money(bet['stake'])}** on the {len(p.legs)}-leg {p.book} parlay at **{fmt_odds(bet['odds'])}**"
                 f"{practice}.")
-            from .betlinks import slip_text
-            tail = ("" if url else "\n" + (slip_text(p) or "No one-tap slip for this one: open the book and add the legs.")) + (
+            tail = ("" if url else "\n" + (f"🧾 {p.book} has no one-tap slip: tap each **Leg** button below and add it there."
+                                           if leg_buttons else "No one-tap slip for this one: open the book and add the legs.")) + (
                 f"\n🔗 Same-game legs: ≈{fmt_odds(p.american)} is an estimate of {p.book}'s SGP price. "
                 "If the slip shows a different price, ✏️ it so your record is right."
                 if getattr(p, "sgp_estimated", False) else "") + (
@@ -980,10 +1002,12 @@ def parlay_card(legs: list, books: Optional[tuple] = None, boost: float = 0.0,
         url = parlay_link(p)
         if url and len(url) > 512:   # too long for a button (Discord caps those at 512): a link in the text
             value += f"\n🧾 [Open this {len(p.legs)}-leg slip on {p.book}]({url})"
-        elif not url:   # no one-tap slip: each leg's own page where there is one (Polymarket), else the book
-            from .betlinks import slip_text
-            value += "\n" + (slip_text(p) or f"🧾 {p.book} didn't send slip ids for every leg, so there's no "
-                                              "one-tap slip: Bet logs it and opens the book; add the legs above.")
+        elif not url:   # no one-tap slip: Bet logs it, then hands back a button per leg (or the book)
+            from .betlinks import leg_links
+            value += (f"\n🧾 No one-tap slip at {p.book}: Bet logs it, then gives you a button for each leg."
+                      if leg_links(p) else
+                      f"\n🧾 {p.book} didn't send slip ids for every leg, so there's no one-tap slip: "
+                      "Bet logs it and opens the book; add the legs above.")
         embed.add_field(name=header(p), value=value[:1024], inline=False)
         # pool: a card's parlay (not your own slip) swaps out players you've bet since (_bet_go)
         key = _remember({"parlays": [p], **({"pool": pool} if pool else {})})
@@ -1080,8 +1104,7 @@ def targets_card(picks: list, books, found: Optional[dict] = None, tkey: Optiona
                 was = first_seen.setdefault((book, exposure(ev)), target)
                 if was != target:
                     shared.append(f"{ev.best.label} (also in +{(was - 1) * 100:.0f})")
-            from .betlinks import slip_text
-            extra = [roll] + ([f"🔗 Shares: {', '.join(shared)}"] if shared else []) + ([slip_text(p)] if slip_text(p) else [])
+            extra = [roll] + ([f"🔗 Shares: {', '.join(shared)}"] if shared else [])
             if getattr(p, "reuses", False):
                 extra.append("⚠️ Not enough separate legs left for this payout, so it reuses legs "
                              "from the smaller ones.")
@@ -1152,10 +1175,8 @@ def parlay_board(key: str) -> tuple:
     if last in placed:   # the slip for the one just logged
         b = open_ids[placed[last]]
         lp = d.get("last_parlay")
-        url = parlay_link(lp) if lp is not None else None
-        if url and len(url) <= 512:
-            view.add_item(discord.ui.Button(label=f"Open the slip on {b.get('book', '')}", url=url, row=4,
-                                            emoji=book_emoji(b.get("book"))))
+        if lp is not None:
+            slip_buttons(lp, view, row=4)
     return embed, view
 
 
@@ -1479,10 +1500,7 @@ def _targets_bet(tkey: str, k: str):
             embeds[0].description = (embeds[0].description or "") + (
                 "\n\n**Logged from this card** (the payouts below now leave these players out):\n"
                 + "\n".join(d["placed"][-8:]))[:3500]
-            url = parlay_link(p)
-            if url and len(url) <= 512 and len(view.children) < 25:
-                view.add_item(discord.ui.Button(label=f"Open the slip on {p.book}", url=url, row=4,
-                                                emoji=book_emoji(p.book)))
+            slip_buttons(p, view, row=4)
             note = (f"{'Already logged' if again else '📝 Logged'} **{_money(bet['stake'])}** on the "
                     f"{len(p.legs)}-leg {p.book} at **{fmt_odds(bet['odds'])}**"
                     + (f" (🔄 {'; '.join(notes)})" if notes else "") + ". Open the slip below; ✏️ / ↩️ / 🎁 in /bets.")
