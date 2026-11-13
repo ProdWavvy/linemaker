@@ -669,3 +669,10 @@ class PolymarketMoneylineTest(unittest.TestCase):
         res = run_pro(rows_to_markets(rows), "2026-11-13", cfg)
         self.assertTrue(res.picks)
         self.assertTrue(all(ev.best.best_book == "Polymarket" for ev in res.picks))
+
+
+class AllSportsMoneylineTest(unittest.TestCase):
+    def test_ufc_joins_all_sports_game_lines_only(self):
+        from linemaker.chat import quick_plays_request
+        self.assertIn("UFC", quick_plays_request("polymarket ml all sports"))
+        self.assertNotIn("UFC", quick_plays_request("best props all sports"))

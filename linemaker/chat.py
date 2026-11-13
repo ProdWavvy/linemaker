@@ -1363,7 +1363,10 @@ def quick_plays_request(text: str) -> Optional[list]:
     if not boost and re.search(r"\b(i have|i think|i got|projection|my number|at \d)", text, re.I):
         return None   # the user supplied their own number: let the model read it
     if ALL_SPORTS_WORDS.search(text):   # "all sports": every league with a model, empty ones drop off
-        return [s.strip().upper() for s in os.environ.get("LINEMAKER_ALL_SPORTS", ALL_SPORTS).split(",") if s.strip()]
+        out = [s.strip().upper() for s in os.environ.get("LINEMAKER_ALL_SPORTS", ALL_SPORTS).split(",") if s.strip()]
+        if quick_kind(text) in ("games", "live") and "UFC" not in out:
+            out.append("UFC")   # fight winners are moneylines too (UFC has no props in the feed)
+        return out
     sports, rest = [], text
     for s, pat in SPORT_WORDS.items():
         if re.search(pat, rest, re.I):
