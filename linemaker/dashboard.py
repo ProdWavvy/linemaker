@@ -11,6 +11,8 @@ ASKS = [
     ("🏀 Props", "`best nba props` · `best nfl props` · `mlb props` · `knicks props` · `celtics vs knicks props`"),
     ("🌎 All sports", "`all sports parlay` · `best props all sports`: NBA, NFL, college football, NHL, "
                      "WNBA and MLB at once (leagues with no games drop off)"),
+    ("🏀 College hoops", "`college basketball ml` · `cbb spreads` · `ncaab ml parlay` · `polymarket ml all sports` "
+                         "(game lines only: college props aren't offered in NY)"),
     ("🎰 Parlays", "`best nba props parlay` · `ml parlay nfl` · `ml and spread parlay nba` · "
                   "`spread parlay nfl` · `run line parlay mlb`"),
     ("🚀 Boosts", "`30% nfl boost` · `50% nba boost fanduel` · `cross sport 25% boost min odds +300 "

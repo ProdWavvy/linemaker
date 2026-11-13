@@ -16,7 +16,7 @@ from .gamelogs import MIN_SEASON_GAMES, apply_hit_gate
 from .pro import book_prices
 
 PURPLE, RED = 0x9B59B6, 0xE67E22
-SPORT_NAMES = {"NBA": "NBA", "WNBA": "WNBA", "NFL": "NFL", "NCAAF": "College Football",
+SPORT_NAMES = {"NBA": "NBA", "WNBA": "WNBA", "NFL": "NFL", "NCAAF": "College Football", "NCAAB": "College Basketball",
                "MLB": "MLB", "NHL": "NHL", "UCL": "Champions League", "LALIGA": "La Liga",
                "UFC": "UFC"}
 

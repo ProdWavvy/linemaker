@@ -18,7 +18,8 @@ from .oddsapi import norm
 log = logging.getLogger("linemaker.gamelogs")
 WEB = "https://site.web.api.espn.com/apis/common/v3/sports"
 PATHS = {"NBA": "basketball/nba", "WNBA": "basketball/wnba", "NFL": "football/nfl",
-         "NCAAF": "football/college-football", "NHL": "hockey/nhl", "MLB": "baseball/mlb"}
+         "NCAAF": "football/college-football", "NHL": "hockey/nhl", "MLB": "baseball/mlb",
+         "NCAAB": "basketball/mens-college-basketball"}
 BASKETBALL = {"points": ("points",), "rebounds": ("totalRebounds",), "assists": ("assists",),
               "threes": ("threePointFieldGoalsMade",),
               "pra": ("points", "totalRebounds", "assists"),
@@ -86,7 +87,7 @@ def _season_year(sport: str, date: str) -> int:
     """ESPN's season label: NBA/NHL by the year they end (2026-27 -> 2027), NFL and college
     football by the year they start, WNBA and MLB by calendar year."""
     d = dt.date.fromisoformat(date)
-    if sport in ("NBA", "NHL"):
+    if sport in ("NBA", "NHL", "NCAAB"):
         return d.year + 1 if d.month >= 8 else d.year
     if sport in ("NFL", "NCAAF"):
         return d.year if d.month >= 3 else d.year - 1

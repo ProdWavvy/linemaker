@@ -35,10 +35,10 @@ from .oddsapi import norm
 from .sim import DEFAULT_NORMAL_SD
 
 log = logging.getLogger("linemaker.game_model")
-SUPPORTED = ("NBA", "WNBA", "NFL", "NCAAF", "NHL", "MLB", "UFC")
+SUPPORTED = ("NBA", "WNBA", "NFL", "NCAAF", "NHL", "MLB", "UFC", "NCAAB")
 # Games of this season that count as much as all of last season.
-SEASON_K = {"NBA": 15, "WNBA": 10, "NFL": 4, "NCAAF": 4, "NHL": 20, "MLB": 40}
-HOME_EDGE = {"NBA": 2.3, "WNBA": 2.0, "NFL": 1.5, "NCAAF": 2.8, "NHL": 0.15, "MLB": 0.15}
+SEASON_K = {"NBA": 15, "WNBA": 10, "NFL": 4, "NCAAF": 4, "NHL": 20, "MLB": 40, "NCAAB": 6}
+HOME_EDGE = {"NBA": 2.3, "WNBA": 2.0, "NFL": 1.5, "NCAAF": 2.8, "NHL": 0.15, "MLB": 0.15, "NCAAB": 3.0}
 REST_PENALTY = {"NBA": 1.5, "WNBA": 1.0, "NHL": 0.12}
 SD = {**{k[0]: v for k, v in DEFAULT_NORMAL_SD.items() if k[1] == "margin"}, "MLB": 4.4}
 TOTAL_SD = {**{k[0]: v for k, v in DEFAULT_NORMAL_SD.items() if k[1] == "total"}, "MLB": 4.5}
@@ -99,6 +99,9 @@ def parse_standings(data: dict) -> dict:
 def team_ratings(sport: str, date: str) -> dict:
     """norm(team) -> {"scored", "allowed", "games", "basis"} blended across two seasons."""
     year = _season_year(sport, date)
+    if sport == "NCAAB":   # standings are conference games only: ratings from every D-I result
+        from .ncaab_model import ratings
+        return ratings(date, standings(sport, year - 1))
     now, last = standings(sport, year), standings(sport, year - 1)
 
     def league_avg(table):
@@ -125,13 +128,28 @@ def team_ratings(sport: str, date: str) -> dict:
     return out
 
 
+def _tokens(name: str) -> set:
+    t = set(norm(name).replace("state", "st").replace("saint", "st").replace(".", "").replace("'", "").split())
+    return {x for x in t if x not in ("university", "of", "the")}
+
+
 def _find(ratings: dict, team: str) -> Optional[dict]:
     key = norm(team)
     if key in ratings:
         return ratings[key]
     nick = key.split()[-1:]
     hits = [v for k, v in ratings.items() if k.split()[-1:] == nick]
-    return hits[0] if len(hits) == 1 else None
+    if len(hits) == 1:
+        return hits[0]
+    # College names differ between feeds ("Florida St Seminoles" / "Florida State Seminoles",
+    # "Miami (FL) Hurricanes"): the best token overlap, if it's clear.
+    want = _tokens(team)
+    if not want:
+        return None
+    scored = sorted(((len(want & _tokens(k)) / len(want | _tokens(k)), k) for k in ratings), reverse=True)
+    if scored and scored[0][0] >= 0.6 and (len(scored) == 1 or scored[0][0] > scored[1][0]):
+        return ratings[scored[0][1]]
+    return None
 
 
 def played_yesterday(sport: str, date: str) -> set:
@@ -152,17 +170,19 @@ def _z(p: float) -> float:
 
 
 def project_game(sport: str, home: str, away: str, ratings: dict, tired: set,
-                 kalshi_home: Optional[float]) -> Optional[dict]:
-    """{"margin", "total", "steps"} from the home team's view, or None without ratings."""
+                 kalshi_home: Optional[float], neutral: bool = False) -> Optional[dict]:
+    """{"margin", "total", "steps"} from the home team's view, or None without ratings.
+    neutral: a neutral-site game (no home edge)."""
     h, a = _find(ratings, home), _find(ratings, away)
     if not h or not a:
         return None
     pts_h = h["scored"] + a["allowed"] - h["avg"]
     pts_a = a["scored"] + h["allowed"] - h["avg"]
-    margin = pts_h - pts_a + HOME_EDGE.get(sport, 0.0)
+    edge = 0.0 if neutral else HOME_EDGE.get(sport, 0.0)
+    margin = pts_h - pts_a + edge
     steps = [(f"{home} expected score ({h['basis']})", f"{pts_h:.2f}"),
              (f"{away} expected score ({a['basis']})", f"{pts_a:.2f}"),
-             ("home edge", f"{HOME_EDGE.get(sport, 0.0):+.2f}")]
+             ("home edge" + (" (neutral site: none)" if neutral else ""), f"{edge:+.2f}")]
     pen = REST_PENALTY.get(sport, 0.0)
     for team, sign in ((home, -1), (away, 1)):
         if norm(team) in tired:
@@ -211,6 +231,13 @@ def game_projections(sport: str, date: str, games: list, use_kalshi: bool = True
             rain = game_weather_total(sport, date)
         except Exception as e:
             log.warning("weather unavailable: %s", e)
+    neutral = set()
+    if sport == "NCAAB":
+        from .ncaab_model import neutral_games
+        try:
+            neutral = neutral_games(date)
+        except Exception as e:
+            log.warning("ncaab neutral sites unavailable: %s", e)
     pitchers = {}
     if sport == "MLB":
         from .mlb_matchups import starters
@@ -221,7 +248,8 @@ def game_projections(sport: str, date: str, games: list, use_kalshi: bool = True
     rows = []
     for away, home in games:
         k = game_kalshi(kalshi, away, home) if kalshi else None
-        g = project_game(sport, home, away, ratings, tired, k.get(home) if k else None)
+        g = project_game(sport, home, away, ratings, tired, k.get(home) if k else None,
+                         neutral=(norm(away), norm(home)) in neutral)
         if not g:
             log.info("game model: no ratings for %s @ %s", away, home)
             continue

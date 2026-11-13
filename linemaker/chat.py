@@ -341,6 +341,9 @@ class LinemakerChat:
             sport = args["sport"].upper()
             if sport == "UFC":
                 kind = "games"   # fights: winners only, there are no UFC props in the feed
+            from .oddsapi import no_props_sports
+            if kind == "props" and sport in no_props_sports():
+                kind = "games"   # college props aren't offered here (NY): its game lines instead
             from .pro import rows_to_markets, run_pro, volume_config
             snaps = os.environ.get("LINEMAKER_SNAPSHOTS", "snapshots")
             rows, slate, remaining, warning, source = slate_for(sport, date, kind,
@@ -1210,6 +1213,7 @@ GAMES_INTENT = re.compile(
 SPORT_WORDS = {"UFC": r"\b(ufc|mma|fights?|fight night)\b",
                "WNBA": r"\b(wnba|women'?s basketball)\b",
                "NCAAF": r"\b(ncaaf|cfb|college football)\b",
+               "NCAAB": r"\b(ncaab|cbb|ncaa basketball|(men'?s )?college basketball|college hoops|march madness)\b",
                "NBA": r"\b(nba|basketball)\b", "NFL": r"\b(nfl|football)\b",
                "MLB": r"\b(mlb|baseball)\b", "NHL": r"\b(nhl|hockey)\b"}
 
@@ -1364,8 +1368,8 @@ def quick_plays_request(text: str) -> Optional[list]:
         return None   # the user supplied their own number: let the model read it
     if ALL_SPORTS_WORDS.search(text):   # "all sports": every league with a model, empty ones drop off
         out = [s.strip().upper() for s in os.environ.get("LINEMAKER_ALL_SPORTS", ALL_SPORTS).split(",") if s.strip()]
-        if quick_kind(text) in ("games", "live") and "UFC" not in out:
-            out.append("UFC")   # fight winners are moneylines too (UFC has no props in the feed)
+        if quick_kind(text) in ("games", "live"):   # game lines only: UFC fights and college basketball
+            out += [s for s in ("NCAAB", "UFC") if s not in out]
         return out
     sports, rest = [], text
     for s, pat in SPORT_WORDS.items():

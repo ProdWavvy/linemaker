@@ -35,7 +35,7 @@ DEFAULT_NORMAL_SD = {             # (sport, kind) -> sd
     ("NFL", "margin"): 13.5, ("NCAAF", "margin"): 16.0, ("NBA", "margin"): 12.0,
     ("WNBA", "margin"): 11.0, ("NHL", "margin"): 2.3, ("NFL", "total"): 13.0,
     ("NCAAF", "total"): 16.0, ("NBA", "total"): 18.0, ("WNBA", "total"): 15.0,
-    ("NHL", "total"): 2.2,
+    ("NHL", "total"): 2.2, ("NCAAB", "margin"): 11.0, ("NCAAB", "total"): 15.0,
 }
 
 

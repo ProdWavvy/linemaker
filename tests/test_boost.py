@@ -676,3 +676,38 @@ class AllSportsMoneylineTest(unittest.TestCase):
         from linemaker.chat import quick_plays_request
         self.assertIn("UFC", quick_plays_request("polymarket ml all sports"))
         self.assertNotIn("UFC", quick_plays_request("best props all sports"))
+
+
+class CollegeBasketballTest(unittest.TestCase):
+    def test_opponent_adjustment(self):
+        from linemaker import ncaab_model
+        # A beats strong B by 10; C beats weak D by 10: A should rate higher than C.
+        games = [("A", "B", 80, 70, True), ("C", "D", 80, 70, True),
+                 ("B", "D", 90, 60, True), ("B", "E", 85, 70, True), ("D", "E", 60, 75, True)]
+        r = ncaab_model.adjusted(games)
+        net = {t: v["off"] - v["def"] for t, v in r.items()}
+        self.assertGreater(net["a"], net["c"])
+
+    def test_ratings_blend_and_neutral(self):
+        from linemaker import game_model, ncaab_model
+        games = [("Duke Blue Devils", "Army Black Knights", 90, 60, False)] * 2
+        with mock.patch.object(ncaab_model, "season_results", return_value=games):
+            r = ncaab_model.ratings("2026-11-13", {"duke blue devils": (16, 80.0, 70.0), "army black knights": (16, 68.0, 72.0)})
+        h = game_model.project_game("NCAAB", "Duke Blue Devils", "Army Black Knights", r, set(), None)
+        n = game_model.project_game("NCAAB", "Duke Blue Devils", "Army Black Knights", r, set(), None, neutral=True)
+        self.assertAlmostEqual(h["margin"] - n["margin"], 3.0, places=5)   # home court, gone at a neutral site
+        self.assertIsNotNone(game_model._find(r, "Duke Blue Devils"))
+
+    def test_college_names_across_feeds(self):
+        from linemaker import game_model
+        r = {"florida state seminoles": {"x": 1}, "miami hurricanes": {"x": 2}, "miami (oh) redhawks": {"x": 3}}
+        self.assertEqual(game_model._find(r, "Florida St Seminoles"), {"x": 1})
+        self.assertEqual(game_model._find(r, "Miami (FL) Hurricanes"), {"x": 2})
+
+    def test_asks(self):
+        from linemaker.chat import quick_kind, quick_mode, quick_plays_request
+        self.assertEqual(quick_plays_request("college basketball ml"), ["NCAAB"])
+        self.assertEqual(quick_plays_request("cbb spreads"), ["NCAAB"])
+        self.assertIn("NCAAB", quick_plays_request("polymarket ml all sports"))
+        self.assertNotIn("NCAAB", quick_plays_request("best props all sports"))
+        self.assertEqual(quick_plays_request("best nba props"), ["NBA"])

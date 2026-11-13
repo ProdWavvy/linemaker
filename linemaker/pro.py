@@ -68,7 +68,7 @@ def sport_cfg(cfg, sport: str, cache: dict):
     return cache[sport]
 
 
-START_WEIGHTS = {"UFC": 0.35}   # rough first-version models start leaning on the market
+START_WEIGHTS = {"UFC": 0.35, "NCAAB": 0.35}   # rough first-version models start leaning on the market
 
 
 def _move_limit() -> Optional[float]:

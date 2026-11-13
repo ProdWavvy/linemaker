@@ -89,7 +89,8 @@ class ArmTest(unittest.TestCase):
             self.assertEqual(alerts.pretip_sports("2026-10-21", ["NBA"]), ["NBA", "NHL"])
             self.assertEqual(alerts.pretip_sports("2026-10-22", ["NBA"]), ["NBA"])   # next day: reset
             with mock.patch.dict(os.environ, {"LINEMAKER_PRETIP_SPORTS": "all"}):
-                self.assertEqual(len(alerts.pretip_sports("2026-10-22", ["NBA"])), 6)
+                from linemaker.gamelogs import PATHS
+                self.assertEqual(len(alerts.pretip_sports("2026-10-22", ["NBA"])), len(PATHS))
             with mock.patch.dict(os.environ, {"LINEMAKER_PRETIP_MINUTES": ""}):
                 self.assertFalse(alerts.arm_pretip("MLB", "2026-10-21"))       # pre-tip off
 
