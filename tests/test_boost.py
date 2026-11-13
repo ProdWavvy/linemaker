@@ -711,3 +711,48 @@ class CollegeBasketballTest(unittest.TestCase):
         self.assertIn("NCAAB", quick_plays_request("polymarket ml all sports"))
         self.assertNotIn("NCAAB", quick_plays_request("best props all sports"))
         self.assertEqual(quick_plays_request("best nba props"), ["NBA"])
+
+
+class SlipLinksTest(unittest.TestCase):
+    def _ev(self, i, links):
+        from types import SimpleNamespace as NS
+        m = NS(game_id=f"g{i}", side_keys=("A", "B"), links=links, line=15.5)
+        return NS(market=m, best=NS(side="A", label=f"Player {i} Over 15.5"))
+
+    def test_polymarket_parlay_gets_a_link_per_leg(self):
+        from types import SimpleNamespace as NS
+        from linemaker.betlinks import leg_link, slip_text
+        evs = [self._ev(i, {"Polymarket": [{"link": "", "sid": "", "msid": "", "mlink": f"https://polymarket.com/event/g{i}",
+                                            "elink": ""}, None]}) for i in range(3)]
+        p = NS(book="Polymarket", legs=[(e, -110) for e in evs])
+        text = slip_text(p)
+        self.assertIn("Add each leg on Polymarket", text)
+        self.assertEqual(text.count("polymarket.com/event/"), 3)
+        self.assertEqual(leg_link(evs[0].market, "A", "Polymarket"), "https://polymarket.com/event/g0")
+
+    def test_fanduel_with_ids_keeps_its_one_tap_slip(self):
+        from types import SimpleNamespace as NS
+        from linemaker.betlinks import parlay_link, slip_text
+        evs = [self._ev(i, {"FanDuel": [{"link": "", "sid": f"s{i}", "msid": f"m{i}", "mlink": "", "elink": ""}, None]})
+               for i in range(2)]
+        p = NS(book="FanDuel", legs=[(e, -110) for e in evs])
+        self.assertIn("addToBetslip", parlay_link(p))
+        self.assertEqual(slip_text(p), "")   # a real slip: no per-leg list
+
+    def test_prizepicks_entry_link_has_side_and_line(self):
+        from types import SimpleNamespace as NS
+        from linemaker import pp
+        legs = []
+        for i, side in enumerate(("A", "B")):
+            m = NS(game_id=f"g{i}", side_keys=("A", "B"), line=24.5 + i,
+                   links={"PrizePicks": [{"link": "", "sid": f"9{i}", "msid": "", "mlink": "", "elink": ""}] * 2})
+            legs.append(NS(market=m, best=NS(side=side)))
+        url = pp.entry_link(NS(legs=legs, app="prizepicks"))
+        self.assertEqual(url, "https://app.prizepicks.com/?projections=90-o-24.5,91-u-25.5")
+
+    def test_crosssport_one_word(self):
+        from linemaker.chat import quick_plays_request
+        with mock.patch.dict("os.environ", {"LINEMAKER_NO_PROPS_SPORTS": "NCAAF,NCAAB"}):
+            sports = quick_plays_request("crosssport parlay")
+        self.assertIn("NHL", sports)
+        self.assertNotIn("NCAAF", sports)   # no college props in NY: not on a props card

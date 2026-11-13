@@ -1345,7 +1345,7 @@ def quick_book(text: str) -> Optional[str]:
 
 
 ALL_SPORTS = "NBA,NFL,NCAAF,NHL,WNBA,MLB"
-ALL_SPORTS_WORDS = re.compile(r"\b(all|every)[- ]?(the )?(sports?|leagues?)\b|\bcross[- ]sports?\b", re.I)
+ALL_SPORTS_WORDS = re.compile(r"\b(all|every)[- ]?(the )?(sports?|leagues?)\b|\bcross[- ]?sports?\b", re.I)
 
 
 def quick_plays_request(text: str) -> Optional[list]:
@@ -1370,6 +1370,9 @@ def quick_plays_request(text: str) -> Optional[list]:
         out = [s.strip().upper() for s in os.environ.get("LINEMAKER_ALL_SPORTS", ALL_SPORTS).split(",") if s.strip()]
         if quick_kind(text) in ("games", "live"):   # game lines only: UFC fights and college basketball
             out += [s for s in ("NCAAB", "UFC") if s not in out]
+        elif quick_kind(text) == "props":   # leagues without props here (NY college) stay off a props card
+            from .oddsapi import no_props_sports
+            out = [s for s in out if s not in no_props_sports()] or out
         return out
     sports, rest = [], text
     for s, pat in SPORT_WORDS.items():

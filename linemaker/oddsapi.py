@@ -610,11 +610,15 @@ class _Grouper:
                 mults[side] = float(outcome["multiplier"])
             except (TypeError, ValueError):
                 pass
-        if outcome and (outcome.get("link") or outcome.get("sid")):
+        mlink, elink = (market or {}).get("link") or "", (market or {}).get("_elink") or ""
+        if outcome and (outcome.get("link") or outcome.get("sid") or mlink or elink):
             slots = fm.links.setdefault(book, [None] * n_sides)
             slots[side] = {"link": outcome.get("link") or "", "sid": outcome.get("sid") or "",
                            "msid": (market or {}).get("sid") or "",
-                           "mk": (market or {}).get("key") or ""}   # which book market (main / alternate)
+                           "mk": (market or {}).get("key") or "",   # which book market (main / alternate)
+                           # the market's and the event's page at the book: where a bet can be made
+                           # when there's no add-to-betslip link (Polymarket)
+                           "mlink": mlink, "elink": elink}
         for b, prices in fm.books:
             if b == book:
                 prices[side] = price
@@ -634,6 +638,7 @@ def parse_game_odds(events: list, sport: str, tz: ZoneInfo) -> list:
         for bk in ev.get("bookmakers", []):
             book = bk.get("title") or bk["key"]
             for mk in bk.get("markets", []):
+                mk["_elink"] = bk.get("link") or ""
                 outs = mk.get("outcomes", [])
                 if mk["key"] == "h2h":
                     three = any(o["name"] == "Draw" for o in outs) or sport_u in SOCCER
@@ -718,6 +723,7 @@ def parse_event_props(event: dict, sport: str, tz: ZoneInfo) -> list:
     for bk in event.get("bookmakers", []):
         book = bk.get("title") or bk["key"]
         for mk in bk.get("markets", []):
+            mk["_elink"] = bk.get("link") or ""
             if mk["key"] not in names:
                 continue
             yes_no = mk["key"] in YES_NO_MARKETS

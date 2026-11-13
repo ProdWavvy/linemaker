@@ -400,29 +400,36 @@ def line_gap(ev) -> Optional[float]:
 # ---- entry links ---------------------------------------------------------------------
 
 def entry_link(entry: Entry) -> Optional[str]:
-    """A PrizePicks link for the entry, built from the legs' links when the API supplies
-    them (format unconfirmed: the first scan logs a sample so it can be checked)."""
+    """A PrizePicks link that opens the app with the entry's picks loaded:
+    app.prizepicks.com/?projections=ID-o-LINE,ID-u-LINE (each pick's projection id, More "o" /
+    Less "u", and its line). Built from the leg's own link when it already has that form, else
+    from its projection id. Unofficial format (no public docs): None when a leg has no id."""
     import urllib.parse
     from .betlinks import fill_state, leg
-    ids, first = [], None
+    picks, first = [], None
     if getattr(entry, "app", "prizepicks") != "prizepicks":   # Underdog: no shareable multi-pick link
         return None
     for ev in entry.legs:
-        e = leg(ev.market, ev.best.side, book())
+        e = leg(ev.market, ev.best.side, APPS["prizepicks"]["book"])
         if not e:
             return None
         url = fill_state(e.get("link") or "")
         first = first or url
         q = urllib.parse.parse_qs(urllib.parse.urlsplit(url).query) if url else {}
-        pid = (q.get("projections") or q.get("projId") or q.get("projection_id") or [e.get("sid")])[0]
-        if not pid:
+        raw = (q.get("projections") or q.get("projId") or q.get("projection_id") or [e.get("sid")])[0]
+        if not raw:
             return None
-        ids.append(str(pid))
+        raw = str(raw).split(",")[0]
+        if raw.count("-") >= 2:   # already "ID-o-LINE"
+            picks.append(raw)
+        else:
+            picks.append(f"{raw}-{'o' if ev.best.side == 'A' else 'u'}-{ev.market.line:g}")
     base = "https://app.prizepicks.com/"
     if first:
         parts = urllib.parse.urlsplit(first)
-        base = f"{parts.scheme}://{parts.netloc}{parts.path}"
-    return f"{base}?projections={','.join(ids)}"
+        if parts.netloc:
+            base = f"{parts.scheme}://{parts.netloc}{parts.path or '/'}"
+    return f"{base}?projections={','.join(picks)}"
 
 
 def board_link(name: str = "") -> str:

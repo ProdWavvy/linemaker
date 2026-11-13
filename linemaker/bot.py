@@ -402,7 +402,8 @@ def _bet_go(key: str, i: int):
             head = head0 + ("Already logged" if again else "📝 Logged") + (
                 f" **{_money(bet['stake'])}** on the {len(p.legs)}-leg {p.book} parlay at **{fmt_odds(bet['odds'])}**"
                 f"{practice}.")
-            tail = ("" if url else "\nNo one-tap slip for this one: open the book and add the legs.") + (
+            from .betlinks import slip_text
+            tail = ("" if url else "\n" + (slip_text(p) or "No one-tap slip for this one: open the book and add the legs.")) + (
                 f"\n🔗 Same-game legs: ≈{fmt_odds(p.american)} is an estimate of {p.book}'s SGP price. "
                 "If the slip shows a different price, ✏️ it so your record is right."
                 if getattr(p, "sgp_estimated", False) else "") + (
@@ -979,9 +980,10 @@ def parlay_card(legs: list, books: Optional[tuple] = None, boost: float = 0.0,
         url = parlay_link(p)
         if url and len(url) > 512:   # too long for a button (Discord caps those at 512): a link in the text
             value += f"\n🧾 [Open this {len(p.legs)}-leg slip on {p.book}]({url})"
-        elif not url:   # a leg came without the book's slip ids: Bet still logs it, then opens the book
-            value += (f"\n🧾 {p.book} didn't send slip ids for every leg, so there's no one-tap slip: "
-                      "Bet logs it and opens the book; add the legs above.")
+        elif not url:   # no one-tap slip: each leg's own page where there is one (Polymarket), else the book
+            from .betlinks import slip_text
+            value += "\n" + (slip_text(p) or f"🧾 {p.book} didn't send slip ids for every leg, so there's no "
+                                              "one-tap slip: Bet logs it and opens the book; add the legs above.")
         embed.add_field(name=header(p), value=value[:1024], inline=False)
         # pool: a card's parlay (not your own slip) swaps out players you've bet since (_bet_go)
         key = _remember({"parlays": [p], **({"pool": pool} if pool else {})})
@@ -1078,7 +1080,8 @@ def targets_card(picks: list, books, found: Optional[dict] = None, tkey: Optiona
                 was = first_seen.setdefault((book, exposure(ev)), target)
                 if was != target:
                     shared.append(f"{ev.best.label} (also in +{(was - 1) * 100:.0f})")
-            extra = [roll] + ([f"🔗 Shares: {', '.join(shared)}"] if shared else [])
+            from .betlinks import slip_text
+            extra = [roll] + ([f"🔗 Shares: {', '.join(shared)}"] if shared else []) + ([slip_text(p)] if slip_text(p) else [])
             if getattr(p, "reuses", False):
                 extra.append("⚠️ Not enough separate legs left for this payout, so it reuses legs "
                              "from the smaller ones.")

@@ -43,16 +43,43 @@ def leg(m, side: str, book: str) -> Optional[dict]:
         return None
     idx = m.side_keys.index(side)
     e = entries[idx] if idx < len(entries) else None
-    return e if e and (e.get("link") or e.get("sid")) else None
+    return e if e and (e.get("link") or e.get("sid") or e.get("mlink") or e.get("elink")) else None
 
 
 def leg_link(m, side: str, book: str) -> Optional[str]:
+    """The best link for one bet: the add-to-betslip link, else one built from the ids, else
+    the market's or the event's page at the book (Polymarket sends pages, not slips)."""
     e = leg(m, side, book)
     if not e:
         return None
     if e.get("link"):
         return fill_state(e["link"])
-    return combine(book, [e], m.game_id)
+    built = combine(book, [e], m.game_id) if e.get("sid") else None
+    return built or fill_state(e.get("mlink") or e.get("elink") or "") or None
+
+
+def leg_links(parlay) -> list:
+    """[(leg label, url)] for each leg of a parlay at its book (where a combined slip can't be
+    built, e.g. Polymarket, whose parlays are put together in the app one leg at a time)."""
+    out = []
+    for ev, _odds in parlay.legs:
+        url = leg_link(ev.market, ev.best.side, parlay.book)
+        if not url:
+            return []
+        out.append((getattr(ev.best, "label", "leg"), url))
+    return out
+
+
+def slip_text(parlay, limit: int = 600) -> str:
+    """'🧾 Add each leg on Polymarket: 1 · 2 · 3' (markdown links) when the parlay has no
+    one-tap slip but every leg has its own page; '' otherwise."""
+    if parlay_link(parlay):
+        return ""
+    legs = leg_links(parlay)
+    if not legs:
+        return ""
+    text = f"🧾 Add each leg on {parlay.book}: " + " · ".join(f"[{i}]({u})" for i, (_l, u) in enumerate(legs, 1))
+    return text if len(text) <= limit else ""
 
 
 def _query(url: str) -> dict:

@@ -925,6 +925,9 @@ def parlay_box(p, num: Optional[int] = None, note: str = "") -> discord.Embed:
         lines.append(f"↔️ {_pct(p.indep_prob)} if the legs were independent")
     if sgp_line(p):
         lines.append(sgp_line(p))
+    from .betlinks import slip_text
+    if slip_text(p):   # no one-tap slip (Polymarket): a link to each leg to add it there
+        lines.append(slip_text(p))
     title = f"{emoji} {bname} · {icon} {len(p.legs)}-leg {kind} · {odds_text(p)} · {_pct(p.prob)} hit"
     return discord.Embed(title=(f"#{num} · {title}" if num else title)[:256], color=colour,
                          description="\n".join(lines)[:4096])
