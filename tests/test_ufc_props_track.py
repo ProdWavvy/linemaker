@@ -125,15 +125,25 @@ class OffersTest(unittest.TestCase):
         with mock.patch.dict(os.environ, {"PROPLINE_API_KEY": "k"}), \
                 mock.patch.object(propline, "events", return_value=[{"id": "1", "home_team": "Josh Hokit",
                                                                      "away_team": "Ciryl Gane"}]), \
-                mock.patch.object(propline, "event_odds", return_value=odds):
+                mock.patch.object(propline, "event_odds", return_value=odds), \
+                mock.patch.object(propline, "_call", return_value={"bookmakers": [{"bookmaker": "fanduel", "legs": [
+                    {"market": "fight_outcome", "name": "Ciryl Gane by KO/TKO", "price": 125,
+                     "book_outcome_id": "734.19:31"},
+                    {"market": "fight_outcome", "name": "Draw", "price": 5000, "book_outcome_id": "734.19:8"}]}]}):
+            propline._CACHE.clear()
             offers = ufc_props.fight_book_offers(["Josh Hokit vs Ciryl Gane"])
         no = offers[("Josh Hokit vs Ciryl Gane", ("distance", "no"))]
         self.assertEqual(no["DraftKings"][0], -295)
         self.assertIn("outcomes=0QA%232", no["DraftKings"][1])
         self.assertIn("marketId[0]=734.19&selectionId[0]=76", no["FanDuel"][1])
-        dec = offers[("Josh Hokit vs Ciryl Gane", ("dec", "ciryl gane"))]
+        dec = offers[("Josh Hokit vs Ciryl Gane", ("mov", "ciryl gane", "DEC"))]
         self.assertEqual((dec["DraftKings"][0], dec["FanDuel"][0]), (350, 400))
+        ko = offers[("Josh Hokit vs Ciryl Gane", ("mov", "ciryl gane", "KO"))]
+        self.assertEqual(ko["FanDuel"][0], 125)
+        self.assertIn("selectionId[0]=31", ko["FanDuel"][1])
         self.assertEqual(ufc_props.offer_key({"spec": {"kind": "distance"}, "yes": False}), ("distance", "no"))
-        self.assertIsNone(ufc_props.offer_key({"spec": {"kind": "mov", "method": "KO", "fighter": "x"}, "yes": True}))
+        self.assertEqual(ufc_props.offer_key({"spec": {"kind": "mov", "method": "KO", "fighter": "X"}, "yes": True}),
+                         ("mov", "x", "KO"))
+        self.assertIsNone(ufc_props.offer_key({"spec": {"kind": "mov", "method": "KO", "fighter": "X"}, "yes": False}))
         self.assertIn("projections=16923664-u-57.5",
                       ufc_props.pickem_link("PrizePicks", "16923664", "under", 57.5))

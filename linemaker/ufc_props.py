@@ -625,11 +625,13 @@ def propline_edges(date: str, min_edge: float = MIN_EDGE) -> tuple:
     from .pro import parlay_books
     from .ufc_model import fighter_props, next_card_date, not_started
     day = next_card_date(date)
-    evs = propline.events("UFC")
+    rows = fighter_props(day)   # the card's fights not under way
+    evs = [e for e in propline.events("UFC")   # only those: PropLine lists every upcoming card
+           if any(same_fighter(r["fighter"], e.get("home_team", "")) or same_fighter(r["fighter"], e.get("away_team", ""))
+                  for r in rows)]
     props = propline_props(evs, lambda eid: propline.event_odds("UFC", eid, ",".join(PROPLINE_UFC), ids=True))
     if not props:
         return [], 0
-    rows = fighter_props(day)
     mine = {_bkey(b): b for b in parlay_books()}
     apps = {}   # the pick'em apps the bot plays: their own per-leg break-even
     for app in ("prizepicks", "underdog"):
@@ -859,9 +861,32 @@ def _slip(book: str, bk: dict, outcome: dict) -> Optional[str]:
     return None
 
 
+METHOD_WORDS = (("ko/tko", "KO"), ("submission", "SUB"), ("decision", "DEC"))
+
+
+def _fd_methods(sport_key: str, event_id, a: str, b: str) -> dict:
+    """FanDuel's method-of-victory board (KO/TKO, submission, decision per fighter) from its
+    same-game builder's leg list, which carries markets the regular feed doesn't."""
+    from . import propline
+    data = propline._cached(f"sgplegs|{event_id}", propline.EVENTS_TTL, lambda: propline._call(
+        f"/sports/{sport_key}/events/{event_id}/sgp/legs", {"bookmakers": "fanduel", "markets": "fight_outcome"}))
+    out = {}
+    for bk in (data or {}).get("bookmakers", []):
+        for r in bk.get("legs") or []:
+            name, bid = (r.get("name") or ""), str(r.get("book_outcome_id") or "")
+            if r.get("market") != "fight_outcome" or r.get("price") is None or ":" not in bid:
+                continue
+            who, _, how = name.rpartition(" by ")
+            meth = next((m for w, m in METHOD_WORDS if w == how.strip().lower()), None)
+            fighter = _who(who, a, b)
+            if meth and fighter:
+                out[("mov", norm(fighter), meth)] = (int(r["price"]), _slip("fanduel", {}, r))
+    return out
+
+
 def fight_book_offers(fight_names: list) -> dict:
     """{(fight label, key): {book title: (odds, slip url)}} for the fight props FanDuel and
-    DraftKings post: key ("distance", "yes"|"no") or ("dec", norm(fighter))."""
+    DraftKings post: key ("distance", "yes"|"no") or ("mov", norm(fighter), KO|SUB|DEC)."""
     from . import propline
     if not propline.on():
         return {}
@@ -896,10 +921,15 @@ def fight_book_offers(fight_names: list) -> dict:
                         who = _who(name.lower().split(" to win")[0].split(" by ")[0], a, b)
                         if not who:
                             continue
-                        key = ("dec", norm(who))
+                        key = ("mov", norm(who), "DEC")
                     else:
                         continue
                     out.setdefault((label, key), {})[book] = (int(o["price"]), _slip(bk["key"].lower(), bk, o))
+        try:   # KO/TKO and submission (and decision) at FanDuel
+            for key, quote in _fd_methods(propline.sport_key("UFC"), ev["id"], a, b).items():
+                out.setdefault((label, key), {}).setdefault("FanDuel", quote)
+        except Exception as e:
+            log.warning("fanduel ufc methods %s: %s", label, e)
     return out
 
 
@@ -908,8 +938,8 @@ def offer_key(prop: dict) -> Optional[tuple]:
     spec = prop.get("spec") or {}
     if spec.get("kind") == "distance":
         return ("distance", "yes" if prop["yes"] else "no")
-    if spec.get("kind") == "mov" and spec.get("method") == "DEC" and prop["yes"]:
-        return ("dec", norm(spec["fighter"]))
+    if spec.get("kind") == "mov" and prop["yes"]:   # the books sell the YES side only
+        return ("mov", norm(spec["fighter"]), spec["method"])
     return None
 
 

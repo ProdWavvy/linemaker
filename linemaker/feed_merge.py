@@ -353,8 +353,10 @@ def saver_props(sport: str, events: list, keys: str, tz) -> dict:
         try:
             first = min(e["commence_time"] for e in events)
             last = max(e["commence_time"] for e in events)
-            bulk = propline._call(f"/sports/{sk}/odds", dict(params, commenceTimeFrom=first, commenceTimeTo=last),
-                                  timeout=60)
+            bulk = propline._cached(f"saver|{sk}|{main}|{first}|{last}", propline.ODDS_TTL,
+                                    lambda: propline._call(f"/sports/{sk}/odds",
+                                                           dict(params, commenceTimeFrom=first, commenceTimeTo=last),
+                                                           timeout=60))
             payloads = _match(bulk, events)
             log.info("propline props %s: one league call, %d of %d games", sport, len(payloads), len(events))
         except Exception as ex:
@@ -363,7 +365,10 @@ def saver_props(sport: str, events: list, keys: str, tz) -> dict:
     def one(e):
         try:
             ev = propline.find_event(sport, e["home_team"], e["away_team"], e["commence_time"])
-            return propline._call(f"/sports/{sk}/events/{ev['id']}/odds", params) if ev else None
+            if not ev:
+                return None
+            return propline._cached(f"saver|{sk}|{ev['id']}|{main}", propline.ODDS_TTL,   # reused for 5 minutes
+                                    lambda: propline._call(f"/sports/{sk}/events/{ev['id']}/odds", params))
         except Exception as ex:
             log.warning("propline props %s %s: %s", sport, e.get("id"), ex)
             return None
