@@ -268,6 +268,7 @@ class Turn:
     files: list = field(default_factory=list)   # (filename, markdown), e.g. grading reports
     results: list = field(default_factory=list) # (title, ProResult) shown as pick cards
     embeds: list = field(default_factory=list)  # ready-made cards (UFC props), sent after the rest
+    buttons: list = field(default_factory=list)  # [(label, url)] link buttons under those cards
 
 
 class LinemakerChat:
@@ -519,15 +520,15 @@ class LinemakerChat:
         if not attached_csv and UFC_PROPS_WORDS.search(text):   # UFC props: the same cards as any ask
             from .ufc_props import props_card
             try:
-                cards, summary = await asyncio.to_thread(props_card, _today())
+                cards, summary, buttons = await asyncio.to_thread(props_card, _today())
                 reply = ""
             except Exception as e:
                 log.warning("ufc props card: %s", e)
-                cards, summary = [], ""
+                cards, summary, buttons = [], "", []
                 reply = f"⚠️ Couldn't load UFC props right now ({type(e).__name__}). Try again in a minute."
             history.append({"role": "user", "content": f"{author}: {text}"})
             history.append({"role": "assistant", "content": reply or summary})
-            return Turn(reply, ctx["files"], [], cards)
+            return Turn(reply, ctx["files"], [], cards, buttons)
         other = None if attached_csv else unsupported_league(text)
         if quick and other:
             reply = (f"**{other} isn't covered yet**, so I didn't run anything (no credits used). "
@@ -606,8 +607,9 @@ class LinemakerChat:
             if "UFC" in quick and re.search(SPORT_WORDS["UFC"], text, re.I):   # a UFC ask: fight props too
                 try:
                     from .ufc_props import props_card
-                    cards, _summary = await asyncio.wait_for(asyncio.to_thread(props_card, _today()), timeout=90)
+                    cards, _summary, buttons = await asyncio.wait_for(asyncio.to_thread(props_card, _today()), timeout=90)
                     ctx.setdefault("embeds", []).extend(cards)
+                    ctx.setdefault("buttons", []).extend(buttons)
                 except Exception as e:
                     log.warning("ufc props with the ask: %s", e)
             if idle:   # say which leagues were checked but aren't on the card, so none goes missing quietly
@@ -627,7 +629,7 @@ class LinemakerChat:
         history.append({"role": "user", "content": f"{author}: {text}"})
         history.append({"role": "assistant", "content": reply or "\n\n".join(
             ctx.get("summaries", []))})
-        return Turn(reply, ctx["files"], ctx.get("results", []), ctx.get("embeds", []))
+        return Turn(reply, ctx["files"], ctx.get("results", []), ctx.get("embeds", []), ctx.get("buttons", []))
 
     async def read_screenshot(self, images: list, text: str = "") -> str:
         """[(bytes, media type)] of a sportsbook page -> the lines on it, priced (ufc_props)."""

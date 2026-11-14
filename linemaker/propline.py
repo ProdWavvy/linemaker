@@ -126,12 +126,14 @@ def events(sport: str) -> list:
     return _cached(f"events|{key}", EVENTS_TTL, lambda: _call(f"/sports/{key}/events")) or []
 
 
-def event_odds(sport: str, event_id, markets: str, bookmakers: str = "") -> dict:
-    """One event's odds for the given markets (cached 5 minutes)."""
+def event_odds(sport: str, event_id, markets: str, bookmakers: str = "", ids: bool = False) -> dict:
+    """One event's odds for the given markets (cached 5 minutes). ids: the books' own ids and
+    event links too (for betslip links)."""
     key = sport_key(sport)
-    return _cached(f"odds|{key}|{event_id}|{markets}|{bookmakers}", ODDS_TTL,
+    extra = {"includeBookIds": "true", "includeLinks": "true"} if ids else {}
+    return _cached(f"odds|{key}|{event_id}|{markets}|{bookmakers}|{ids}", ODDS_TTL,
                    lambda: _call(f"/sports/{key}/events/{event_id}/odds",
-                                 {"markets": markets, "bookmakers": bookmakers})) or {}
+                                 dict({"markets": markets, "bookmakers": bookmakers}, **extra))) or {}
 
 
 def freshness() -> dict:

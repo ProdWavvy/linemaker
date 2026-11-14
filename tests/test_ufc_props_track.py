@@ -94,13 +94,46 @@ class CardTest(unittest.TestCase):
                 mock.patch.dict(os.environ, {"LINEMAKER_TRACKING_DIR": d, "LINEMAKER_TRACKING": "on", "PROPLINE_API_KEY": ""}), \
                 mock.patch("linemaker.ufc_model.next_card_date", return_value="2026-11-14"), \
                 mock.patch.object(ufc_props, "props_lines", return_value=([], priced)):
-            embeds, text = ufc_props.props_card("2026-11-14")
+            embeds, text, buttons = ufc_props.props_card("2026-11-14")
             logged = t.load("2026-11-14")
         titles = [e.title for e in embeds]
         self.assertTrue(titles[0].startswith("🥊 UFC Props"))
         self.assertIn("🎯 Fight Props", titles)
         self.assertIn("📖 How These Are Priced", titles)
         self.assertIn("Doesn't go the distance · **44%**", embeds[1].description)
-        self.assertIn("bet at **+132** or better", embeds[1].description)
+        self.assertIn("bet at **+132**+", embeds[1].description)
+        self.assertEqual(buttons, [])                                # no PropLine key: no book prices
         self.assertEqual(len(logged), 1)
         self.assertTrue(next(iter(logged.values()))["shown"])
+
+
+class OffersTest(unittest.TestCase):
+    def test_fight_offers_and_buttons(self):
+        from linemaker import propline, ufc_props
+        odds = {"bookmakers": [
+            {"key": "draftkings", "title": "DraftKings", "link": "https://sportsbook.draftkings.com/event/34", "markets": [
+                {"key": "fight_distance", "outcomes": [
+                    {"name": "Yes", "price": 215, "book_outcome_id": "0QA#1"},
+                    {"name": "No", "price": -295, "book_outcome_id": "0QA#2"}]},
+                {"key": "round_betting", "outcomes": [
+                    {"name": "Ciryl Gane by Decision", "price": 350, "book_outcome_id": "0QA#3"}]}]},
+            {"key": "fanduel", "title": "FanDuel", "markets": [
+                {"key": "fight_distance", "outcomes": [
+                    {"name": "No", "price": -310, "book_outcome_id": "734.19:76"}]},
+                {"key": "round_betting", "outcomes": [
+                    {"name": "Ciryl Gane to Win by Decision", "price": 400, "book_outcome_id": "734.19:97"}]}]}]}
+        with mock.patch.dict(os.environ, {"PROPLINE_API_KEY": "k"}), \
+                mock.patch.object(propline, "events", return_value=[{"id": "1", "home_team": "Josh Hokit",
+                                                                     "away_team": "Ciryl Gane"}]), \
+                mock.patch.object(propline, "event_odds", return_value=odds):
+            offers = ufc_props.fight_book_offers(["Josh Hokit vs Ciryl Gane"])
+        no = offers[("Josh Hokit vs Ciryl Gane", ("distance", "no"))]
+        self.assertEqual(no["DraftKings"][0], -295)
+        self.assertIn("outcomes=0QA%232", no["DraftKings"][1])
+        self.assertIn("marketId[0]=734.19&selectionId[0]=76", no["FanDuel"][1])
+        dec = offers[("Josh Hokit vs Ciryl Gane", ("dec", "ciryl gane"))]
+        self.assertEqual((dec["DraftKings"][0], dec["FanDuel"][0]), (350, 400))
+        self.assertEqual(ufc_props.offer_key({"spec": {"kind": "distance"}, "yes": False}), ("distance", "no"))
+        self.assertIsNone(ufc_props.offer_key({"spec": {"kind": "mov", "method": "KO", "fighter": "x"}, "yes": True}))
+        self.assertIn("projections=16923664-u-57.5",
+                      ufc_props.pickem_link("PrizePicks", "16923664", "under", 57.5))

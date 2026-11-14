@@ -2199,9 +2199,11 @@ class LinemakerBot(discord.Client):
             await _send_card(send_cards, cards, text=chunks[0] if inline and chunks else "",
                              market_key=mkey, fresh_key=fkey)
         extra = getattr(turn, "embeds", None) or []
-        for i, group in enumerate(chunk_embeds(extra) if extra else []):   # ready-made cards (UFC props)
+        groups = chunk_embeds(extra) if extra else []
+        for i, group in enumerate(groups):   # ready-made cards (UFC props), buttons under the last
             send = message.reply if (i == 0 and not chunks and not cards) else message.channel.send
-            await send(embeds=group, allowed_mentions=none)
+            view = link_view(getattr(turn, "buttons", None)) if i == len(groups) - 1 else None
+            await send(embeds=group, allowed_mentions=none, **({"view": view} if view else {}))
 
 
 async def _thread_send(dest, turn):
@@ -2225,8 +2227,21 @@ async def _thread_send(dest, turn):
         await _send_card(send_cards, cards, text=chunks[0] if inline and chunks else "",
                          market_key=mkey, fresh_key=fkey)
     extra = getattr(turn, "embeds", None) or []
-    for group in (chunk_embeds(extra) if extra else []):   # ready-made cards (UFC props)
-        await dest.send(embeds=group, allowed_mentions=none)
+    groups = chunk_embeds(extra) if extra else []
+    for i, group in enumerate(groups):   # ready-made cards (UFC props), buttons under the last
+        view = link_view(getattr(turn, "buttons", None)) if i == len(groups) - 1 else None
+        await dest.send(embeds=group, allowed_mentions=none, **({"view": view} if view else {}))
+
+
+def link_view(buttons) -> Optional["discord.ui.View"]:
+    """Link buttons (max 25, five to a row) that open a sportsbook slip / pick'em entry."""
+    if not buttons:
+        return None
+    view = discord.ui.View(timeout=None)
+    for i, (label, url) in enumerate(buttons[:25]):
+        if url and url.startswith(("http://", "https://")):
+            view.add_item(discord.ui.Button(style=discord.ButtonStyle.link, label=label[:80], url=url, row=i // 5))
+    return view if view.children else None
 
 
 def cards_for(results: list) -> list:
@@ -2507,17 +2522,19 @@ async def ufc_cmd(interaction: discord.Interaction):
             f"{a} vs {b}: {p:.0%} ({r} rds)" for (a, b), (p, r) in list(early.items())[:15])[:1024])
         try:
             from .ufc_props import props_card
-            cards, _summary = await asyncio.to_thread(props_card, date)
+            cards, _summary, buttons = await asyncio.to_thread(props_card, date)
         except Exception as e:
             log.warning("ufc props card: %s", e)
-            cards = []
+            cards, buttons = [], []
         embed.set_footer(text="Lean = points the model adds to (or takes from) the fighter's betting-market "
                               "win chance: takedowns, subs, win streak, reach, age (fitted on 6,900 UFC fights). "
                               "Win chances themselves start from the odds: ask for UFC picks. SigStr = significant "
                               "strikes landed · TD = takedowns · Mins = expected fight minutes (ESPN stats). "
                               "Price a book's line by typing it: hokit over 45.5 sig strikes -115")
-        for group in chunk_embeds(cards):   # the same props cards a typed "ufc props" gets
-            await interaction.followup.send(embeds=group)
+        groups = chunk_embeds(cards)
+        for i, group in enumerate(groups):   # the same props cards a typed "ufc props" gets
+            view = link_view(buttons) if i == len(groups) - 1 else None
+            await interaction.followup.send(embeds=group, **({"view": view} if view else {}))
         await interaction.followup.send(embed=embed)
     except Exception as e:
         await _report_error(interaction, e)

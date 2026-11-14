@@ -598,8 +598,10 @@ def propline_props(events: list, odds_for) -> list:
                     if (o.get("dfs_odds_type") or "standard") not in ("standard", ""):
                         continue   # PrizePicks goblin / demon lines pay differently from the break-even
                     who = o.get("description") or home   # fight time is fight-level
-                    g = groups.setdefault((who, stat, float(o["point"])), {"books": {}, "dfs": {}, "mult": {}})
+                    g = groups.setdefault((who, stat, float(o["point"])), {"books": {}, "dfs": {}, "mult": {}, "ids": {}})
                     g["dfs" if dfs else "books"].setdefault(title, {})[side] = int(o["price"])
+                    if o.get("book_outcome_id"):
+                        g["ids"].setdefault(title, {})[side] = str(o["book_outcome_id"])
                     if o.get("payout_multiplier") is not None:
                         g["mult"].setdefault(title, {})[side] = float(o["payout_multiplier"])
         for (who, stat, line), g in groups.items():
@@ -610,7 +612,7 @@ def propline_props(events: list, odds_for) -> list:
                          if "over" in q and "under" in q and not (q["over"] == q["under"] == 100)]
             fair = sum(o / (o + u) for o, u in pairs) / len(pairs) if pairs else None
             out.append({"fighter": who, "fight": (home, away), "stat": stat, "line": line,
-                        "books": g["books"], "dfs": g["dfs"], "mult": g["mult"], "fair_over": fair})
+                        "books": g["books"], "dfs": g["dfs"], "mult": g["mult"], "ids": g["ids"], "fair_over": fair})
     return out
 
 
@@ -624,7 +626,7 @@ def propline_edges(date: str, min_edge: float = MIN_EDGE) -> tuple:
     from .ufc_model import fighter_props, next_card_date, not_started
     day = next_card_date(date)
     evs = propline.events("UFC")
-    props = propline_props(evs, lambda eid: propline.event_odds("UFC", eid, ",".join(PROPLINE_UFC)))
+    props = propline_props(evs, lambda eid: propline.event_odds("UFC", eid, ",".join(PROPLINE_UFC), ids=True))
     if not props:
         return [], 0
     rows = fighter_props(day)
@@ -752,15 +754,29 @@ def props_card(date: str) -> tuple:
                            description="\n".join(head))
     header.set_footer(text="Prices read just now · fights under way are left out")
     out = [header]
+    buttons = []
     if plays:
+        try:
+            offers = fight_book_offers(sorted({f["fight"] for f, _p in plays}))
+        except Exception as e:
+            log.warning("ufc fight offers: %s", e)
+            offers = {}
         rows = []
         for i, (f, p) in enumerate(plays, 1):
+            quotes = offers.get((f["fight"], offer_key(p)), {}) if offer_key(p) else {}
+            books = []
+            for book, (odds, url) in sorted(quotes.items()):
+                good = _implied(odds) * 1.02 <= p["chance"]   # +2% EV or better at this price
+                books.append(f"{'FD' if book == 'FanDuel' else 'DK'} {odds:+d}{' ✅' if good else ''}")
+                if url:
+                    buttons.append((f"#{i} {'FD' if book == 'FanDuel' else 'DK'} {odds:+d}", url))
+            where = (" · " + " · ".join(books)) if books else ""
             rows.append(f"**{i}.** {p['label']} · **{p['chance']:.0%}**\n"
                         f"\u2003{f['fight']} · Kalshi {p['market']:.0%} · fair {american(p['chance'])} · "
-                        f"bet at **{worth_at(p['chance'])}** or better (Kalshi {p['kalshi_price'] * 100:.0f}¢)")
+                        f"bet at **{worth_at(p['chance'])}**+ (Kalshi {p['kalshi_price'] * 100:.0f}¢){where}")
         e = discord.Embed(title="🎯 Fight Props", color=red, description="\n".join(rows)[:4096])
-        e.set_footer(text="Bold % = our chance · bet at = the FanDuel / DraftKings price that's +2% EV (Kalshi's "
-                          "own price in brackets)")
+        e.set_footer(text="Bold % = our chance · bet at = the price that's +2% EV · FD / DK = FanDuel's and "
+                          "DraftKings' price for the same prop, ✅ = worth it there · buttons load the slip")
         out.append(e)
     elif priced:
         out.append(discord.Embed(title="🎯 Fight Props", color=GREY,
@@ -771,6 +787,9 @@ def props_card(date: str) -> tuple:
             p = r["prop"]
             stat = {"significant strikes": "sig strikes"}.get(p["stat"], p["stat"])
             who = " vs ".join(p["fight"]) if p["stat"] == "fight time" else r["row"]["fighter"]
+            link = pickem_link(r["book"], (p.get("ids", {}).get(r["book"]) or {}).get(r["side"]), r["side"], p["line"])
+            if link:
+                buttons.append((f"#{i} {r['book']}", link))
             if r["odds"] is None:
                 word = "More" if r["side"] == "over" else "Less"
                 price = f"{r['book']} · break-even {r['chance'] - r['edge']:.0%}"
@@ -797,7 +816,7 @@ def props_card(date: str) -> tuple:
     out.append(how)
     text = (f"UFC props {day}: {n_plays} plays ("
             + "; ".join(f"{p['label']} {p['chance']:.0%}" for _f, p in plays[:5]) + ")")
-    return out, text
+    return out, text, buttons[:25]
 
 
 def _log_card(day: str, priced: list, shown_ids: set, strike_all: list) -> None:
@@ -821,3 +840,83 @@ def _log_card(day: str, priced: list, shown_ids: set, strike_all: list) -> None:
         log_props(day, entries)
     except Exception as e:
         log.warning("ufc props log: %s", e)
+
+
+
+# ---- FanDuel / DraftKings prices and betslip links for fight props (via PropLine) -----------
+BET_BOOKS = {"fanduel": "FanDuel", "draftkings": "DraftKings"}
+
+
+def _slip(book: str, bk: dict, outcome: dict) -> Optional[str]:
+    import urllib.parse
+    bid = str(outcome.get("book_outcome_id") or "")
+    if book == "fanduel" and ":" in bid:
+        mid, sel = bid.split(":", 1)
+        return (f"https://sportsbook.fanduel.com/addToBetslip?marketId[0]={urllib.parse.quote(mid)}"
+                f"&selectionId[0]={urllib.parse.quote(sel)}")
+    if book == "draftkings" and bid and bk.get("link"):
+        return f"{bk['link']}?outcomes={urllib.parse.quote(bid)}"
+    return None
+
+
+def fight_book_offers(fight_names: list) -> dict:
+    """{(fight label, key): {book title: (odds, slip url)}} for the fight props FanDuel and
+    DraftKings post: key ("distance", "yes"|"no") or ("dec", norm(fighter))."""
+    from . import propline
+    if not propline.on():
+        return {}
+    try:
+        evs = propline.events("UFC")
+    except Exception as e:
+        log.warning("propline ufc events: %s", e)
+        return {}
+    out = {}
+    for label in fight_names:
+        a, _, b = label.partition(" vs ")
+        ev = next((x for x in evs if {_who(x.get("home_team", ""), a, b), _who(x.get("away_team", ""), a, b)} == {a, b}), None)
+        if not ev:
+            continue
+        try:
+            data = propline.event_odds("UFC", ev["id"], "fight_distance,round_betting", "fanduel,draftkings", ids=True)
+        except Exception as e:
+            log.warning("propline ufc fight props %s: %s", label, e)
+            continue
+        for bk in data.get("bookmakers", []):
+            book = BET_BOOKS.get((bk.get("key") or "").lower())
+            if not book:
+                continue
+            for m in bk.get("markets", []):
+                for o in m.get("outcomes", []):
+                    if o.get("price") is None:
+                        continue
+                    name = o.get("name") or ""
+                    if m.get("key") == "fight_distance" and name.lower() in ("yes", "no"):
+                        key = ("distance", name.lower())
+                    elif m.get("key") == "round_betting" and "decision" in name.lower():
+                        who = _who(name.lower().split(" to win")[0].split(" by ")[0], a, b)
+                        if not who:
+                            continue
+                        key = ("dec", norm(who))
+                    else:
+                        continue
+                    out.setdefault((label, key), {})[book] = (int(o["price"]), _slip(bk["key"].lower(), bk, o))
+    return out
+
+
+def offer_key(prop: dict) -> Optional[tuple]:
+    """Which FanDuel / DraftKings market a fight prop is (None: they don't post it)."""
+    spec = prop.get("spec") or {}
+    if spec.get("kind") == "distance":
+        return ("distance", "yes" if prop["yes"] else "no")
+    if spec.get("kind") == "mov" and spec.get("method") == "DEC" and prop["yes"]:
+        return ("dec", norm(spec["fighter"]))
+    return None
+
+
+def pickem_link(book: str, entry_id: Optional[str], side: str, line: float) -> Optional[str]:
+    k = _bkey(book)
+    if k == "prizepicks" and entry_id:
+        return f"https://app.prizepicks.com/?projections={entry_id}-{'o' if side == 'over' else 'u'}-{line:g}"
+    if k.startswith("underdog"):
+        return "https://underdogfantasy.com/pick-em"
+    return None
