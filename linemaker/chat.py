@@ -481,8 +481,14 @@ class LinemakerChat:
     # ---- conversation ----------------------------------------------------------------
 
     async def respond(self, channel_id: int, author: str, text: str,
-                      attached_csv: Optional[str] = None) -> Turn:
+                      attached_csv: Optional[str] = None, images: Optional[list] = None) -> Turn:
         ctx = {"files": [], "attached_rows": []}
+        if images and not attached_csv:   # a sportsbook screenshot: read its lines and price them
+            history = self.history[channel_id]
+            reply = await self.read_screenshot(images, text)
+            history.append({"role": "user", "content": f"{author}: [screenshot] {text}".strip()})
+            history.append({"role": "assistant", "content": reply})
+            return Turn(reply, ctx["files"], [])
         if attached_csv:
             ctx["attached_rows"] = list(csv.DictReader(io.StringIO(attached_csv)))
             text += f"\n\n[attached projections CSV with {len(ctx['attached_rows'])} rows]"
@@ -603,6 +609,61 @@ class LinemakerChat:
         history.append({"role": "assistant", "content": reply or "\n\n".join(
             ctx.get("summaries", []))})
         return Turn(reply, ctx["files"], ctx.get("results", []))
+
+    async def read_screenshot(self, images: list, text: str = "") -> str:
+        """[(bytes, media type)] of a sportsbook page -> the lines on it, priced (ufc_props)."""
+        import json
+        from .ufc_props import SCREENSHOT_PROMPT, SCREENSHOT_SCHEMA, screenshot_reply
+        prompt = SCREENSHOT_PROMPT + (f"\n\nThe user wrote: {text}" if text else "")
+        try:
+            raw = await (self._gemini_json(images, prompt, SCREENSHOT_SCHEMA) if self.provider == "gemini"
+                         else self._claude_json(images, prompt, SCREENSHOT_SCHEMA))
+            data = json.loads(raw) if raw else None
+        except Exception as e:
+            log.warning("screenshot read failed: %s: %s", type(e).__name__, e)
+            return f"⚠️ I couldn't read that screenshot ({type(e).__name__}). Try again, or type the line instead."
+        if not data:
+            return "📸 I couldn't read any betting lines in that screenshot."
+        log.info("screenshot: %s, %d lines read", data.get("sport"), len(data.get("lines") or []))
+        return await asyncio.to_thread(screenshot_reply, _today(), data)
+
+    async def _claude_json(self, images: list, prompt: str, schema: dict) -> Optional[str]:
+        """Claude reads the images and answers in JSON matching `schema` (structured outputs)."""
+        import base64
+        content = [{"type": "image", "source": {"type": "base64", "media_type": mt,
+                                                "data": base64.standard_b64encode(b).decode("utf-8")}}
+                   for b, mt in images]
+        content.append({"type": "text", "text": prompt})
+        extra = ({"betas": ["server-side-fallback-2026-07-01"], "fallbacks": "default"}
+                 if MODEL in FALLBACK_MODELS else {})
+        response = await self.client.beta.messages.create(
+            model=MODEL, max_tokens=8000, messages=[{"role": "user", "content": content}],
+            output_config={"effort": "low", "format": {"type": "json_schema", "schema": schema}},
+            **extra)
+        if response.stop_reason in ("refusal", "max_tokens"):
+            log.warning("screenshot: claude stopped (%s)", response.stop_reason)
+            return None
+        return next((b.text for b in response.content if b.type == "text"), None)
+
+    async def _gemini_json(self, images: list, prompt: str, schema: dict) -> Optional[str]:
+        """Gemini reads the images and answers in JSON matching `schema`."""
+        from google.genai import errors, types
+        parts = [types.Part.from_bytes(data=b, mime_type=mt) for b, mt in images]
+        parts.append(types.Part.from_text(text=prompt))
+        config = types.GenerateContentConfig(response_mime_type="application/json", response_json_schema=schema)
+        last = None
+        for model in [GEMINI_MODEL] + [m for m in GEMINI_FALLBACKS if m != GEMINI_MODEL]:
+            try:
+                response = await asyncio.wait_for(self.client.aio.models.generate_content(
+                    model=model, contents=[types.Content(role="user", parts=parts)], config=config),
+                    timeout=GEMINI_TIMEOUT)
+                return response.text
+            except errors.APIError as e:
+                if getattr(e, "code", None) not in (429, 500, 503, 404):
+                    raise
+                last = e
+                log.warning("gemini %s (screenshot): %s", model, getattr(e, "code", "?"))
+        raise GeminiBusy(str(last))
 
     async def _claude_reply(self, history: list, user_text: str, system: str, ctx: dict) -> str:
         messages = history + [{"role": "user", "content": user_text}]

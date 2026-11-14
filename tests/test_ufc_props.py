@@ -41,6 +41,8 @@ class KalshiParseTest(unittest.TestCase):
     def test_name_matching(self):
         self.assertTrue(ufc_props.same_fighter("Alatengheili", "Alateng Heili"))
         self.assertTrue(ufc_props.same_fighter("Bia Mesquita", "Beatriz Mesquita"))
+        self.assertTrue(ufc_props.same_fighter("Heili Alateng", "Alatengheili"))
+        self.assertTrue(ufc_props.same_fighter("Heili Alateng", "Alateng Heili"))
         self.assertFalse(ufc_props.same_fighter("Josh Hokit", "Ciryl Gane"))
 
 
@@ -145,3 +147,72 @@ class LiveAndPlanTest(unittest.TestCase):
         self.assertIsNone(ufc_props._prop("Ends before round 2", 0.3, 0.005, {"ask": 0.01, "bid": 0.0}))
         self.assertIsNone(ufc_props._prop("Goes the distance", 0.9, 0.99, {"ask": 1.0, "bid": 0.98}))
         self.assertIsNotNone(ufc_props._prop("Goes the distance", 0.5, 0.4, {"ask": 0.41, "bid": 0.39}))
+
+
+ROWS = [{"fighter": "Juan Diaz", "opponent": "Alatengheili", "rounds": 3, "early": 0.5, "minutes": 10.7,
+         "sig_strikes": 40.0, "takedowns": 3.3, "stat_fights": 18},
+        {"fighter": "Alatengheili", "opponent": "Juan Diaz", "rounds": 3, "early": 0.5, "minutes": 10.7,
+         "sig_strikes": 26.9, "takedowns": 1.3, "stat_fights": 30}]
+
+
+class ScreenshotTest(unittest.TestCase):
+    def _reply(self, data):
+        with mock.patch("linemaker.ufc_model.next_card_date", return_value="2026-11-14"), \
+                mock.patch("linemaker.ufc_model.fighter_props", return_value=ROWS):
+            return ufc_props.screenshot_reply("2026-11-14", data)
+
+    def test_prices_ladders_overs_and_rounds(self):
+        text = self._reply({"sport": "UFC", "lines": [
+            {"fighter": "Juan Diaz", "stat": "significant strikes", "side": "at_least", "line": 65, "odds": 215},
+            {"fighter": "Juan Diaz", "stat": "takedowns", "side": "at_least", "line": 4, "odds": 250},
+            {"fighter": "Heili Alateng", "stat": "significant strikes", "side": "over", "line": 24.5, "odds": -115},
+            {"fighter": "Juan Diaz", "stat": "total rounds", "side": "over", "line": 2.5, "odds": -125},
+            {"fighter": "Juan Diaz", "stat": "other", "side": "over", "line": 0, "odds": -300}]})
+        self.assertIn("Read 5 lines", text)
+        self.assertIn("Juan Diaz 65+ sig strikes** +215", text)
+        self.assertIn("Alatengheili Over 24.5 sig strikes", text)     # "Heili Alateng" matched
+        self.assertIn("Over 2.5 total rounds** -125", text)
+        self.assertIn("Skipped: Juan Diaz (not a strike", text)
+        self.assertIn("check the numbers", text)
+
+    def test_other_sports_and_empty(self):
+        self.assertIn("UFC", self._reply({"sport": "other", "lines": []}))
+        self.assertIn("couldn't read any lines", self._reply({"sport": "UFC", "lines": []}))
+
+    def test_ladder_margin_is_removed(self):
+        # a "50+ +215" ladder price implies 31.7%; with the 15% margin removed the market reads ~27.6%
+        self.assertAlmostEqual(ufc_props._implied(215) / 1.15, 100 / 315 / 1.15)
+
+    def test_chat_reads_with_claude_structured_output(self):
+        import asyncio
+        import json
+        from types import SimpleNamespace as NS
+        from linemaker import chat
+        bot = chat.LinemakerChat.__new__(chat.LinemakerChat)
+        bot.provider = "claude"
+        sent = {}
+
+        async def create(**kw):
+            sent.update(kw)
+            return NS(stop_reason="end_turn", content=[NS(type="text", text=json.dumps(
+                {"sport": "UFC", "lines": [{"fighter": "Juan Diaz", "stat": "takedowns", "side": "at_least",
+                                             "line": 4, "odds": 250}]}))])
+        bot.client = NS(beta=NS(messages=NS(create=create)))
+        with mock.patch("linemaker.ufc_model.next_card_date", return_value="2026-11-14"), \
+                mock.patch("linemaker.ufc_model.fighter_props", return_value=ROWS):
+            text = asyncio.run(bot.read_screenshot([(b"\x89PNG", "image/png")], ""))
+        self.assertIn("Juan Diaz 4+ takedowns", text)
+        self.assertEqual(sent["messages"][0]["content"][0]["type"], "image")
+        self.assertEqual(sent["output_config"]["format"]["type"], "json_schema")
+
+    def test_chat_read_failure_is_friendly(self):
+        import asyncio
+        from types import SimpleNamespace as NS
+        from linemaker import chat
+        bot = chat.LinemakerChat.__new__(chat.LinemakerChat)
+        bot.provider = "claude"
+
+        async def create(**kw):
+            raise RuntimeError("boom")
+        bot.client = NS(beta=NS(messages=NS(create=create)))
+        self.assertIn("couldn't read that screenshot", asyncio.run(bot.read_screenshot([(b"x", "image/png")])))

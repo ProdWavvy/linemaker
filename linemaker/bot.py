@@ -62,6 +62,8 @@ log = logging.getLogger("linemaker")
 TZ = ZoneInfo(os.environ.get("LINEMAKER_TZ", "America/New_York"))
 SNAPSHOTS = os.environ.get("LINEMAKER_SNAPSHOTS", "snapshots")
 MAX_UPLOAD = 2_000_000
+MAX_SCREENSHOT = 5_000_000   # Claude takes images up to 5 MB
+SCREENSHOT_TYPES = ("image/png", "image/jpeg", "image/webp", "image/gif")
 CHAT_TIMEOUT = int(os.environ.get("LINEMAKER_CHAT_TIMEOUT", "240"))
 
 
@@ -2076,7 +2078,12 @@ class LinemakerBot(discord.Client):
             if att.filename.lower().endswith(".csv") and att.size <= MAX_UPLOAD:
                 csv_text = (await att.read()).decode("utf-8-sig")
                 break
-        if not text and not csv_text:
+        images = []   # sportsbook screenshots: the AI reads the lines, the model prices them
+        for att in message.attachments:
+            kind = (att.content_type or "").split(";")[0].strip().lower()
+            if kind in SCREENSHOT_TYPES and att.size <= MAX_SCREENSHOT and len(images) < 4:
+                images.append((await att.read(), kind))
+        if not text and not csv_text and not images:
             return
         from .chat import split_for_discord
         dest = await self._private_thread(message, text)   # None: answer right here
@@ -2088,7 +2095,8 @@ class LinemakerBot(discord.Client):
             async with where_to.typing():
                 turn = await asyncio.wait_for(
                     self.chat.respond(where_to.id, message.author.display_name,
-                                      text or "Price the attached projections.", csv_text),
+                                      text or ("" if images and not csv_text else "Price the attached projections."),
+                                      csv_text, images=images),
                     timeout=CHAT_TIMEOUT)
         except asyncio.TimeoutError:
             log.warning("chat timed out after %ss", CHAT_TIMEOUT)

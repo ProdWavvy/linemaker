@@ -126,9 +126,16 @@ def same_fighter(a: str, b: str) -> bool:
     na, nb = norm(a), norm(b)
     if not na or not nb:
         return False
-    if na.replace(" ", "") == nb.replace(" ", ""):
+    if _spellings(na) & _spellings(nb):   # "Heili Alateng" (DraftKings) = "Alatengheili" (ESPN)
         return True
     return na.split()[-1] == nb.split()[-1]
+
+
+def _spellings(name: str) -> set:
+    """The name with its words run together, in every order (names written family-name first)."""
+    from itertools import permutations
+    words = name.split()
+    return {"".join(p) for p in permutations(words)} if len(words) <= 4 else {"".join(words)}
 
 
 def _who(name: str, a: str, b: str) -> Optional[str]:
@@ -306,8 +313,8 @@ def props_lines(date: str) -> tuple:
     return lines, priced
 
 
-TYPED_TIP = ("Strike / takedown lines: type the line from FanDuel or DraftKings, e.g. "
-             "`hokit over 45.5 sig strikes -115`.")
+TYPED_TIP = ("Strike / takedown lines: post a screenshot of the DraftKings / FanDuel props page, or type "
+             "the line, e.g. `hokit over 45.5 sig strikes -115`.")
 FOOTER = ("Our chance = 30% model + 70% Kalshi (round props 15% model). Worth it at = the price at "
           "FanDuel / DraftKings (or Kalshi) that's +2% EV: take anything better. Fights under way are "
           "left out.")
@@ -429,3 +436,119 @@ def stat_prop_reply(date: str, text: str) -> Optional[str]:
             "(opponent's defense, level of competition)" if far else "") if x) + ": go small or skip.")
     lines.append("Untested model (no strike/takedown line history to check it on).")
     return "\n".join(lines)
+
+
+# ---- sportsbook screenshots: post a DraftKings / FanDuel prop page, the bot prices it -------
+# The AI model reads the lines off your screenshot (chat.read_screenshot, structured JSON);
+# each UFC strike / takedown / fight-time / total-rounds line is then priced like a typed
+# line. Milestone ladders ("50+ +215") have only one side, so their margin can't be removed
+# from the other side: LADDER_HOLD is assumed instead (those ladders carry far more than a
+# two-way line's 4-5%).
+LADDER_HOLD = 0.15
+SCREENSHOT_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "sport": {"type": "string", "enum": ["UFC", "other"]},
+        "lines": {"type": "array", "items": {
+            "type": "object",
+            "properties": {
+                "fighter": {"type": "string"},
+                "stat": {"type": "string", "enum": ["significant strikes", "takedowns", "fight time",
+                                                    "total rounds", "other"]},
+                "side": {"type": "string", "enum": ["over", "under", "at_least"]},
+                "line": {"type": "number"},
+                "odds": {"type": "integer"},
+            },
+            "required": ["fighter", "stat", "side", "line", "odds"],
+            "additionalProperties": False,
+        }},
+    },
+    "required": ["sport", "lines"],
+    "additionalProperties": False,
+}
+SCREENSHOT_PROMPT = (
+    "This is a screenshot of a sportsbook app (DraftKings, FanDuel or similar). List every betting "
+    "line you can read.\n"
+    "- sport: \"UFC\" for UFC / MMA fights, otherwise \"other\".\n"
+    "- One entry per price shown. fighter: the fighter the line is about (for a fight-level line such as "
+    "total rounds, either fighter's name in that fight).\n"
+    "- stat: significant strikes, takedowns, fight time (minutes) or total rounds. Anything else "
+    "(moneyline, method, spread, parlays) is \"other\".\n"
+    "- side: \"over\" / \"under\" for over-under lines; \"at_least\" for milestone ladders shown as "
+    "\"50+\" (line 50).\n"
+    "- line: the number (3.5, 50, 1.5). odds: American odds as an integer (+215 -> 215, -166 -> -166); "
+    "0 if not visible.\n"
+    "- A price that's cut off at the screen edge: include it only if both the number and the odds are "
+    "fully readable. Never guess.")
+
+
+def _implied(odds: int) -> float:
+    return 100 / (odds + 100) if odds > 0 else -odds / (-odds + 100)
+
+
+def price_rounds(row: dict, line: float, over: bool) -> Optional[float]:
+    """Chance a total-rounds side hits (rounds completed, a stoppage mid-round counting part)."""
+    from .sim import simulate_ladder
+    res = simulate_ladder(row["early"], line, "ufcrounds", row.get("rounds") or 3, 20000,
+                          f"ufcrounds|{row['fighter']}")
+    decided = res.p_over + res.p_under
+    return (res.p_over if over else res.p_under) / decided if decided else None
+
+
+def screenshot_reply(date: str, data: dict) -> str:
+    """The reply to a screenshot the AI read: each UFC line priced, best edge first."""
+    lines = (data or {}).get("lines") or []
+    if (data or {}).get("sport") != "UFC":
+        return ("📸 I can price **UFC** prop screenshots for now (significant strikes, takedowns, fight "
+                "time, total rounds). For other sports, ask for picks as usual.")
+    if not lines:
+        return "📸 I couldn't read any lines in that screenshot. Try one where the odds are fully on screen."
+    from .ufc_model import fighter_props, next_card_date
+    try:
+        rows = fighter_props(next_card_date(date))
+    except Exception as e:
+        log.warning("ufc screenshot: %s", e)
+        return f"⚠️ Couldn't load the UFC card right now ({type(e).__name__}). Try again in a minute."
+    priced, skipped = [], []
+    for l in lines:
+        stat, odds, side = l.get("stat"), l.get("odds") or 0, l.get("side")
+        label = l.get("fighter") or "?"
+        if stat == "other":
+            skipped.append(f"{label} (not a strike / takedown / time / rounds line)")
+            continue
+        if not odds or abs(odds) < 100:
+            skipped.append(f"{label} {l.get('line')} (odds not readable)")
+            continue
+        row = next((r for r in rows if same_fighter(r["fighter"], label)), None)
+        if row is None:
+            skipped.append(f"{label} (not on the card, or the fight has started)")
+            continue
+        at_least = side == "at_least"
+        line, over = (float(l["line"]) - 0.5, True) if at_least else (float(l["line"]), side == "over")
+        if stat == "total rounds":
+            model, weight = price_rounds(row, line, over), ROUND_WEIGHT
+        else:
+            model, weight = price_stat_prop(row, stat, line, over), STAT_WEIGHT
+        if model is None:
+            skipped.append(f"{label} {stat} (no ESPN numbers to price it)")
+            continue
+        imp = _implied(odds)
+        market = imp / (1 + LADDER_HOLD) if at_least else line_chance(odds)
+        chance = weight * model + (1 - weight) * market
+        priced.append((chance - imp, l, row, chance, model, imp, at_least, over))
+    priced.sort(key=lambda x: x[0], reverse=True)
+    out = [f"📸 **Read {len(lines)} line{'s' if len(lines) != 1 else ''} from your screenshot** · "
+           f"{sum(1 for p in priced if p[0] >= 0.02)} worth a look"]
+    for edge, l, row, chance, model, imp, at_least, over in priced[:15]:
+        stat = {"significant strikes": "sig strikes"}.get(l["stat"], l["stat"])
+        who = "" if l["stat"] == "total rounds" else f"{row['fighter']} "
+        what = f"{l['line']:g}+" if at_least else f"{'Over' if over else 'Under'} {l['line']:g}"
+        tail = (f"✅ worth it at **{worth_at(chance)}** or better" if edge >= 0.02 else "no edge")
+        out.append(f"**{who}{what} {stat}** {l['odds']:+d}\n our {chance:.0%} vs price {imp:.0%} "
+                   f"(model {model:.0%}) · {tail}")
+    if skipped:
+        out.append("Skipped: " + "; ".join(skipped[:6]) + (f" (+{len(skipped) - 6} more)" if len(skipped) > 6 else ""))
+    out.append("Read by AI from your screenshot: check the numbers match before betting. Our chance = 30% "
+               "model + 70% the book's price with its margin removed (rounds 15% model; \"50+\" ladders "
+               "assume a 15% margin). The strike model is untested: small bets.")
+    return "\n".join(out)
