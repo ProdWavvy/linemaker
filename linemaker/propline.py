@@ -174,3 +174,60 @@ def sgp_quote(sport: str, event_id, legs: list, bookmaker: str) -> dict:
     key = sport_key(sport)
     return _call(f"/sports/{key}/events/{event_id}/sgp", body={"bookmaker": bookmaker, "legs": legs},
                  timeout=12)
+
+
+# ---- side by side with The Odds API (/propline) ---------------------------------------------
+def _prices(event: dict, books: set) -> dict:
+    """{(book, player, side, point): American price} from one event's odds (either feed)."""
+    out = {}
+    for bk in (event or {}).get("bookmakers", []):
+        key = (bk.get("key") or "").lower()
+        if key not in books:
+            continue
+        for mk in bk.get("markets", []):
+            for o in mk.get("outcomes", []):
+                if o.get("price") is None:
+                    continue
+                out[(key, _norm(o.get("description") or ""), (o.get("name") or "").lower(),
+                     o.get("point"))] = int(o["price"])
+    return out
+
+
+def _imp(odds: int) -> float:
+    return 100 / (odds + 100) if odds > 0 else -odds / (-odds + 100)
+
+
+def compare(odds_api_event: dict, propline_event: dict, books=("fanduel", "draftkings")) -> dict:
+    """How the two feeds' lines agree on one event: {"matched", "same", "avg_gap", "only_oa",
+    "only_pl", "worst": [(key, oa price, pl price)], "by_book": {book: (matched, same)}}."""
+    a, b = _prices(odds_api_event, set(books)), _prices(propline_event, set(books))
+    both = sorted(set(a) & set(b))
+    gaps = [(abs(_imp(a[k]) - _imp(b[k])), k) for k in both]
+    by_book = {}
+    for k in both:
+        m, s = by_book.get(k[0], (0, 0))
+        by_book[k[0]] = (m + 1, s + (a[k] == b[k]))
+    worst = [(k, a[k], b[k]) for _g, k in sorted(gaps, reverse=True)[:5] if a[k] != b[k]]
+    return {"matched": len(both), "same": sum(a[k] == b[k] for k in both),
+            "avg_gap": sum(g for g, _k in gaps) / len(gaps) if gaps else 0.0,
+            "only_oa": len(set(a) - set(b)), "only_pl": len(set(b) - set(a)), "worst": worst,
+            "by_book": by_book}
+
+
+def freshness_lines(data, books=("fanduel", "draftkings", "kalshi", "prizepicks")) -> list:
+    """Staleness per book from /v1/freshness, read defensively (props class when present)."""
+    rows = data.get("bookmakers") if isinstance(data, dict) else data
+    if isinstance(rows, dict):
+        rows = [dict(v, key=k) for k, v in rows.items() if isinstance(v, dict)]
+    out = []
+    for r in rows or []:
+        key = (r.get("key") or r.get("bookmaker") or "").lower()
+        if key not in books:
+            continue
+        classes = r.get("market_classes") or {}
+        props = classes.get("props") if isinstance(classes, dict) else None
+        src = props if isinstance(props, dict) else r
+        age = src.get("staleness_seconds")
+        if age is not None:
+            out.append(f"{key}: props {int(age) // 60} min old" + (" ⚠️ stale" if src.get("is_stale") else ""))
+    return out

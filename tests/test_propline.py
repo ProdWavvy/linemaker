@@ -166,3 +166,17 @@ class SgpTest(unittest.TestCase):
         with mock.patch.dict(os.environ, {"PROPLINE_API_KEY": ""}):
             self.assertEqual(parlay.refine_sgp_prices([p]), [p])
         self.assertEqual(p.decimal, 2.5)
+
+
+class CompareTest(unittest.TestCase):
+    def test_compare_and_freshness(self):
+        def ev(prices):
+            return {"bookmakers": [{"key": "fanduel", "markets": [{"key": "player_points", "outcomes": [
+                {"name": n, "description": "Jalen Brunson", "price": p, "point": 24.5} for n, p in prices]}]}]}
+        out = propline.compare(ev([("Over", -115), ("Under", -105)]), ev([("Over", -120), ("Under", -105)]))
+        self.assertEqual((out["matched"], out["same"]), (2, 1))
+        self.assertEqual(out["by_book"]["fanduel"], (2, 1))
+        self.assertEqual(out["worst"][0][1:], (-115, -120))
+        rows = {"bookmakers": [{"key": "fanduel", "market_classes": {"props": {"staleness_seconds": 125, "is_stale": False}}},
+                               {"key": "bovada", "staleness_seconds": 5}]}
+        self.assertEqual(propline.freshness_lines(rows), ["fanduel: props 2 min old"])

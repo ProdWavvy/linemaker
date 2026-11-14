@@ -2411,6 +2411,59 @@ async def markets_cmd(interaction: discord.Interaction, sport: Optional[str] = "
         await _report_error(interaction, e)
 
 
+@bot.tree.command(name="propline", description="Owner: PropLine usage, and its lines next to The Odds API's on one game (~1 credit)")
+@app_commands.describe(sport="League (default NBA)", market="Odds API market key (default player_points)")
+async def propline_cmd(interaction: discord.Interaction, sport: Optional[str] = "NBA",
+                       market: Optional[str] = "player_points"):
+    if not await _owner_only(interaction):
+        return
+    await interaction.response.defer(thinking=True, ephemeral=True)
+    try:
+        from . import propline
+        if not propline.on():
+            await interaction.followup.send("Set the key first: `/set key:PROPLINE_API_KEY value:<your key>`.",
+                                            ephemeral=True)
+            return
+        lg, mk = (sport or "NBA").upper(), market or "player_points"
+
+        def run():
+            lines = []
+            try:
+                lines += propline.freshness_lines(propline.freshness())
+            except Exception as e:
+                lines.append(f"freshness unavailable ({e})")
+            api = OddsAPI(bookmakers="fanduel,draftkings")
+            now = dt.datetime.now(dt.timezone.utc)
+            upcoming = [e for e in api.events(lg)
+                        if dt.datetime.fromisoformat(e["commence_time"].replace("Z", "+00:00")) > now]
+            for e in upcoming[:3]:
+                pl_ev = propline.find_event(lg, e["home_team"], e["away_team"], e["commence_time"])
+                if not pl_ev:
+                    continue
+                oa = api.event_odds(lg, e["id"], mk)
+                pl = propline.event_odds(lg, pl_ev["id"], mk, "fanduel,draftkings")
+                return lines, f"{e['away_team']} @ {e['home_team']}", propline.compare(oa, pl), api.quota.remaining
+            return lines, None, None, api.quota.remaining
+        fresh, game, cmp_, left = await asyncio.to_thread(run)
+        out = [f"🔌 **PropLine check** · {propline.usage_line()}"]
+        if fresh:
+            out.append("Freshness: " + " · ".join(fresh))
+        if not cmp_:
+            out.append(f"No upcoming {lg} game found in both feeds right now.")
+        else:
+            pct = cmp_["same"] / cmp_["matched"] if cmp_["matched"] else 0
+            out.append(f"**{game}** · `{mk}`: {cmp_['matched']} lines in both feeds, {pct:.0%} at the identical "
+                       f"price, average gap {cmp_['avg_gap'] * 100:.1f} pts · only in The Odds API "
+                       f"{cmp_['only_oa']} · only in PropLine {cmp_['only_pl']}")
+            out += [f"• {b}: {s}/{m} identical" for b, (m, s) in cmp_["by_book"].items()]
+            for (book, player, side, point), a, b in cmp_["worst"]:
+                out.append(f"• biggest gap: {book} {player.title()} {side} {point}: Odds API {a:+d} vs PropLine {b:+d}")
+        out.append(f"Odds API credits left: {left}")
+        await interaction.followup.send("\n".join(out)[:1990], ephemeral=True)
+    except Exception as e:
+        await _report_error(interaction, e)
+
+
 @bot.tree.command(name="weekly", description="The last 7 days: record, closing-line value, what's working, weight changes")
 async def weekly_cmd(interaction: discord.Interaction):
     await interaction.response.defer(thinking=True)
