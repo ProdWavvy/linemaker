@@ -378,6 +378,13 @@ def notes_embed(date: str, records: dict, summary: list, newly: int, remaining) 
                                       else "not re-checked (nothing new graded)"))
     from .autotune import current_summary
     lines.append(current_summary())
+    try:   # the two odds feeds: today's PropLine check and the Odds API credits it saved
+        from .feed_merge import check_line, saved_line
+        from .propline import on as propline_on, usage_line
+        if propline_on():
+            lines.append("**🔌 Feeds:** " + " · ".join(l for l in (saved_line(), check_line(), usage_line()) if l))
+    except Exception:
+        pass
     from .tracking import clv_summary
     c = clv_summary(list(main.values()))
     if c["n"]:

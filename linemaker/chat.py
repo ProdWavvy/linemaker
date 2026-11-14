@@ -591,6 +591,13 @@ class LinemakerChat:
             if ctx.get("results"):
                 ctx["results"].sort(key=lambda r: order.get(r[0], 99))
             reply = "\n".join(errors[s] for s in quick if s in errors)   # the pick cards carry the answer
+            if "UFC" in quick and re.search(SPORT_WORDS["UFC"], text, re.I):   # a UFC ask: fight props too
+                try:
+                    from .ufc_props import props_reply
+                    extra = await asyncio.wait_for(asyncio.to_thread(props_reply, _today()), timeout=90)
+                    reply = (reply + "\n\n" if reply else "") + extra
+                except Exception as e:
+                    log.warning("ufc props with the ask: %s", e)
             if idle:   # say which leagues were checked but aren't on the card, so none goes missing quietly
                 reply = (reply + "\n" if reply else "") + ("Also checked, no games left to price today: "
                                                           + ", ".join(idle) + ".")

@@ -15,7 +15,8 @@ ASKS = [
                          "(game lines only: college props aren't offered in NY)"),
     ("🎰 Parlays", "`best nba props parlay` · `ml parlay nfl` · `ml and spread parlay nba` · "
                   "`spread parlay nfl` · `run line parlay mlb`"),
-    ("🥊 UFC", "`ufc picks` · `ufc ml parlay` · `ufc props` (distance, KO/sub/decision, round vs Kalshi) · "
+    ("🥊 UFC", "`ufc picks` (fight props and strike / takedown lines come with it) · `ufc ml parlay` · "
+              "`ufc props` (distance, KO/sub/decision, round vs Kalshi) · "
               "`hokit over 45.5 sig strikes -115` (any strike / takedown / fight time line) · 📸 post a "
               "DraftKings / FanDuel props screenshot and it prices every line · `/ufc`"),
     ("🚀 Boosts", "`30% nfl boost` · `50% nba boost fanduel` · `cross sport 25% boost min odds +300 "
