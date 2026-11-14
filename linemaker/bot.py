@@ -2449,7 +2449,9 @@ async def ufc_cmd(interaction: discord.Interaction):
                               "Win chances themselves start from the odds: ask for UFC picks. SigStr = significant "
                               "strikes landed · TD = takedowns · Mins = expected fight minutes (ESPN stats). "
                               "Price a book's line by typing it: hokit over 45.5 sig strikes -115")
-        await interaction.followup.send(embeds=[embed] + embeds)
+        await interaction.followup.send(embed=embed)
+        for extra in embeds:   # its own message: two full embeds can pass Discord's 6,000-character cap
+            await interaction.followup.send(embed=extra)
     except Exception as e:
         await _report_error(interaction, e)
 
