@@ -2439,6 +2439,17 @@ async def ufc_cmd(interaction: discord.Interaction):
             log.warning("ufc props: %s", e)
             plines, priced = [], []
         embeds = []
+        try:
+            from .ufc_props import sgo_lines
+            slines, snote = await asyncio.to_thread(sgo_lines, date)
+        except Exception as e:
+            log.warning("ufc stat lines: %s", e)
+            slines, snote = [], ""
+        if slines or snote:
+            embeds.append(discord.Embed(title="🥊 Strike & Takedown Lines", color=0xE74C3C,
+                                        description=("\n".join(slines) or snote)[:4000]).set_footer(
+                text="Our chance = 30% model + 70% the de-vigged consensus line (SportsGameOdds). "
+                     "Untested model: heed the ⚠️ flags."))
         if priced:
             embeds.append(discord.Embed(
                 title=f"🎯 Fight Props vs Kalshi · {len(priced)} fights", color=0xE74C3C,
