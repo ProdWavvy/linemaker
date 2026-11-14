@@ -19,11 +19,14 @@ Guardrails:
   - A weight only moves when the better weight beats the current one on log loss by more
     than twice the noise (standard error measured game by game, since one blowout moves many
     props together) and by at least 0.002, and by at most LINEMAKER_AUTOTUNE_STEP (default
-    0.10) per run.
+    0.25) per run.
+  - Fit on main lines: each player-stat (or game line) in each game counts once, at the line
+    closest to 50/50, inside LINEMAKER_TUNE_BAND. Alt-line rungs are mostly prices nobody bets
+    and repeat the same outcome many times over.
   - Three levels: overall -> sport ("NBA") -> market ("NBA points"). Each is its own best fit
-    pulled toward the level above in proportion to its sample (credibility n / (n + 150)):
-        sport weight  = overall + n/(n+150) x (sport's best fit - overall)
-        market weight = sport   + n/(n+150) x (market's best fit - sport)
+    pulled toward the level above in proportion to its sample (credibility n / (n + 300)):
+        sport weight  = overall + n/(n+300) x (sport's best fit - overall)
+        market weight = sport   + n/(n+300) x (market's best fit - sport)
     so a thin sport or market can't swing far on a hot or cold week, and a deep one earns its
     own number. A sport and its markets need 75+ outcomes before they get their own weight.
     Sports with their own start (UFC 0.35, or LINEMAKER_<SPORT>_MODEL_WEIGHT) start there.
@@ -41,7 +44,8 @@ from typing import Optional
 from .tracking import best_weight, load_records
 
 MIN_GROUP = 75
-SHRINK = 150
+SHRINK = 150          # projection-bias credibility
+WEIGHT_SHRINK = 300   # model-weight credibility (sport -> overall, market -> sport)
 MIN_GAIN = 0.002
 LOW, HIGH = 0.05, 0.95
 START_PRIORS = ("UFC",)   # sports whose start weight differs from overall: always kept
@@ -112,6 +116,20 @@ def in_band(r: dict, band: Optional[tuple] = None) -> bool:
     return mk is not None and lo <= mk <= hi
 
 
+def main_lines(recs: list) -> list:
+    """One record per player-stat (or game line) per game: the line whose market chance is
+    closest to 50/50. 11/14 check (17,645 main lines since 10/29): per-market weights fitted on
+    10/29-11/06 predicted 11/07-11/13 better than one shared weight in every league (log loss
+    NBA 0.6733 vs 0.6765, NFL 0.6731 vs 0.6780, NHL 0.6421 vs 0.6465)."""
+    best = {}
+    for r in recs:
+        k = (r.get("game_id"), r.get("subject"), r.get("market"))
+        d = abs((r.get("market_prob_a") if r.get("market_prob_a") is not None else 0.5) - 0.5)
+        if k not in best or d < best[k][0]:
+            best[k] = (d, r)
+    return [r for _d, r in best.values()]
+
+
 def _rows(recs: list) -> list:
     return [(r["model_prob_a"], r["market_prob_a"], 1.0 if r["result"]["winner"] == "A" else 0.0)
             for r in recs]
@@ -158,9 +176,9 @@ def tune(records: list, current: dict, priors: bool = True) -> tuple:
     priors: sports start from their own start weight (UFC 0.35, LINEMAKER_<SPORT>_MODEL_WEIGHT);
     off for live, where every league starts from the live weight."""
     band = tune_band()
-    graded = [r for r in _graded(records) if in_band(r, band)]   # the prices picks are made at
+    graded = main_lines([r for r in _graded(records) if in_band(r, band)])   # one main line per outcome
     min_total = int(_env("LINEMAKER_AUTOTUNE_MIN", 200))
-    max_step = _env("LINEMAKER_AUTOTUNE_STEP", 0.10)
+    max_step = _env("LINEMAKER_AUTOTUNE_STEP", 0.25)
     new = {"model_weight": current.get("model_weight", _env("LINEMAKER_MODEL_WEIGHT", 0.5)),
            "fresh_weight": current.get("fresh_weight", _env("LINEMAKER_FRESH_WEIGHT", 0.8)),
            "markets": dict(current.get("markets", {})), "sports": dict(current.get("sports", {})),
@@ -186,7 +204,7 @@ def tune(records: list, current: dict, priors: bool = True) -> tuple:
         if new["fresh_weight"] != old_f:
             changes.append(f"Fresh-news weight {old_f:.2f} → {new['fresh_weight']:.2f}")
     # Three levels, each pulled toward the one above by its sample size (credibility
-    # weighting): weight = parent + n / (n + 150) x (its own best fit - parent). A sport or
+    # weighting): weight = parent + n / (n + 300) x (its own best fit - parent). A sport or
     # market with little data stays near its parent; one with lots of data earns its own.
     from .pro import _start_weight
     g = new["model_weight"]
@@ -201,7 +219,7 @@ def tune(records: list, current: dict, priors: bool = True) -> tuple:
         if n < MIN_GROUP:
             continue
         (sb, _l, _b), _ = best_weight(_rows(recs))
-        target = prior + n / (n + SHRINK) * (sb - prior)
+        target = prior + n / (n + WEIGHT_SHRINK) * (sb - prior)
         moved = _step(old_s, target, recs, max_step)
         if abs(moved - g) < 0.025 and not (priors and sport in START_PRIORS):
             new["sports"].pop(sport, None)       # same as overall: no special case needed
@@ -216,7 +234,7 @@ def tune(records: list, current: dict, priors: bool = True) -> tuple:
         sport = name.split(" ", 1)[0]
         parent = new["sports"].get(sport, _start_weight(sport, g) if priors else g)
         (gb, _l, _b), _ = best_weight(_rows(recs))
-        target = parent + n / (n + SHRINK) * (gb - parent)
+        target = parent + n / (n + WEIGHT_SHRINK) * (gb - parent)
         old_m = new["markets"].get(name, parent)
         moved = _step(old_m, target, recs, max_step)
         if abs(moved - parent) < 0.025:

@@ -134,8 +134,9 @@ segments are fit completely apart, each with its own base weight, per-league and
 weights, hit-chance calibration and paused markets: pre-game props, pre-game ML/spreads/totals,
 live props, live ML/spreads/totals. The
 result goes to `tracking/weights.json`, which new cards read immediately. Guardrails: nothing
-moves before 200 graded outcomes (alt lines on one stat count once), a market gets its own weight only at 75+ (pulled toward the
-overall weight), a weight moves only when it clearly fits better and by at most 0.10 per run,
+moves before 200 graded outcomes, the fit uses main lines only (each stat in each game once, at the
+line closest to 50/50), a market gets its own weight only at 75+ (pulled toward its league's weight
+until it has ~300 results), a weight moves only when it clearly fits better and by at most 0.25 per run,
 and weights stay within 0.05-0.95. `LINEMAKER_AUTOTUNE=off` freezes the `.env` values;
 delete `weights.json` to start over.
 

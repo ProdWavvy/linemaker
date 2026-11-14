@@ -35,8 +35,8 @@ class ReportTest(unittest.TestCase):
                 json.dump({f"k{i}": r for i, r in enumerate(recs)}, f)
             lines = autotune.run_autotune(d, "2026-10-21")
             segs = autotune.segment_weights()
-        self.assertAlmostEqual(segs["live props"]["weight"], 0.25)
-        self.assertTrue(any(l.startswith("Live props: Overall weight 0.35 → 0.25") for l in lines))
+        self.assertAlmostEqual(segs["live props"]["weight"], 0.10)      # one 0.25 step toward the fit
+        self.assertTrue(any(l.startswith("Live props: Overall weight 0.35 → 0.10") for l in lines))
         self.assertEqual(segs["pre props"]["weight"], 0.5)          # pre-game untouched by live reads
         self.assertEqual(segs["live games"]["weight"], 0.35)
 

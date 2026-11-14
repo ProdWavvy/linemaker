@@ -44,12 +44,43 @@ class TuneTest(unittest.TestCase):
     def test_moves_toward_best_fit_in_capped_steps(self):
         recs = records(3000, model_skill=0.95)
         new, changes = autotune.tune(recs, {"model_weight": 0.5})
-        self.assertAlmostEqual(new["model_weight"], 0.6)      # capped at +0.10 per run
+        self.assertAlmostEqual(new["model_weight"], 0.75)     # capped at +0.25 per run
         for _ in range(5):
             new, _c = autotune.tune(recs, new)
-        self.assertGreaterEqual(new["model_weight"], 0.8)   # stops once more weight is noise
+        self.assertGreaterEqual(new["model_weight"], 0.75)  # stops once more weight is noise
         self.assertLessEqual(new["model_weight"], autotune.HIGH)
         self.assertTrue(new["history"])
+
+    def test_step_cap_follows_env(self):
+        recs = records(3000, model_skill=0.95)
+        with mock.patch.dict(os.environ, {"LINEMAKER_AUTOTUNE_STEP": "0.10"}):
+            new, _c = autotune.tune(recs, {"model_weight": 0.5})
+        self.assertAlmostEqual(new["model_weight"], 0.6)
+
+    def test_fits_on_main_lines_only(self):
+        rungs = [{"game_id": "g1", "subject": "A", "market": "points", "market_prob_a": p}
+                 for p in (0.80, 0.55, 0.47, 0.30)]
+        other = {"game_id": "g2", "subject": "A", "market": "points", "market_prob_a": 0.9}
+        kept = autotune.main_lines(rungs + [other])
+        self.assertEqual(len(kept), 2)
+        self.assertIn(0.47, [r["market_prob_a"] for r in kept])     # closest to 50/50 wins
+        self.assertIn(other, kept)
+
+    def test_alt_ladders_dont_count_as_extra_outcomes(self):
+        recs = records(400, seed=4)
+        ladder = []
+        for i, r in enumerate(recs):
+            r["game_id"], r["subject"] = f"g{i % 40}", f"p{i}"
+            away = 1 if r["market_prob_a"] >= 0.5 else -1    # alt rungs sit further from 50/50
+            for shift in (0.05, 0.1):
+                ladder.append(dict(r, market_prob_a=r["market_prob_a"] + away * shift))
+        a = autotune.tune(recs, {"model_weight": 0.5})[1]
+        b = autotune.tune(recs + ladder, {"model_weight": 0.5})[1]
+        self.assertEqual([l for l in a if "outcomes" in l], [l for l in b if "outcomes" in l])
+
+    def test_weight_and_bias_credibility_differ(self):
+        self.assertEqual(autotune.WEIGHT_SHRINK, 300)
+        self.assertEqual(autotune.SHRINK, 150)
 
     def test_market_weight_shrinks_toward_overall(self):
         recs = records(2000, model_skill=0.5) + records(200, market="threes", model_skill=0.0, seed=2)
