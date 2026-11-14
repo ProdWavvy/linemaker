@@ -736,3 +736,95 @@ def boost_tickets(legs: list, books, spec: "BoostSpec") -> list:
         if top is not None and {exposure(e) for e, _o in safe.legs} != {exposure(e) for e, _o in top.legs}:
             out.append(("💰 Best value", top))
     return out
+
+
+# ---- same-game prices from the books themselves (PropLine, Hobby plan) ---------------------
+# A same-game ticket's price was an estimate (sgp_payout: the correlation the bot measures, plus
+# a 5% margin). With PROPLINE_API_KEY set, FanDuel's and DraftKings' own pricers quote the exact
+# slip (POST /sgp); a combination the book won't take as an SGP is dropped from the card.
+SGP_QUOTE_BOOKS = {"fanduel": "fanduel", "draftkings": "draftkings"}
+
+
+def sgp_leg(ev, book: str) -> Optional[dict]:
+    """One leg in PropLine's SGP form (The Odds API's market keys), or None if unsupported."""
+    from .betlinks import leg
+    from .oddsapi import YES_NO_MARKETS, market_keys_for
+    m, side = ev.market, ev.best.side
+    if m.bet_type == "prop":
+        mk = ((leg(m, side, book) or {}).get("mk") or "").replace("_alternate", "")
+        if not mk:
+            keys = [k for k in market_keys_for(m.sport, {m.market}) if not k.endswith("_alternate")]
+            mk = keys[0] if keys else ""
+        if not mk or mk in YES_NO_MARKETS:
+            return None
+        return {"market": mk, "name": "Over" if side == "A" else "Under", "description": m.subject,
+                "point": m.line}
+    if m.bet_type == "moneyline":
+        return {"market": "h2h", "name": m.subject if side == "A" else m.opponent}
+    if m.bet_type == "spread":
+        return {"market": "spreads", "name": m.subject if side == "A" else m.opponent,
+                "point": m.line if side == "A" else -m.line}
+    if m.bet_type == "total":
+        return {"market": "totals", "name": "Over" if side == "A" else "Under", "point": m.line}
+    return None
+
+
+def quote_sgp(p) -> Optional[object]:
+    """The book's own decimal price for a same-game ticket (games with one leg at their listed
+    odds), "refused" if the book won't take a game's legs together, None if it couldn't be asked."""
+    from . import propline
+    from .parlay_math import boosted
+    book = SGP_QUOTE_BOOKS.get(_key(p.book))
+    if not book:
+        return None
+    games = {}
+    for ev, odds in p.legs:
+        games.setdefault(ev.market.game_id, []).append((ev, odds))
+    total = 1.0
+    for legs in games.values():
+        if len(legs) == 1:
+            total *= american_to_decimal(legs[0][1])
+            continue
+        m = legs[0][0].market
+        away, _, home = (m.game or "").partition(" @ ")
+        event = propline.find_event(m.sport, home or m.subject, away or m.opponent, getattr(m, "commence", ""))
+        body = [sgp_leg(ev, p.book) for ev, _o in legs]
+        if not event or any(b is None for b in body):
+            return None
+        q = propline.sgp_quote(m.sport, event["id"], body, book)
+        if q.get("quoted") is False:
+            return "refused"
+        dec = q.get("sgp_price_decimal") or (american_to_decimal(q["sgp_price"]) if q.get("sgp_price") else None)
+        if not dec:
+            return None
+        total *= float(dec)
+    return boosted(total, p.boost) if p.boost else total
+
+
+def refine_sgp_prices(parlays: list) -> list:
+    """Same-game tickets at FanDuel / DraftKings re-priced at the book's own SGP price; ones the
+    book won't take are dropped. Without a PropLine key (or on any error) the estimate stays."""
+    from concurrent.futures import ThreadPoolExecutor
+    from . import propline
+    todo = [p for p in parlays if getattr(p, "kind", "") and _key(p.book) in SGP_QUOTE_BOOKS]
+    if not todo or not propline.on():
+        return parlays
+
+    def ask(p):
+        try:
+            return quote_sgp(p)
+        except Exception as e:
+            import logging
+            logging.getLogger("linemaker.parlay").warning("sgp quote %s: %s", p.book, e)
+            return None
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        answers = dict(zip((id(p) for p in todo), pool.map(ask, todo)))
+    out = []
+    for p in parlays:
+        a = answers.get(id(p))
+        if a == "refused":
+            continue
+        if isinstance(a, float):
+            p.decimal, p.sgp_estimated, p.sgp_live = a, False, True
+        out.append(p)
+    return out

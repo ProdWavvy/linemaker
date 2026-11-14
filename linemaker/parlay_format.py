@@ -27,10 +27,13 @@ def odds_text(p) -> str:
 
 def sgp_line(p) -> str:
     """Why a same-game price is an estimate, with the multiplied odds for comparison."""
-    if not getattr(p, "sgp_estimated", False):
-        return ""
     from .odds import decimal_to_american
     listed = getattr(p, "listed_decimal", p.decimal)
+    if getattr(p, "sgp_live", False):
+        return (f"🔗 {p.book}'s own same-game price {fmt_odds(p.american)} ✓"
+                + (f" (multiplied odds {fmt_odds(decimal_to_american(listed))})" if listed > 1.0 else ""))
+    if not getattr(p, "sgp_estimated", False):
+        return ""
     return (f"🔗 {p.book} prices same-game legs together: ≈{fmt_odds(p.american)} estimated "
             f"(multiplied odds {fmt_odds(decimal_to_american(listed))}); check the slip's price")
 

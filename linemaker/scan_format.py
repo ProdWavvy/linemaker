@@ -875,6 +875,8 @@ def volume_messages(sections: list, date: str, cfg, title: str = "") -> list:
                 + ("one leg can't make a parlay. " if len(legs) == 1 else
                    "these legs can't go on one ticket together (same game / same player). ")
                 + "Pick a leg from the menu below to bet it straight, or ask again in a few minutes as prices move.")
+        from .parlay import refine_sgp_prices
+        parlays = refine_sgp_prices(parlays)   # FanDuel / DraftKings' own same-game prices (PropLine)
         from .parlay_math import leg_value
         try:
             from .parlay_track import log_parlays

@@ -115,3 +115,54 @@ class UfcLinesTest(unittest.TestCase):
         self.assertIsNone(td["odds"])                                # priced against the pick'em break-even
         self.assertTrue(any("Over 9.5 fight time** -120 FanDuel" in l for l in lines))   # 3+ pt edge shown
         self.assertFalse(any("sig strikes" in l for l in lines))                         # 1 pt edge isn't
+
+
+def _ev(bet_type, subject, opponent, market, line, side, game_id="g1"):
+    from types import SimpleNamespace as NS
+    m = NS(bet_type=bet_type, subject=subject, opponent=opponent, market=market, line=line, sport="NBA",
+           game_id=game_id, game="New York Knicks @ Boston Celtics", commence="2026-11-15T00:30:00Z",
+           links={"FanDuel": [{"mk": "player_points_alternate", "link": "x"}, {"mk": "player_points_alternate", "link": "y"}]},
+           side_keys=("A", "B"))
+    return NS(market=m, best=NS(side=side, label=f"{subject}"))
+
+
+class SgpTest(unittest.TestCase):
+    def test_leg_forms(self):
+        from linemaker.parlay import sgp_leg
+        self.assertEqual(sgp_leg(_ev("prop", "Jalen Brunson", "", "points", 24.5, "A"), "FanDuel"),
+                         {"market": "player_points", "name": "Over", "description": "Jalen Brunson", "point": 24.5})
+        self.assertEqual(sgp_leg(_ev("spread", "Boston Celtics", "New York Knicks", "spread", -5.5, "B"), "FanDuel"),
+                         {"market": "spreads", "name": "New York Knicks", "point": 5.5})
+        self.assertEqual(sgp_leg(_ev("moneyline", "Boston Celtics", "New York Knicks", "moneyline", 0, "A"), "FanDuel"),
+                         {"market": "h2h", "name": "Boston Celtics"})
+        self.assertEqual(sgp_leg(_ev("total", "Boston Celtics", "New York Knicks", "game total", 221.5, "B"), "FanDuel"),
+                         {"market": "totals", "name": "Under", "point": 221.5})
+
+    def test_refine_uses_the_books_price_and_drops_refused(self):
+        from types import SimpleNamespace as NS
+        from linemaker import parlay
+        a = _ev("prop", "Jalen Brunson", "", "points", 24.5, "A")
+        b = _ev("prop", "Jayson Tatum", "", "points", 26.5, "A")
+        c = _ev("prop", "Derrick White", "", "points", 12.5, "B", game_id="g2")
+        good = parlay.Parlay(book="FanDuel", legs=[(a, -150), (b, -140), (c, -200)], kind="SGP+", decimal=3.0)
+        bad = parlay.Parlay(book="DraftKings", legs=[(a, -150), (b, -140)], kind="SGP", decimal=2.5)
+        plain = parlay.Parlay(book="FanDuel", legs=[(a, -150), (c, -200)], decimal=2.0)
+        quotes = {"fanduel": {"quoted": True, "sgp_price": 180, "sgp_price_decimal": 2.8},
+                  "draftkings": {"quoted": False}}
+        with mock.patch.dict(os.environ, {"PROPLINE_API_KEY": "k"}), \
+                mock.patch.object(propline, "find_event", return_value={"id": "9"}), \
+                mock.patch.object(propline, "sgp_quote", side_effect=lambda s, e, legs, book: quotes[book]) as q:
+            out = parlay.refine_sgp_prices([good, bad, plain])
+        self.assertEqual(out, [good, plain])                         # DraftKings won't take its pair
+        self.assertAlmostEqual(good.decimal, 2.8 * 1.5)              # the SGP group at FanDuel's price x the other game
+        self.assertTrue(good.sgp_live)
+        self.assertEqual(q.call_count, 2)
+        from linemaker.parlay_format import sgp_line
+        self.assertIn("own same-game price", sgp_line(good))
+
+    def test_no_key_keeps_estimates(self):
+        from linemaker import parlay
+        p = parlay.Parlay(book="FanDuel", legs=[], kind="SGP", decimal=2.5)
+        with mock.patch.dict(os.environ, {"PROPLINE_API_KEY": ""}):
+            self.assertEqual(parlay.refine_sgp_prices([p]), [p])
+        self.assertEqual(p.decimal, 2.5)
