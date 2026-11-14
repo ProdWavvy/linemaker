@@ -252,6 +252,39 @@ def apply_calibration(ev):
         s.fair = fair_odds(min(max(s.blended, 0.001), 0.999))
 
 
+def volume_shrink_ks() -> tuple:
+    """LINEMAKER_VOLUME_SHRINK "up,down" (default 0.7,0.3; "1" or "off" = none)."""
+    raw = os.environ.get("LINEMAKER_VOLUME_SHRINK", "").strip().lower()
+    if raw in ("off", "no", "false", "1", "1,1"):
+        return 1.0, 1.0
+    try:
+        up, _, down = raw.partition(",")
+        return (min(1.0, max(0.0, float(up))), min(1.0, max(0.0, float(down or up)))) if raw else (0.7, 0.3)
+    except ValueError:
+        return 0.7, 0.3
+
+
+def volume_shrink(ev) -> None:
+    """Parlay legs: how far to trust the model where it parts from the sharp market. The legs
+    picked are the likeliest of thousands, so they collect the model's misses: graded 10/22-11/13,
+    a leg the model rated above the market hit at the market plus ~70% of the model's lift, and
+    one it rated below the market hit nearly at the market. Fitted 10/22-11/06, tested 11/07-11/13
+    (log loss on 65%+ legs: NBA 0.4552 -> 0.4538, NHL 0.4498 -> 0.4487, NFL 0.4464 -> 0.4445).
+    Same k on both sides (they still add to 1), chosen by the likelier side's lean; before the
+    calibration, so the record keeps the raw blend."""
+    up, down = volume_shrink_ks()
+    if (up >= 0.999 and down >= 0.999) or len(ev.sides) != 2 or any(s.market_prob is None for s in ev.sides):
+        return
+    fav = max(ev.sides, key=lambda s: s.blended)
+    k = up if fav.blended > fav.market_prob else down
+    push = getattr(ev.sim, "p_push", 0.0) or 0.0
+    for s in ev.sides:
+        s.blended = min(0.999, max(0.001, s.market_prob + k * (s.blended - s.market_prob)))
+        s.gap = s.blended - s.best_implied
+        s.ev = expected_value(s.blended, s.best_odds, 100, push)
+        s.fair = fair_odds(s.blended)
+
+
 def volume_score(ev) -> float:
     """Volume ranking: hit chance, nudged by price. A leg priced 5% better than fair moves up
     as if it were 2.5 points likelier; 5% worse, down 2.5. Between two lines of the same
@@ -859,6 +892,8 @@ def run_pro(markets: list, slate_date: str, cfg: ProConfig, freezer=None,
             freezer.record(ev)
         if tracker is not None:
             tracker.record(ev, keep_model=cfg.force_model_weight == 0)
+        if cfg.pick_tag == "volume" and m.sport != "UFC":   # UFC: its model is already market-anchored
+            volume_shrink(ev)
         if cfg.calibrate:   # after tracking: the record keeps the raw hit chances for the next fit
             apply_calibration(ev)
         c = sport_cfg(cfg, m.sport, per_sport)   # this sport's own gates, if any

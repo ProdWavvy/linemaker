@@ -58,6 +58,10 @@ def segment_of(legs: list) -> str:
     return f"{phase}-{sports.pop() if len(sports) == 1 else 'MULTI'}-{kinds.pop() if len(kinds) == 1 else 'mixed'}"
 
 
+def _r(x):
+    return round(x, 4) if isinstance(x, (int, float)) else None
+
+
 def log_parlays(parlays: list, date: str):
     """Remember posted parlays (first sighting wins; re-posts of the same parlay are ignored)."""
     if os.environ.get("LINEMAKER_TRACKING", "on").lower() in ("off", "0", "false", "no"):
@@ -68,6 +72,7 @@ def log_parlays(parlays: list, date: str):
     new = {}
     for p in parlays:
         legs = [{"key": ev.market.key, "side": ev.best.side, "label": ev.best.label, "odds": o,
+                 "prob": _r(getattr(ev.best, "blended", None)), "market_prob": _r(getattr(ev.best, "market_prob", None)),
                  "date": ev.market.date, "sport": getattr(ev.market, "sport", None),
                  "kind": kind_of(getattr(ev.market, "bet_type", "prop")),
                  "live": getattr(ev, "phase", "pre") == "live"} for ev, o in p.legs]

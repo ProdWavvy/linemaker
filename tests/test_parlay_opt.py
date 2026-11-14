@@ -398,3 +398,50 @@ class LiveTargetsTest(unittest.TestCase):
         self.assertIn("Logged from this card", redrawn[0].description)
         later = " ".join(f.value for e in redrawn[1:] for f in e.fields)
         self.assertFalse(any(f"• {p} " in later for p in held))             # those players left the payouts
+
+
+class VolumeShrinkTest(unittest.TestCase):
+    def _ev(self, a_blend, a_mkt):
+        from linemaker.pro import SideEval
+        sides = []
+        for side, b, m in (("A", a_blend, a_mkt), ("B", 1 - a_blend, 1 - a_mkt)):
+            sides.append(SideEval(side=side, label=side, model_prob=b, market_prob=m, blended=b,
+                                  best_odds=-300, best_book="FanDuel", best_implied=0.75, gap=b - 0.75,
+                                  model_edge=0.0, ev=0.0, fair=-300))
+        return NS(sides=sides, sim=NS(p_push=0.0))
+
+    def test_model_lift_keeps_70_pct_and_a_drop_30_pct(self):
+        from linemaker.pro import volume_shrink
+        with mock.patch.dict(os.environ, {"LINEMAKER_VOLUME_SHRINK": ""}):
+            ev = self._ev(0.85, 0.75)          # model lifts the likelier side 10 pts over the market
+            volume_shrink(ev)
+            self.assertAlmostEqual(ev.sides[0].blended, 0.82)
+            self.assertAlmostEqual(ev.sides[0].blended + ev.sides[1].blended, 1.0)
+            ev = self._ev(0.80, 0.85)          # model rates the likelier side below the market
+            volume_shrink(ev)
+            self.assertAlmostEqual(ev.sides[0].blended, 0.835)
+
+    def test_off_switch(self):
+        from linemaker.pro import volume_shrink
+        with mock.patch.dict(os.environ, {"LINEMAKER_VOLUME_SHRINK": "off"}):
+            ev = self._ev(0.85, 0.75)
+            volume_shrink(ev)
+            self.assertAlmostEqual(ev.sides[0].blended, 0.85)
+
+
+class ParlayCsvTest(unittest.TestCase):
+    def test_graded_parlays_ride_along_in_the_grade_csv(self):
+        import csv
+        import io
+        from linemaker.grade_report import graded_csv
+        p = {"book": "FanDuel", "style": "safest", "kind": "", "segment": "pre-NBA-props", "prob": 0.41,
+             "raw_prob": 0.43, "indep_prob": 0.42, "decimal": 2.6, "result": "lost", "profit": -1.0,
+             "outcomes": ["won", "lost"],
+             "legs": [{"label": "A Over 10.5", "prob": 0.8, "odds": -300, "sport": "NBA"},
+                      {"label": "B Under 5.5", "prob": 0.7, "odds": -250, "sport": "NBA"}]}
+        rows = list(csv.reader(io.StringIO(graded_csv({"main": {}, "live": {}}, [p, dict(p, result=None)]))))
+        self.assertEqual(rows[0][-1], "parlay_leg")
+        self.assertEqual(len(rows), 2)                       # header + the graded parlay only
+        self.assertEqual(rows[1][0], "parlay")
+        self.assertIn("A Over 10.5 (80%) -300", rows[1][4])
+        self.assertEqual(rows[1][16], "lost")

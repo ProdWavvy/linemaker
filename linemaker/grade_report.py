@@ -464,14 +464,19 @@ def overview_embed(date: str, records: dict, newly: int) -> discord.Embed:
                          color=BLUE)
 
 
-def graded_csv(records: dict) -> str:
+def graded_csv(records: dict, parlays: Optional[list] = None) -> str:
+    """Every graded market (one row each), then every graded auto-parlay (source "parlay":
+    game = type and size, subject = its legs, likelier_prob = hit chance shown, model_prob =
+    raw joint chance, market_prob = independent-legs chance, best_odds = its price, actual =
+    profit in units). parlay_leg = the market was a volume/parlay leg."""
     out = io.StringIO()
     w = csv.writer(out)
     from .tracking import record_segment
     w.writerow(["source", "segment", "sport", "game", "subject", "market", "line", "likelier_side",
                 "likelier_prob", "model_prob", "market_prob", "value_side", "value_gap",
                 "best_odds", "best_book", "actual", "result", "picked", "pick_odds",
-                "market_pick", "market_pick_side", "market_pick_odds", "market_pick_book", "market_pick_result"])
+                "market_pick", "market_pick_side", "market_pick_odds", "market_pick_book", "market_pick_result",
+                "parlay_leg"])
     for kind, recs in records.items():
         for r in recs.values():
             if not r.get("result"):
@@ -489,7 +494,24 @@ def graded_csv(records: dict) -> str:
                         val.get("label"), round(val.get("gap", 0), 4), val.get("best_odds"),
                         val.get("best_book"), r["result"].get("actual"),
                         _outcome(r, pick_side) if r.get("picked") else _outcome(r, fav.get("side")),
-                        "yes" if r.get("picked") else "", r.get("pick_odds", "")] + market)
+                        "yes" if r.get("picked") else "", r.get("pick_odds", "")] + market
+                       + ["yes" if r.get("volume_pick") else ""])
+    from .odds import decimal_to_american
+    for p in parlays or []:
+        if p.get("result") not in ("won", "lost", "push"):
+            continue
+        legs = p.get("legs") or []
+        style = ("edge" if p.get("style") == "edge" else p.get("kind") or p.get("style") or "safest")
+        outs = p.get("outcomes") or [""] * len(legs)
+        w.writerow(["parlay", p.get("segment", ""), "/".join(sorted({l.get("sport") or "" for l in legs})),
+                    f"{style} {len(legs)}-leg", " | ".join((l.get("label") or l.get("key", ""))
+                                                           + (f" ({l['prob']:.0%})" if l.get("prob") else "")
+                                                           + (f" {l['odds']:+d}" if isinstance(l.get("odds"), int) else "")
+                                                           for l in legs),
+                    p.get("book", ""), len(legs), " | ".join(str(o or "") for o in outs), p.get("prob"),
+                    p.get("raw_prob"), p.get("indep_prob"), "", "",
+                    decimal_to_american(p["decimal"]) if p.get("decimal") else "", p.get("book", ""),
+                    p.get("profit"), p.get("result"), "", "", "", "", "", "", "", ""])
     return out.getvalue()
 
 
@@ -507,5 +529,10 @@ def grade_report(date: str, summary: list, before: set, remaining) -> tuple:
         if e is not None:
             embeds.append(e)
     embeds.append(notes_embed(date, records, summary, newly, remaining))
-    text = graded_csv(records)
+    try:
+        from .parlay_track import _load
+        parlays = list(_load(date).values())
+    except Exception:
+        parlays = []
+    text = graded_csv(records, parlays)
     return embeds, (text if text.count("\n") > 1 else None)
