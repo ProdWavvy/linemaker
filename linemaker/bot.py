@@ -2945,6 +2945,13 @@ async def quota_cmd(interaction: discord.Interaction):
                               description="\n".join(lines))
         embed.add_field(name="Total remaining", value=f"**{total}** across {len(rows)} "
                                                       f"key{'s' if len(rows) != 1 else ''}")
+        from .propline import on as propline_on, usage_line as propline_usage
+        if propline_on():
+            from .feed_merge import check_line, props_source, saved_line
+            extra = [propline_usage(), "Props from " + ("PropLine (credit saver)" if props_source() == "propline"
+                                                         else "The Odds API")]
+            extra += [l for l in (saved_line(), check_line()) if l]
+            embed.add_field(name="PropLine", value="\n".join(extra)[:1024], inline=False)
         await interaction.followup.send(embed=embed, ephemeral=True)
     except Exception as e:
         await _report_error(interaction, e)

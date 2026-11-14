@@ -792,7 +792,8 @@ def fetch_slate(api: OddsAPI, sport: str, date: str, tz: ZoneInfo, props: bool =
         api.slate[sport.upper()] = [(_game(e), e["commence_time"]) for e in events]
     out = parse_game_odds(events, sport, tz) if game_lines else []
     from .feed_merge import mode as merge_mode
-    how = merge_mode()
+    pickem = getattr(api, "include_multipliers", False)   # PrizePicks / Underdog: multipliers only here
+    how = "off" if pickem else merge_mode()
     if game_lines and how != "off" and out:   # PropLine alongside: more books, fresher prices
         from .feed_merge import merge, propline_games
         merge(out, propline_games(sport, events, game_markets, tz), how, f"{sport} games")
@@ -809,6 +810,25 @@ def fetch_slate(api: OddsAPI, sport: str, date: str, tz: ZoneInfo, props: bool =
             log.info("%s: props for the next %d of %d games (LINEMAKER_MAX_PROP_GAMES_%s)",
                      sport, cap, len(chosen), sport.upper())
             chosen = sorted(chosen, key=lambda e: e["commence_time"])[:cap]
+        from .feed_merge import props_source
+        src = "oddsapi" if pickem else props_source()
+        props_out, from_pl = [], {}
+        now_utc = dt.datetime.now(dt.timezone.utc)
+        pregame = [e for e in chosen
+                   if dt.datetime.fromisoformat(e["commence_time"].replace("Z", "+00:00")) > now_utc]
+        if src == "propline":   # credit saver: props from PropLine, The Odds API only where it can't
+            from .feed_merge import check_today, record_saved, run_daily_check, saver_props
+            if check_today() is None and pregame:
+                run_daily_check(api, sport, pregame, keys)
+                src = props_source()
+        if src == "propline" and pregame:   # live games stay on The Odds API
+            from_pl = saver_props(sport, pregame, keys, tz)
+            props_out = [fm for rows in from_pl.values() for fm in rows]
+            record_saved(len([k for k in keys.split(",") if k]) * len(from_pl))
+            if from_pl:
+                log.info("%s props: %d of %d games from PropLine (credit saver)", sport, len(from_pl), len(chosen))
+        oa_games = [e for e in chosen if e["id"] not in from_pl]
+
         def one(e):
             try:
                 return fetch_event_props(api, sport, e["id"], keys)
@@ -820,16 +840,15 @@ def fetch_slate(api: OddsAPI, sport: str, date: str, tz: ZoneInfo, props: bool =
         with ThreadPoolExecutor(max_workers=4) as pool:   # a few at a time; 429s are retried
             # each worker runs in a copy of this thread's context, so the credits it spends
             # are counted toward the job that asked (pre-tip, chat ...)
-            ctxs = [contextvars.copy_context() for _ in chosen]
-            payloads = list(pool.map(lambda pair: pair[1].run(one, pair[0]), zip(chosen, ctxs)))
-        props_out = []
+            ctxs = [contextvars.copy_context() for _ in oa_games]
+            payloads = list(pool.map(lambda pair: pair[1].run(one, pair[0]), zip(oa_games, ctxs)))
         for payload in payloads:
             if payload is not None:
                 props_out += parse_event_props(payload, sport, tz)
-        if how != "off":
+        if how != "off" and oa_games and src != "propline":   # both feeds: merge PropLine into the Odds API's
             from .feed_merge import merge, propline_props
-            extra = propline_props(sport, chosen, keys, tz)
-            refused = {e["id"] for e, p in zip(chosen, payloads) if p is None}
+            extra = propline_props(sport, oa_games, keys, tz)
+            refused = {e["id"] for e, p in zip(oa_games, payloads) if p is None}
             props_out += [fm for fm in extra if fm.game_id in refused]   # Odds API refused: PropLine alone
             merge(props_out, [fm for fm in extra if fm.game_id not in refused], how, f"{sport} props")
         out += props_out

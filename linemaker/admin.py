@@ -130,6 +130,29 @@ def restart_soon(delay: float = 2.0):
     asyncio.get_running_loop().call_later(delay, os._exit, 0)
 
 
+def memory_line() -> str:
+    """The bot's memory and the server's (Linux /proc), e.g. for judging bigger downloads."""
+    def kb(path, field):
+        try:
+            with open(path) as f:
+                for line in f:
+                    if line.startswith(field + ":"):
+                        return int(line.split()[1])
+        except (OSError, ValueError, IndexError):
+            return None
+        return None
+    rss, peak = kb("/proc/self/status", "VmRSS"), kb("/proc/self/status", "VmHWM")
+    total, free = kb("/proc/meminfo", "MemTotal"), kb("/proc/meminfo", "MemAvailable")
+    if rss is None and total is None:
+        return ""
+    parts = []
+    if rss is not None:
+        parts.append(f"bot {rss // 1024} MB" + (f" (peak {peak // 1024} MB)" if peak else ""))
+    if total is not None and free is not None:
+        parts.append(f"server {free / 1048576:.1f} GB free of {total / 1048576:.1f} GB")
+    return "Memory: " + " · ".join(parts)
+
+
 def status_lines() -> list:
     root = root_dir()
     try:
@@ -148,12 +171,17 @@ def status_lines() -> list:
     import time
     fresh = os.path.exists(busy) and time.time() - os.path.getmtime(busy) < 600
     out.append("• Busy right now (scan or answer running)" if fresh else "• Idle")
+    mem = memory_line()
+    if mem:
+        out.append(f"• {mem}")
     from .propline import on as propline_on, usage_line as propline_usage
     if propline_on():
-        out.append(f"• {propline_usage()}")
-        from .feed_merge import status_line as merge_line
-        if merge_line():
-            out.append(f"• {merge_line()}")
+        from .feed_merge import check_line, props_source, saved_line, status_line as merge_line
+        out.append(f"• {propline_usage()} · props from "
+                   + ("PropLine (credit saver)" if props_source() == "propline" else "The Odds API"))
+        for line in (check_line(), saved_line(), merge_line()):
+            if line:
+                out.append(f"• {line}")
     from .oddsapi import credits_today, daily_budget, local_today, spend_breakdown
     budget = daily_budget()
     tz = os.environ.get("LINEMAKER_TZ", "America/New_York").split("/")[-1].replace("_", " ")
