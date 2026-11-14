@@ -499,6 +499,17 @@ class LinemakerChat:
             history.append({"role": "user", "content": f"{author}: {text}"})
             history.append({"role": "assistant", "content": reply})
             return Turn(reply, ctx["files"], [])
+        stat_line = None
+        if not attached_csv:
+            from .ufc_props import stat_prop_ask
+            stat_line = stat_prop_ask(text)
+        if stat_line or (not attached_csv and UFC_PROPS_WORDS.search(text)):   # UFC fighter / fight props
+            from .ufc_props import props_reply, stat_prop_reply
+            reply = await asyncio.to_thread(stat_prop_reply if stat_line else props_reply, _today(),
+                                            *([text] if stat_line else []))
+            history.append({"role": "user", "content": f"{author}: {text}"})
+            history.append({"role": "assistant", "content": reply})
+            return Turn(reply, ctx["files"], [])
         other = None if attached_csv else unsupported_league(text)
         if quick and other:
             reply = (f"**{other} isn't covered yet**, so I didn't run anything (no credits used). "
@@ -1261,6 +1272,12 @@ def quick_mode(text: str) -> str:
         # parlays (model picks on game lines are rare, so that card was usually empty)
         return "volume"
     return "smart"
+
+
+# "ufc props", "fight props", "method of victory", "ufc ko props", "goes the distance ufc"
+_FIGHT = r"(?:ufc|mma|fights?|fighter)"
+_PROP = r"(?:props?|method(?: of victory)?|distance|ko|tko|submissions?|subs|decision|round of finish|how it ends)"
+UFC_PROPS_WORDS = re.compile(rf"\b{_FIGHT}\b.*\b{_PROP}\b|\b{_PROP}\b.*\b{_FIGHT}\b", re.I)
 
 
 def quick_kind(text: str) -> str:

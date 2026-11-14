@@ -146,6 +146,7 @@ def fighter(aid: str) -> dict:
         rec = _get(f"{CORE}/athletes/{aid}/records").get("items", [])
         stats = {s["name"]: s.get("value") or 0 for s in (rec[0]["stats"] if rec else [])}
         f.update(wins=stats.get("wins", 0), losses=stats.get("losses", 0),
+                 kos=stats.get("tkos", 0), subs=stats.get("submissions", 0),
                  finishes=stats.get("tkos", 0) + stats.get("submissions", 0),
                  finished=stats.get("tkoLosses", 0) + stats.get("submissionLosses", 0))
     except Exception as e:
@@ -158,7 +159,24 @@ def fighter(aid: str) -> dict:
     except Exception as e:
         log.warning("ufc stats %s: %s", aid, e)
     f["form"] = recent_form(aid)
+    try:   # fights with stats on ESPN: how far to trust the per-minute rates
+        cats = _get(f"{WEB}/athletes/{aid}/stats").get("categories", [])
+        f["stat_fights"] = max((len(c.get("statistics", [])) for c in cats
+                                if c.get("displayName", "").lower() == "striking"), default=0)
+    except Exception as e:
+        log.warning("ufc stats rows %s: %s", aid, e)
     return f
+
+
+STAT_PRIOR_FIGHTS = 5   # a rate from n fights counts n / (n + 5) against the card's average
+
+
+def shrunk_rate(value: Optional[float], fights: Optional[int], mean: Optional[float]) -> Optional[float]:
+    """A per-minute rate pulled toward the card average by sample size (3 fights if unknown)."""
+    if value is None or mean is None:
+        return value
+    n = fights if fights is not None else 3
+    return (n * value + STAT_PRIOR_FIGHTS * mean) / (n + STAT_PRIOR_FIGHTS)
 
 
 def recent_form(aid: str, n: int = 5) -> list:
@@ -406,7 +424,8 @@ UFC_PROP_MARKETS = ("significant strikes", "takedowns", "fight time")
 
 
 def expected_rounds(p_early: float, rounds: int) -> float:
-    lam = 0.35   # same front-loaded finish curve as sim.FINISH_HAZARD
+    from .sim import finish_hazard
+    lam = finish_hazard(rounds)   # same front-loaded finish curve as the sim
     e_early = 1 / lam - rounds * math.exp(-lam * rounds) / (1 - math.exp(-lam * rounds))
     return p_early * e_early + (1 - p_early) * rounds
 
@@ -419,6 +438,10 @@ def fighter_props(date: str) -> list:
     ids = sorted({i for f in fights for i in (f[1], f[3])})
     with ThreadPoolExecutor(max_workers=8) as pool:
         info = dict(zip(ids, pool.map(fighter, ids)))
+    def _mean(key):
+        vals = [f[key] for f in info.values() if f.get(key) is not None]
+        return sum(vals) / len(vals) if vals else None
+    mu_slpm, mu_td = _mean("slpm"), _mean("td")
     out = []
     for fa, ida, fb, idb, comp in fights:
         a, b = info[ida], info[idb]
@@ -429,11 +452,14 @@ def fighter_props(date: str) -> list:
         minutes = 5 * expected_rounds(early, rounds)
         for me, opp, name, opp_name, win in ((a, b, fa, fb, p), (b, a, fb, fa, 1 - p)):
             wrestle = 1 - min(0.25, 0.03 * (opp.get("td") or 0))
+            slpm = shrunk_rate(me.get("slpm"), me.get("stat_fights"), mu_slpm)
+            td = shrunk_rate(me.get("td"), me.get("stat_fights"), mu_td)
             out.append({"fighter": name, "opponent": opp_name, "rounds": rounds, "win": win,
                         "lean": lean_points(anchor_shift(me, opp)[0]),
                         "early": early, "minutes": minutes, "when": comp.get("date", ""),
-                        "sig_strikes": (me.get("slpm") or 0) * minutes * wrestle if me.get("slpm") is not None else None,
-                        "takedowns": (me.get("td") or 0) / 15 * minutes if me.get("td") is not None else None})
+                        "stat_fights": me.get("stat_fights"),
+                        "sig_strikes": slpm * minutes * wrestle if slpm is not None else None,
+                        "takedowns": td / 15 * minutes if td is not None else None})
     return out
 
 

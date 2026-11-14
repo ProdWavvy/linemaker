@@ -86,15 +86,29 @@ def _poisson(rng: random.Random, lam: float) -> int:
 
 
 # UFC total rounds ("ufcrounds"): mean = chance the fight ends early, sd = scheduled rounds.
-# An early finish lands at a time drawn from a front-loaded curve (hazard FINISH_HAZARD per
-# round: about 45% of finishes in round 1, 32% in round 2, 23% in round 3 of a 3-rounder);
-# otherwise the fight goes the distance and the outcome is the full scheduled rounds.
-FINISH_HAZARD = 0.35
+# An early finish lands at a time drawn from a front-loaded curve (hazard per round, see
+# finish_hazard); otherwise the fight goes the distance and the outcome is the full scheduled
+# rounds. 2,941 finished 3-round UFC fights (2010-26): 52% of finishes in round 1, 32% in round
+# 2, 16% in round 3 (hazard 0.53 gives 52/30/18). 372 finished 5-rounders: 38/27/17/11/7
+# (hazard 0.40 gives 38/26/17/11/8): title-level fighters survive the early storm more often.
+FINISH_HAZARD = 0.53        # 3-round fights
+FINISH_HAZARD_5 = 0.40      # 5-round fights
+
+
+def finish_hazard(rounds: float) -> float:
+    return FINISH_HAZARD if rounds <= 3.5 else FINISH_HAZARD_5
+
+
+def finish_share(by_round: float, rounds: float) -> float:
+    """Share of early finishes that come by the end of round `by_round`."""
+    lam = finish_hazard(rounds)
+    return (1 - math.exp(-lam * min(by_round, rounds))) / (1 - math.exp(-lam * rounds))
 
 
 def _finish_time(u: float, rounds: float) -> float:
     """Inverse of the exponential curve truncated to the scheduled rounds."""
-    return -math.log(1 - u * (1 - math.exp(-FINISH_HAZARD * rounds))) / FINISH_HAZARD
+    lam = finish_hazard(rounds)
+    return -math.log(1 - u * (1 - math.exp(-lam * rounds))) / lam
 
 
 def _ufc_params(dist: str) -> tuple:
@@ -104,7 +118,7 @@ def _ufc_params(dist: str) -> tuple:
 
 
 def _mean_rounds(p: float, r: float) -> float:
-    lam = FINISH_HAZARD
+    lam = finish_hazard(r)
     return p * (1 / lam - r * math.exp(-lam * r) / (1 - math.exp(-lam * r))) + (1 - p) * r
 
 
@@ -144,12 +158,14 @@ except ImportError:   # pure-Python fallback below (about 100x slower)
 def _np_draws(rng, dist: str, mean: float, sd: float, n: int):
     if dist in ("ufcrounds", "ufcminutes"):
         early = rng.random(n) < mean
-        t = -np.log(1 - rng.random(n) * (1 - math.exp(-FINISH_HAZARD * sd))) / FINISH_HAZARD
+        lam = finish_hazard(sd)
+        t = -np.log(1 - rng.random(n) * (1 - math.exp(-lam * sd))) / lam
         return np.where(early, t, sd) * (5 if dist == "ufcminutes" else 1)
     if dist.startswith("ufccount"):
         p, r = _ufc_params(dist)
         early = rng.random(n) < p
-        t = np.where(early, -np.log(1 - rng.random(n) * (1 - math.exp(-FINISH_HAZARD * r))) / FINISH_HAZARD, r)
+        lam = finish_hazard(r)
+        t = np.where(early, -np.log(1 - rng.random(n) * (1 - math.exp(-lam * r))) / lam, r)
         pace = rng.gamma(UFC_RATE_SHAPE, 1 / UFC_RATE_SHAPE, n)
         return rng.poisson(np.maximum(mean / _mean_rounds(p, r) * t * pace, 0.0))
     if dist == "poisson":

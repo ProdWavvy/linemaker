@@ -2415,7 +2415,7 @@ async def weekly_cmd(interaction: discord.Interaction):
         await _report_error(interaction, e)
 
 
-@bot.tree.command(name="ufc", description="UFC fighter projections: model lean, significant strikes, takedowns, fight time")
+@bot.tree.command(name="ufc", description="UFC: fight props vs Kalshi, model lean, strikes, takedowns, fight time")
 async def ufc_cmd(interaction: discord.Interaction):
     await interaction.response.defer(thinking=True)
     try:
@@ -2432,11 +2432,24 @@ async def ufc_cmd(interaction: discord.Interaction):
                               description="```\n" + "\n".join(lines)[:3900] + "\n```")
         embed.add_field(name="Ends early", inline=False, value="\n".join(
             f"{a} vs {b}: {p:.0%} ({r} rds)" for (a, b), (p, r) in list(early.items())[:15])[:1024])
+        try:
+            from .ufc_props import FOOTER, props_lines
+            plines, priced = await asyncio.to_thread(props_lines, date)
+        except Exception as e:
+            log.warning("ufc props: %s", e)
+            plines, priced = [], []
+        embeds = []
+        if priced:
+            embeds.append(discord.Embed(
+                title=f"🎯 Fight Props vs Kalshi · {len(priced)} fights", color=0xE74C3C,
+                description=("\n".join(plines) if plines else "No prop is 3+ points better than Kalshi's "
+                             "price right now.")[:4000]).set_footer(text=FOOTER))
         embed.set_footer(text="Lean = points the model adds to (or takes from) the fighter's betting-market "
                               "win chance: takedowns, subs, win streak, reach, age (fitted on 6,900 UFC fights). "
                               "Win chances themselves start from the odds: ask for UFC picks. SigStr = significant "
-                              "strikes landed · TD = takedowns · Mins = expected fight minutes (ESPN stats).")
-        await interaction.followup.send(embed=embed)
+                              "strikes landed · TD = takedowns · Mins = expected fight minutes (ESPN stats). "
+                              "Price a book's line by typing it: hokit over 45.5 sig strikes -115")
+        await interaction.followup.send(embeds=[embed] + embeds)
     except Exception as e:
         await _report_error(interaction, e)
 
