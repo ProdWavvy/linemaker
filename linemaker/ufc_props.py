@@ -315,6 +315,8 @@ def props_lines(date: str) -> tuple:
 
 TYPED_TIP = ("Strike / takedown lines: post a screenshot of the DraftKings / FanDuel props page, or type "
              "the line, e.g. `hokit over 45.5 sig strikes -115`.")
+STAT_FOOTER = ("Strike / takedown lines: our chance = 30% model + 70% the books' consensus (a pick'em line "
+               "counts as the 50/50 point); untested model, heed the ⚠️ flags.")
 FOOTER = ("Our chance = 30% model + 70% Kalshi (round props 15% model). Worth it at = the price at "
           "FanDuel / DraftKings (or Kalshi) that's +2% EV: take anything better. Fights under way are "
           "left out.")
@@ -334,7 +336,9 @@ def props_reply(date: str) -> str:
                 "fight has started. Ask again closer to fight night.")
     head = f"🥊 **UFC fight props vs Kalshi** · {day} · {len(priced)} fights priced"
     body = "\n".join(lines) if lines else "No prop is 3+ points better than Kalshi's price right now."
-    return head + "\n\n" + body + "\n\n" + FOOTER + "\n" + TYPED_TIP
+    slines, snote = propline_lines(day)
+    stats = ("\n\n🥊 **Strike & takedown lines**\n" + "\n".join(slines)) if slines else ""
+    return head + "\n\n" + body + stats + "\n\n" + FOOTER + "\n" + (snote or STAT_FOOTER)
 
 
 # ---- fighter stat props you type in: "hokit over 45.5 sig strikes -130" -------------------
@@ -552,3 +556,142 @@ def screenshot_reply(date: str, data: dict) -> str:
                "model + 70% the book's price with its margin removed (rounds 15% model; \"50+\" ladders "
                "assume a 15% margin). The strike model is untested: small bets.")
     return "\n".join(out)
+
+
+# ---- strike / takedown / fight-time lines from PropLine (needs PROPLINE_API_KEY) ------------
+PROPLINE_UFC = {"player_significant_strikes": "significant strikes", "player_takedowns": "takedowns",
+                "fight_time_minutes": "fight time"}
+DFS_BOOKS = {"prizepicks", "underdog", "underdogfantasy", "sleeper", "dabble", "parlayplay", "pick6",
+             "draftkingspick6"}
+
+
+def _bkey(name: str) -> str:
+    return "".join(ch for ch in (name or "").lower() if ch.isalnum())
+
+
+def propline_props(events: list, odds_for) -> list:
+    """[{"fighter", "fight": (a, b), "stat", "line", "books": {title: {"over", "under"}},
+    "dfs": {title: {...}}, "fair_over"}] from PropLine UFC events; odds_for(event_id) -> odds."""
+    out = []
+    for ev in events:
+        try:
+            data = odds_for(ev["id"])
+        except Exception as e:
+            log.warning("propline ufc odds %s: %s", ev.get("id"), e)
+            continue
+        home, away = ev.get("home_team", ""), ev.get("away_team", "")
+        groups = {}
+        for bk in data.get("bookmakers", []):
+            title = bk.get("title") or bk.get("key", "")
+            dfs = _bkey(bk.get("key") or title) in DFS_BOOKS or _bkey(title) in DFS_BOOKS
+            for mk in bk.get("markets", []):
+                stat = PROPLINE_UFC.get(mk.get("key"))
+                if not stat:
+                    continue
+                for o in mk.get("outcomes", []):
+                    side = (o.get("name") or "").lower()
+                    if side not in ("over", "under") or o.get("point") is None or o.get("price") is None:
+                        continue
+                    who = o.get("description") or home   # fight time is fight-level
+                    g = groups.setdefault((who, stat, float(o["point"])), {"books": {}, "dfs": {}})
+                    g["dfs" if dfs else "books"].setdefault(title, {})[side] = int(o["price"])
+        for (who, stat, line), g in groups.items():
+            pairs = [(_implied(q["over"]), _implied(q["under"])) for q in g["books"].values()
+                     if "over" in q and "under" in q]
+            fair = sum(o / (o + u) for o, u in pairs) / len(pairs) if pairs else None
+            out.append({"fighter": who, "fight": (home, away), "stat": stat, "line": line,
+                        "books": g["books"], "dfs": g["dfs"], "fair_over": fair})
+    return out
+
+
+def propline_edges(date: str, min_edge: float = MIN_EDGE) -> tuple:
+    """([row], props seen): the card's priced strike / takedown / time lines, best first.
+    Sportsbooks: our chance vs your books' best price. Pick'em apps (PrizePicks, Underdog): our
+    chance vs the app's per-leg break-even."""
+    from . import propline
+    from .pp import break_even
+    from .pro import parlay_books
+    from .ufc_model import fighter_props, next_card_date, not_started
+    day = next_card_date(date)
+    evs = propline.events("UFC")
+    props = propline_props(evs, lambda eid: propline.event_odds("UFC", eid, ",".join(PROPLINE_UFC)))
+    if not props:
+        return [], 0
+    rows = fighter_props(day)
+    mine = {_bkey(b): b for b in parlay_books()}
+    be = break_even()
+    out = []
+    for p in props:
+        row = next((r for r in rows if same_fighter(r["fighter"], p["fighter"])), None)
+        if row is None and p["stat"] == "fight time":   # fight-level: either fighter's row
+            row = next((r for r in rows if any(same_fighter(r["fighter"], x) for x in p["fight"])), None)
+        if row is None:
+            continue
+        model_over = price_stat_prop(row, p["stat"], p["line"], True)
+        if model_over is None:
+            continue
+        market_over = p["fair_over"] if p["fair_over"] is not None else 0.5   # a pick'em line is the 50/50 point
+        over = STAT_WEIGHT * model_over + (1 - STAT_WEIGHT) * market_over
+        proj = {"significant strikes": row.get("sig_strikes"), "takedowns": row.get("takedowns"),
+                "fight time": row.get("minutes")}[p["stat"]]
+        flags = []
+        if (row.get("stat_fights") or 0) < 5:
+            flags.append("few fights on record")
+        if p["stat"] != "fight time" and p["line"] > 0 and proj and not 0.6 <= proj / p["line"] <= 1.6:
+            flags.append("projection far from the line")
+        for side, chance, model in (("over", over, model_over), ("under", 1 - over, 1 - model_over)):
+            prices = [(q[side], title) for title, q in p["books"].items() if side in q and _bkey(title) in mine]
+            if prices:
+                odds, book = min(prices, key=lambda x: _implied(x[0]))   # the best price pays the most
+                edge = chance - _implied(odds)
+                if edge >= min_edge:
+                    out.append({"prop": p, "side": side, "chance": chance, "model": model, "odds": odds,
+                                "book": book, "edge": edge, "flags": flags, "proj": proj, "row": row})
+            for title, q in p["dfs"].items():
+                if side in q and chance - be >= min_edge:
+                    out.append({"prop": p, "side": side, "chance": chance, "model": model, "odds": None,
+                                "book": title, "edge": chance - be, "flags": flags, "proj": proj, "row": row})
+                    break
+    out.sort(key=lambda x: x["edge"], reverse=True)
+    seen, best = set(), []
+    for r in out:   # the best way to play each fighter-stat (one line, one book)
+        k = (r["row"]["fighter"], r["prop"]["stat"], r["side"])
+        if k not in seen:
+            seen.add(k)
+            best.append(r)
+    return best, len(props)
+
+
+def propline_lines(date: str) -> tuple:
+    """(lines, note) for the strike / takedown section; note explains an empty one."""
+    from . import propline
+    if not propline.on():
+        return [], TYPED_TIP
+    try:
+        edges, seen = propline_edges(date)
+    except propline.PropLineError as e:
+        log.warning("propline ufc: %s", e)
+        return [], f"Strike / takedown lines unavailable from PropLine right now ({e.code}). {TYPED_TIP}"
+    except Exception as e:
+        log.warning("propline ufc: %s", e)
+        return [], f"Strike / takedown lines unavailable right now ({type(e).__name__}). {TYPED_TIP}"
+    if not seen:
+        return [], "No strike / takedown lines posted for this card yet (PropLine). " + TYPED_TIP
+    lines = []
+    for r in edges[:MAX_SHOWN]:
+        p = r["prop"]
+        stat = {"significant strikes": "sig strikes"}.get(p["stat"], p["stat"])
+        who = "" if p["stat"] == "fight time" else f"{r['row']['fighter']} "
+        if r["odds"] is None:   # pick'em app
+            word = "More" if r["side"] == "over" else "Less"
+            lines.append(f"**{who}{word} {p['line']:g} {stat}** · {r['book']}\n"
+                         f" our {r['chance']:.0%} vs {r['chance'] - r['edge']:.1%} break-even "
+                         f"(model {r['model']:.0%}, projects {r['proj']:.1f})"
+                         + (f" · ⚠️ {', '.join(r['flags'])}" if r["flags"] else ""))
+        else:
+            lines.append(f"**{who}{r['side'].title()} {p['line']:g} {stat}** {r['odds']:+d} {r['book']}\n"
+                         f" our {r['chance']:.0%} vs price {_implied(r['odds']):.0%} (model {r['model']:.0%}, "
+                         f"projects {r['proj']:.1f}) · fair {american(r['chance'])}"
+                         + (f" · ⚠️ {', '.join(r['flags'])}" if r["flags"] else ""))
+    note = "" if lines else f"{seen} strike / takedown lines checked: none 3+ points better than its price."
+    return lines, note

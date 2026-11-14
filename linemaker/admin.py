@@ -148,6 +148,9 @@ def status_lines() -> list:
     import time
     fresh = os.path.exists(busy) and time.time() - os.path.getmtime(busy) < 600
     out.append("• Busy right now (scan or answer running)" if fresh else "• Idle")
+    from .propline import on as propline_on, usage_line as propline_usage
+    if propline_on():
+        out.append(f"• {propline_usage()}")
     from .oddsapi import credits_today, daily_budget, local_today, spend_breakdown
     budget = daily_budget()
     tz = os.environ.get("LINEMAKER_TZ", "America/New_York").split("/")[-1].replace("_", " ")
