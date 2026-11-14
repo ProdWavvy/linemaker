@@ -306,6 +306,8 @@ def props_lines(date: str) -> tuple:
     return lines, priced
 
 
+TYPED_TIP = ("Strike / takedown lines: type the line from FanDuel or DraftKings, e.g. "
+             "`hokit over 45.5 sig strikes -115`.")
 FOOTER = ("Our chance = 30% model + 70% Kalshi (round props 15% model). Worth it at = the price at "
           "FanDuel / DraftKings (or Kalshi) that's +2% EV: take anything better. Fights under way are "
           "left out.")
@@ -325,9 +327,7 @@ def props_reply(date: str) -> str:
                 "fight has started. Ask again closer to fight night.")
     head = f"🥊 **UFC fight props vs Kalshi** · {day} · {len(priced)} fights priced"
     body = "\n".join(lines) if lines else "No prop is 3+ points better than Kalshi's price right now."
-    slines, snote = sgo_lines(day)
-    stats = ("\n\n🥊 **Strike & takedown lines** (SportsGameOdds)\n" + "\n".join(slines)) if slines else ""
-    return head + "\n\n" + body + stats + "\n\n" + FOOTER + (f"\n{snote}" if snote else "")
+    return head + "\n\n" + body + "\n\n" + FOOTER + "\n" + TYPED_TIP
 
 
 # ---- fighter stat props you type in: "hokit over 45.5 sig strikes -130" -------------------
@@ -429,77 +429,3 @@ def stat_prop_reply(date: str, text: str) -> Optional[str]:
             "(opponent's defense, level of competition)" if far else "") if x) + ": go small or skip.")
     lines.append("Untested model (no strike/takedown line history to check it on).")
     return "\n".join(lines)
-
-
-# ---- sportsbook strike / takedown lines (SportsGameOdds, needs a key) ---------------------
-def _book_key(name: str) -> str:
-    return "".join(ch for ch in name.lower() if ch.isalnum())
-
-
-def _imp(odds: int) -> float:
-    return 100 / (odds + 100) if odds > 0 else -odds / (-odds + 100)
-
-
-def sgo_edges(date: str, min_edge: float = MIN_EDGE) -> tuple:
-    """([(prop, side, chance, best odds, book, flags)], props seen) for the card's fighter stat
-    props at your betting books: chance = STAT_WEIGHT x model + the rest the de-vigged consensus."""
-    from . import sgo
-    from .pro import parlay_books
-    from .ufc_model import fighter_props, next_card_date
-    events = sgo.fetch_ufc_events()
-    props = sgo.fighter_props(events)
-    if not props:
-        return [], 0
-    rows = fighter_props(next_card_date(date))
-    names = {_book_key(b): b for b in parlay_books()}
-    out = []
-    for p in props:
-        row = next((r for r in rows if same_fighter(r["fighter"], p["fighter"])), None)
-        if row is None:
-            continue
-        model_over = price_stat_prop(row, p["stat"], p["line"], True)
-        if model_over is None:
-            continue
-        fair = p["fair_over"] if p["fair_over"] is not None else 0.5
-        over = STAT_WEIGHT * model_over + (1 - STAT_WEIGHT) * fair
-        proj = {"significant strikes": row.get("sig_strikes"), "takedowns": row.get("takedowns"),
-                "fight time": row.get("minutes")}[p["stat"]]
-        flags = []
-        if (row.get("stat_fights") or 0) < 5:
-            flags.append("few fights on record")
-        if p["stat"] != "fight time" and p["line"] > 0 and proj and not 0.6 <= proj / p["line"] <= 1.6:
-            flags.append("projection far from the line")
-        for side, chance in (("over", over), ("under", 1 - over)):
-            prices = [(o[side], names[k]) for k, o in p["books"].items() if k in names and side in o]
-            if not prices:
-                continue
-            odds, book = min(prices, key=lambda x: _imp(x[0]))   # the best price pays the most
-            if chance - _imp(odds) >= min_edge:
-                out.append((p, side, chance, odds, book, flags, model_over if side == "over" else 1 - model_over, proj))
-    out.sort(key=lambda x: x[2] - _imp(x[3]), reverse=True)
-    return out, len(props)
-
-
-def sgo_lines(date: str) -> tuple:
-    """(lines, note) for the fighter stat props section; note explains an empty section."""
-    from . import sgo
-    if not sgo.api_key():
-        return [], ("Strike / takedown lines: add a free SportsGameOdds key with "
-                    "`/set SPORTSGAMEODDS_API_KEY` and FanDuel / DraftKings lines get priced here.")
-    try:
-        edges, seen = sgo_edges(date)
-    except sgo.PlanError:
-        return [], ("Strike / takedown lines: your SportsGameOdds plan doesn't include UFC (the free plan "
-                    "doesn't; Rookie does). Typed lines still work: `hokit over 45.5 sig strikes -115`.")
-    except Exception as e:
-        log.warning("sportsgameodds: %s", e)
-        return [], f"Strike / takedown lines unavailable right now ({str(e)[:150]})."
-    if not seen:
-        return [], "SportsGameOdds has no strike / takedown lines for this card yet."
-    lines = []
-    for p, side, chance, odds, book, flags, model, proj in edges[:MAX_SHOWN]:
-        stat = {"significant strikes": "sig strikes"}.get(p["stat"], p["stat"])
-        lines.append(f"**{p['fighter']} {side.title()} {p['line']:g} {stat}** {odds:+d} {book}\n"
-                     f" our {chance:.0%} (model {model:.0%}, projects {proj:.1f}) · fair {american(chance)}"
-                     + (f" · ⚠️ {', '.join(flags)}" if flags else ""))
-    return lines, ("" if lines else f"{seen} strike / takedown lines checked: none 3+ points better than its price.")
