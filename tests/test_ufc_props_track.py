@@ -64,6 +64,9 @@ class LogAndGradeTest(unittest.TestCase):
             self.assertEqual(res["Doesn't go the distance"], ("won", round(1 / 0.6 - 1, 4)))
             self.assertEqual(res["Macy Chiasson by KO/TKO"], ("lost", -1.0))
             self.assertEqual(res["Bia Mesquita over 40.5 sig strikes"], ("lost", None))   # pick'em: no price
+            lines = t.summary_lines("2026-11-14")
+            self.assertTrue(lines[0].startswith("Plays shown: **1-1**"))
+            self.assertIn("Every prop priced: **1-2**", lines[1])
 
     def test_stats_not_posted_yet_wait(self):
         card = [("A One", "1", "B Two", "2", comp("A One", "B Two", "A One", "Unofficial Winner Decision"))]
@@ -79,9 +82,6 @@ class LogAndGradeTest(unittest.TestCase):
             with mock.patch.object(t, "_stale", return_value=True):
                 self.assertEqual(t.grade("2026-11-14"), 1)                 # days later: void
             self.assertEqual(next(iter(t.load("2026-11-14").values()))["result"], "void")
-            lines = t.summary_lines("2026-11-14")
-            self.assertTrue(lines[0].startswith("Plays shown: **1-1**"))
-            self.assertIn("Every prop priced: **1-2**", lines[1])
 
 
 class CardTest(unittest.TestCase):
