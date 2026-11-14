@@ -68,7 +68,11 @@ def sport_cfg(cfg, sport: str, cache: dict):
     return cache[sport]
 
 
-START_WEIGHTS = {"UFC": 0.35, "NCAAB": 0.35}   # rough first-version models start leaning on the market
+# Rough first-version models start leaning on the market. "UFC moneyline" is the market-anchored
+# fight model (ufc_model.anchor_shift: the no-vig price plus fitted corrections), so it can carry
+# most of the weight: on 2023-26 fights it scored 0.5763 log loss at weight 1, 0.5770 at 0.8, the
+# market alone 0.5830. UFC rounds/props models blend best around 0.2-0.35.
+START_WEIGHTS = {"UFC": 0.3, "UFC moneyline": 0.85, "NCAAB": 0.35}
 
 
 def _move_limit() -> Optional[float]:
@@ -81,14 +85,21 @@ def _move_limit() -> Optional[float]:
         return 0.04
 
 
-def _start_weight(sport: str, default: float) -> float:
+def _start_weight(sport: str, default: float, market: str = "") -> float:
     """A sport's weight before the auto-tuner has enough of it: LINEMAKER_<SPORT>_MODEL_WEIGHT
-    if set, else the built-in start (UFC 0.35), else the overall weight."""
+    if set, else the built-in start for this market ("UFC moneyline" 0.85), else for the sport
+    (UFC 0.3), else the overall weight."""
     raw = os.environ.get(f"LINEMAKER_{sport.upper()}_MODEL_WEIGHT", "").strip()
+    start = START_WEIGHTS.get(f"{sport.upper()} {market}", START_WEIGHTS.get(sport.upper(), default))
     try:
-        return float(raw) if raw else START_WEIGHTS.get(sport.upper(), default)
+        return float(raw) if raw else start
     except ValueError:
-        return START_WEIGHTS.get(sport.upper(), default)
+        return start
+
+
+def start_market_weight(sport: str, market: str) -> Optional[float]:
+    """The built-in start weight for this exact market (e.g. "UFC moneyline"), if it has one."""
+    return START_WEIGHTS.get(f"{sport.upper()} {market}")
 
 
 def model_weight_for(sport: str, market: str, cfg, bet_type: str = "prop") -> float:
@@ -100,12 +111,14 @@ def model_weight_for(sport: str, market: str, cfg, bet_type: str = "prop") -> fl
     from .tracking import kind_of
     seg = cfg.segment_weights.get(f"{cfg.phase} {kind_of(bet_type)}") or {}
     w = seg.get("markets", {}).get(f"{sport} {market}")
+    if w is None and cfg.phase == "pre" and start_market_weight(sport, market) is not None:
+        w = _start_weight(sport, 0.5, market)    # a market with its own model (UFC moneyline)
     if w is None:
         w = seg.get("sports", {}).get(sport)
     if w is not None:
         return w
     base = seg.get("weight", cfg.model_weight)
-    return _start_weight(sport, base) if cfg.phase == "pre" else base
+    return _start_weight(sport, base, market) if cfg.phase == "pre" else base
 
 
 def _over_min_gap() -> Optional[float]:
@@ -538,6 +551,8 @@ def run_sim(m: ProMarket, cfg: ProConfig) -> SimResult:
             raise ValueError(f"{m.game}: 1x2 needs mean (subject goals) and mean_b (opponent goals)")
         return simulate_1x2(m.mean, m.mean_b, cfg.n_sims, seed_key=m.key)
     dist = m.dist or pick_dist(m.market, m.bet_type)
+    if dist.startswith("ufcanchor"):   # market-anchored fight model: evaluate() sets the chance
+        dist = "normal"
     sd = m.stdev or default_sd(dist, m.mean, m.market, m.sport, m.bet_type)
     # One simulation per player-stat (or game line); each alt line reads the same draws.
     ladder = f"{m.date}|{m.game_id}|{m.subject}|{m.market}"
@@ -645,6 +660,13 @@ def evaluate(m: ProMarket, cfg: ProConfig, sim: Optional[SimResult] = None) -> O
         return None
     market, mkt_hold, mkt_over, assumed = mp
     model, push = model_probs(m, sim)
+    if (m.dist or "").startswith("ufcanchor|"):   # UFC: the no-vig price plus fitted corrections
+        from .ufc_model import anchored
+        try:
+            a = anchored(market["A"], float(m.dist.split("|", 1)[1]))
+            model = {"A": a, "B": 1 - a}
+        except (ValueError, KeyError):
+            pass
     w = (cfg.force_model_weight if cfg.force_model_weight is not None
          else cfg.model_weight_fresh if m.news_fresh and cfg.phase == "pre"
          else model_weight_for(m.sport, m.market, cfg, m.bet_type))

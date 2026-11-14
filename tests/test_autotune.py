@@ -154,7 +154,8 @@ class WeightLookupTest(unittest.TestCase):
         self.assertEqual(model_weight_for("NBA", "points", cfg), 0.3)
         self.assertEqual(model_weight_for("NBA", "assists", cfg), 0.4)
         self.assertEqual(model_weight_for("NHL", "shots on goal", cfg), 0.5)
-        self.assertEqual(model_weight_for("UFC", "moneyline", cfg), 0.35)
+        self.assertEqual(model_weight_for("UFC", "moneyline", cfg), 0.85)    # market-anchored model
+        self.assertEqual(model_weight_for("UFC", "total rounds", cfg), 0.3)
         with mock.patch.dict(os.environ, {"LINEMAKER_NHL_MODEL_WEIGHT": "0.6"}):
             self.assertEqual(model_weight_for("NHL", "shots on goal", cfg), 0.6)
 
@@ -320,6 +321,20 @@ class PickShrinkTest(unittest.TestCase):
             res = run_pro(rows_to_markets([row]), "2026-10-30", ProConfig(track=False, min_gap=0.0, n_sims=2000))
         self.assertEqual(res.picks, [])
         self.assertTrue(any("no edge once its hit chance is corrected" in w for _l, w in res.passes))
+
+    def test_ufc_fight_picks_start_unshrunk(self):
+        import os
+        from linemaker.autotune import pick_shrink
+        with mock.patch.dict(os.environ, {"LINEMAKER_PICK_SHRINK": ""}), \
+                mock.patch("linemaker.autotune.segment", return_value={"pick_shrink": {"k": 0.3, "sports": {}}}):
+            self.assertEqual(pick_shrink("pre", "moneyline", "UFC"), 1.0)
+            self.assertEqual(pick_shrink("pre", "moneyline", "NBA"), 0.3)
+            self.assertEqual(pick_shrink("pre", "prop", "UFC"), 0.3)
+            self.assertEqual(pick_shrink("pre", "total", "UFC"), 0.3)
+        with mock.patch.dict(os.environ, {"LINEMAKER_PICK_SHRINK": ""}), \
+                mock.patch("linemaker.autotune.segment",
+                           return_value={"pick_shrink": {"k": 0.3, "sports": {"UFC": {"k": 0.7}}}}):
+            self.assertEqual(pick_shrink("pre", "moneyline", "UFC"), 0.7)   # its own fit, once it has one
 
     def test_manual_pause(self):
         import os

@@ -232,7 +232,9 @@ def tune(records: list, current: dict, priors: bool = True) -> tuple:
         if n < MIN_GROUP:
             continue
         sport = name.split(" ", 1)[0]
-        parent = new["sports"].get(sport, _start_weight(sport, g) if priors else g)
+        from .pro import start_market_weight
+        own = start_market_weight(sport, name.split(" ", 1)[1]) if priors else None
+        parent = own if own is not None else new["sports"].get(sport, _start_weight(sport, g) if priors else g)
         (gb, _l, _b), _ = best_weight(_rows(recs))
         target = parent + n / (n + WEIGHT_SHRINK) * (gb - parent)
         old_m = new["markets"].get(name, parent)
@@ -460,6 +462,11 @@ PICK_SHRINK_MIN, PICK_SHRINK_WINDOW, PICK_SHRINK_PRIOR_N = 150, 500, 200
 PICK_SHRINK_SPORT_MIN, PICK_SHRINK_SPORT_WINDOW, PICK_SHRINK_SPORT_FLOOR = 60, 300, 0.10
 # From the 10/25-10/30 grades, until a segment's own fit: the same start everywhere.
 PICK_SHRINK_START = {"pre props": 0.6, "pre games": 0.6, "live props": 0.6, "live games": 0.6}
+# A league whose model was fitted on its own results starts unshrunk (until it has its own fit,
+# PICK_SHRINK_SPORT_MIN graded picks): the UFC fight model is the market price plus corrections
+# fitted on 6,916 fights, so the NBA/NFL game-line shrink doesn't describe it (fight winners only;
+# total rounds keep the segment's shrink).
+PICK_SHRINK_SPORT_START = {"pre UFC": 1.0}
 
 
 def tune_pick_shrink(records: list) -> Optional[dict]:
@@ -519,9 +526,14 @@ def pick_shrink(phase: str, bet_type: str, sport: str = "") -> float:
             pass
     from .tracking import kind_of
     fit = segment(phase, bet_type).get("pick_shrink")
+    own = (fit.get("sports") or {}).get((sport or "").upper()) if fit else None
+    if own:
+        return own["k"]
+    start = PICK_SHRINK_SPORT_START.get(f"{phase} {(sport or '').upper()}")
+    if start is not None and bet_type == "moneyline":   # the fitted fight-winner model only
+        return start
     if fit:
-        own = (fit.get("sports") or {}).get((sport or "").upper())
-        return (own or fit)["k"]
+        return fit["k"]
     return PICK_SHRINK_START.get(f"{phase} {kind_of(bet_type)}", 1.0)
 
 

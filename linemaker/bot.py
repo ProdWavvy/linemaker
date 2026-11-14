@@ -2415,7 +2415,7 @@ async def weekly_cmd(interaction: discord.Interaction):
         await _report_error(interaction, e)
 
 
-@bot.tree.command(name="ufc", description="UFC fighter projections: win chance, significant strikes, takedowns, fight time")
+@bot.tree.command(name="ufc", description="UFC fighter projections: model lean, significant strikes, takedowns, fight time")
 async def ufc_cmd(interaction: discord.Interaction):
     await interaction.response.defer(thinking=True)
     try:
@@ -2432,9 +2432,10 @@ async def ufc_cmd(interaction: discord.Interaction):
                               description="```\n" + "\n".join(lines)[:3900] + "\n```")
         embed.add_field(name="Ends early", inline=False, value="\n".join(
             f"{a} vs {b}: {p:.0%} ({r} rds)" for (a, b), (p, r) in list(early.items())[:15])[:1024])
-        embed.set_footer(text="SigStr = significant strikes landed · TD = takedowns · Mins = expected fight "
-                              "minutes. From ESPN's UFC stats; compare with PrizePicks lines. The bot prices "
-                              "them automatically once a fighter-props odds feed is connected.")
+        embed.set_footer(text="Lean = points the model adds to (or takes from) the fighter's betting-market "
+                              "win chance: takedowns, subs, win streak, reach, age (fitted on 6,900 UFC fights). "
+                              "Win chances themselves start from the odds: ask for UFC picks. SigStr = significant "
+                              "strikes landed · TD = takedowns · Mins = expected fight minutes (ESPN stats).")
         await interaction.followup.send(embed=embed)
     except Exception as e:
         await _report_error(interaction, e)

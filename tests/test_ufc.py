@@ -47,7 +47,9 @@ class UFCModelTest(unittest.TestCase):
         self.assertEqual(rows[1]["dist"], "ufcrounds")
         self.assertEqual(rows[1]["stdev"], "3")
         self.assertTrue(0.2 < float(rows[1]["mean"]) < 0.8)
-        self.assertGreater(float(rows[0]["mean"]), 0)          # the stronger record is the home side here
+        self.assertTrue(rows[0]["dist"].startswith("ufcanchor|"))    # market-anchored winner model
+        self.assertIn("market price", rows[0]["notes"])
+
 
     def test_results_from_espn(self):
         recs = {"k": {"sport": "UFC", "game_id": "g", "subject": "Movsar Evloev", "market": "moneyline",
@@ -58,6 +60,43 @@ class UFCModelTest(unittest.TestCase):
             rows = ufc_model.ufc_results(recs, "2026-10-24")
         self.assertEqual(rows, [{"game_id": "g", "subject": "Movsar Evloev", "market": "moneyline",
                                  "line": "0.0", "actual": "1"}])   # Merab's fight isn't final
+
+class AnchoredTest(unittest.TestCase):
+    def test_streak(self):
+        self.assertEqual(ufc_model.streak([1, 1, 1, -1, 1]), 3)
+        self.assertEqual(ufc_model.streak([-1, -1, 1]), -2)
+        self.assertEqual(ufc_model.streak([0, 1, 1]), 0)
+        self.assertEqual(ufc_model.streak([]), 0)
+
+    def test_even_fighters_keep_the_price_with_the_favourite_slope(self):
+        shift, _ = ufc_model.anchor_shift(fighter(), fighter())
+        self.assertEqual(shift, 0.0)
+        self.assertAlmostEqual(ufc_model.anchored(0.5, 0.0), 0.5)
+        self.assertGreater(ufc_model.anchored(0.80, 0.0), 0.80)      # favourites win a bit more than priced
+        self.assertLess(ufc_model.anchored(0.20, 0.0), 0.20)
+
+    def test_wrestler_and_youth_lean_and_cap(self):
+        wrestler = fighter(td=4.0, sub=1.5, age=27, form=[1] * 5)
+        older = fighter(td=0.3, sub=0.0, age=38, form=[-1] * 3)
+        shift, steps = ufc_model.anchor_shift(wrestler, older)
+        self.assertGreater(shift, 0)
+        self.assertLessEqual(shift, ufc_model.SHIFT_CAP)
+        self.assertAlmostEqual(ufc_model.anchor_shift(older, wrestler)[0], -shift)
+        self.assertTrue(any(k == "td" for k, _v in steps))
+        huge = fighter(td=40.0, sub=30.0, form=[1] * 5, age=20, reach=90)
+        self.assertEqual(ufc_model.anchor_shift(huge, older)[0], ufc_model.SHIFT_CAP)
+
+    def test_engine_uses_the_market_price_not_the_stats_mean(self):
+        from linemaker.pro import ProConfig, evaluate, rows_to_markets
+        row = {"date": "2026-11-14", "sport": "UFC", "game_id": "f", "game": "A @ B", "bet_type": "moneyline",
+               "subject": "B", "opponent": "A", "market": "moneyline", "line": "0", "mean": "2.0", "stdev": "1",
+               "books": "FanDuel:-300/+250|DraftKings:-290/+240"}
+        plain = evaluate(rows_to_markets([row])[0], ProConfig(n_sims=2000, track=False))
+        anch = evaluate(rows_to_markets([dict(row, dist="ufcanchor|0.0")])[0], ProConfig(n_sims=2000, track=False))
+        a = next(s for s in anch.sides if s.side == "A")
+        self.assertAlmostEqual(a.model_prob, ufc_model.anchored(a.market_prob, 0.0), places=6)
+        self.assertGreater(next(s for s in plain.sides if s.side == "A").model_prob, 0.95)   # mean 2.0 = stats-only
+        self.assertLess(a.model_prob, 0.80)
 
 
 class RoundsTest(unittest.TestCase):

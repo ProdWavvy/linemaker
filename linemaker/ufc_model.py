@@ -1,4 +1,26 @@
-"""UFC fight model: win probability for each fighter from ESPN's fighter data (free).
+"""UFC fight model: the betting market's no-vig price, corrected by what the market misses.
+
+Fitted on 6,916 UFC fights with closing odds and pre-fight stats (2010 - Mar 2026, the
+"ultimate UFC dataset"), tested on years it never saw:
+
+                         2020-22    2023-26    2017-26 (fit on 2010-16)
+  market alone           0.6192     0.5830     0.6059     (log loss; lower is better)
+  stats-only model       -          0.6255     -          (blending it in at any weight hurt)
+  market + corrections   0.6148     0.5763     0.6022
+
+So the fight-winner chance is anchored on the price:
+  logit P(A wins) = ANCHOR_SLOPE x logit(no-vig P) + shift
+  shift = 0.065 Δtakedowns/15min + 0.07 Δsub attempts/15min + 0.012 Δcurrent streak
+          + 0.015 Δreach (in) - 0.028 Δ(years past 32), capped at ±0.4
+ANCHOR_SLOPE > 1 is the favourite-longshot bias: favourites priced 70-90% won 78% / 87.5%
+of the time where the no-vig price said 75% / 84%. Wrestlers, fighters on a run and younger
+fighters win a little more than priced. The shift travels on the moneyline row as
+dist "ufcanchor|<shift>" and pro.evaluate applies it to the live no-vig price.
+
+The older stats-only model below (win_prob) still sets the fight-length estimates
+(total rounds, fighter props), where it blends at the UFC weight (0.3).
+
+---- stats-only model (fight length, props) ----
 
 ufc.com blocks automated requests, so the numbers come from ESPN, which carries the same
 UFC stats feed (record, significant strikes, takedowns, submissions, reach, age, every fight
@@ -46,6 +68,11 @@ FORM_WEIGHTS = (1.0, 0.8, 0.6, 0.4, 0.2)
 Z_CAP = 2.2
 COEF = {"record": 2.5, "form": 0.6, "slpm": 0.15, "sacc": 0.01, "td": 0.08, "tdacc": 0.005,
         "sub": 0.10, "finish": 0.4, "reach": 0.03, "age": -0.07, "exp": 0.2}
+# Market-anchored winner model (see the top): fitted coefficients, per unit of difference.
+ANCHOR_SLOPE = 1.04
+ANCHOR = {"td": 0.065, "sub": 0.07, "streak": 0.012, "reach": 0.015, "age": -0.028}
+ANCHOR_CLIP = {"td": 4.0, "sub": 2.5, "streak": 5.0}   # differences beyond these are small samples
+SHIFT_CAP = 0.4
 
 
 def _cache_dir() -> str:
@@ -173,6 +200,47 @@ def features(f: dict) -> dict:
             "exp": math.log(1 + w + l)}
 
 
+def streak(form: list) -> int:
+    """Current run from the newest result: +3 = three straight wins, -2 = two straight losses."""
+    run = 0
+    for r in form or []:
+        if r == 0 or (run and (r > 0) != (run > 0)):
+            break
+        run += 1 if r > 0 else -1
+    return run
+
+
+def anchor_shift(a: dict, b: dict) -> tuple:
+    """(logit shift toward a, [(factor, text)]): what the market tends to underrate."""
+    fa, fb = features(a), features(b)
+    fa["streak"], fb["streak"] = streak(a.get("form")), streak(b.get("form"))
+    z, steps = 0.0, []
+    for k, c in ANCHOR.items():
+        if fa.get(k) is None or fb.get(k) is None:
+            continue
+        d = fa[k] - fb[k]
+        cap = ANCHOR_CLIP.get(k)
+        if cap is not None:
+            d = max(-cap, min(cap, d))
+        part = c * d
+        z += part
+        if abs(part) >= 0.01:
+            steps.append((k, f"{fa[k]:.2f} vs {fb[k]:.2f} → {part:+.2f}"))
+    return max(-SHIFT_CAP, min(SHIFT_CAP, z)), steps
+
+
+def anchored(p_market: float, shift: float) -> float:
+    """The no-vig chance with the favourite-longshot slope and the fighter shift applied."""
+    p = min(max(p_market, 1e-4), 1 - 1e-4)
+    z = ANCHOR_SLOPE * math.log(p / (1 - p)) + shift
+    return 1 / (1 + math.exp(-z))
+
+
+def lean_points(shift: float) -> float:
+    """The shift as points of win chance on an even fight (+0.10 logit ≈ +2.5 pts)."""
+    return 100 * (1 / (1 + math.exp(-shift)) - 0.5)
+
+
 def win_prob(a: dict, b: dict) -> tuple:
     """(P(a wins), [(step, value)]) from two fighter dicts."""
     fa, fb = features(a), features(b)
@@ -237,11 +305,16 @@ def ufc_projections(date: str, games: list) -> list:
         info = dict(zip(ids, pool.map(fighter, ids)))
     rows = []
     for away, home, away_id, home_id, rounds in pairs:
-        p, steps = win_prob(info[home_id], info[away_id])
+        p, _steps = win_prob(info[home_id], info[away_id])
         p = min(max(p, 0.02), 0.98)
+        shift, steps = anchor_shift(info[home_id], info[away_id])
+        lean = lean_points(shift)
         rows.append({"sport": "UFC", "subject": home, "market": "moneyline",
-                     "mean": f"{NormalDist().inv_cdf(p):.4f}", "stdev": "1",
-                     "notes": "UFC model: ESPN fighter stats (" + "; ".join(f"{k} {v}" for k, v in steps)[:300] + ")"})
+                     "mean": f"{NormalDist().inv_cdf(min(max(0.5 + lean / 100, 0.02), 0.98)):.4f}", "stdev": "1",
+                     "dist": f"ufcanchor|{shift:.4f}",
+                     "notes": (f"UFC model: market price + fitted corrections, {lean:+.1f} pts toward {home} "
+                               "on an even fight (" + ("; ".join(f"{k} {v}" for k, v in steps) or "no factor")
+                               + ")")[:400]})
         early = finish_chance(info[home_id], info[away_id], p)
         rows.append({"sport": "UFC", "subject": home, "market": "total rounds", "dist": "ufcrounds",
                      "mean": f"{early:.4f}", "stdev": str(rounds),
@@ -357,6 +430,7 @@ def fighter_props(date: str) -> list:
         for me, opp, name, opp_name, win in ((a, b, fa, fb, p), (b, a, fb, fa, 1 - p)):
             wrestle = 1 - min(0.25, 0.03 * (opp.get("td") or 0))
             out.append({"fighter": name, "opponent": opp_name, "rounds": rounds, "win": win,
+                        "lean": lean_points(anchor_shift(me, opp)[0]),
                         "early": early, "minutes": minutes, "when": comp.get("date", ""),
                         "sig_strikes": (me.get("slpm") or 0) * minutes * wrestle if me.get("slpm") is not None else None,
                         "takedowns": (me.get("td") or 0) / 15 * minutes if me.get("td") is not None else None})
@@ -427,7 +501,7 @@ def fighter_props_cached(date: str) -> bool:
 def props_table(date: str) -> tuple:
     """(title, code-block text) for /ufc: the model's numbers for every fighter on the card."""
     rows = fighter_props(date)
-    lines = [f"{'Fighter':<20} {'Win':>4} {'SigStr':>6} {'TD':>4} {'Mins':>5}"]
+    lines = [f"{'Fighter':<20} {'Lean':>4} {'SigStr':>6} {'TD':>4} {'Mins':>5}"]
     last_pair = None
     for f in rows:
         pair = tuple(sorted((f["fighter"], f["opponent"])))
@@ -437,5 +511,5 @@ def props_table(date: str) -> tuple:
         ss = f"{f['sig_strikes']:.1f}" if f["sig_strikes"] is not None else "—"
         td = f"{f['takedowns']:.1f}" if f["takedowns"] is not None else "—"
         name = f["fighter"] if len(f["fighter"]) <= 20 else f["fighter"][:19] + "…"
-        lines.append(f"{name:<20} {f['win']:>4.0%} {ss:>6} {td:>4} {f['minutes']:>5.1f}")
+        lines.append(f"{name:<20} {f['lean']:>+4.0f} {ss:>6} {td:>4} {f['minutes']:>5.1f}")
     return lines, rows
