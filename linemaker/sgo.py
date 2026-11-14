@@ -32,6 +32,12 @@ BASE = "https://api.sportsgameodds.com/v2/events"
 SGO_CACHE_MINUTES = 15
 _CACHE = {}   # "ufc" -> (time, events)
 SKIPPED = set()   # statIDs seen that the model can't price (logged once each)
+PLAN_RETRY_HOURS = 12
+_PLAN = {}        # "blocked": time the plan said no (UFC not in the subscription)
+
+
+class PlanError(RuntimeError):
+    """The key's plan doesn't cover UFC (remembered for PLAN_RETRY_HOURS: no call until then)."""
 
 
 def api_key() -> str:
@@ -84,6 +90,8 @@ def fetch_ufc_events(days: int = 3, opener=urllib.request.urlopen) -> list:
     hit = _CACHE.get("ufc")
     if hit and time.time() - hit[0] < SGO_CACHE_MINUTES * 60:
         return hit[1]
+    if time.time() - _PLAN.get("blocked", 0) < PLAN_RETRY_HOURS * 3600:
+        raise PlanError("UFC isn't in this SportsGameOdds plan")
     if _usage()["objects"] >= monthly_cap():
         log.warning("sportsgameodds: monthly cap reached (%s)", usage_line())
         return hit[1] if hit else []
@@ -107,6 +115,10 @@ def fetch_ufc_events(days: int = 3, opener=urllib.request.urlopen) -> list:
                 body = e.read().decode()[:200]
             except Exception:
                 pass
+            if "subscription" in body.lower() or "upgrade" in body.lower():
+                _PLAN["blocked"] = time.time()
+                log.warning("sportsgameodds: UFC not in this plan (%s); next try in %sh", body, PLAN_RETRY_HOURS)
+                raise PlanError(body) from None
             raise RuntimeError(f"SportsGameOdds said {e.code}: {body or e.reason}") from None
         page = payload.get("data") or []
         events += page

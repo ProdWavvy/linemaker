@@ -254,11 +254,16 @@ def fight_props(card: list, info: dict, kalshi: dict) -> list:
             pm = (1 - dist_model) * finish_share(n - 1, rounds)
             props.append(_prop(f"Ends before round {n}", pm, q["mid"], q, ROUND_WEIGHT))
         out.append({"fight": f"{a} vs {b}", "a": a, "b": b, "rounds": rounds, "win_a": p_a,
-                    "finish": 1 - dist_model, "props": props, "when": comp.get("date", "")})
+                    "finish": 1 - dist_model, "props": [p for p in props if p], "when": comp.get("date", "")})
     return out
 
 
-def _prop(label: str, model: float, market: float, quote: dict, weight: float = PROP_WEIGHT) -> dict:
+LIVE_EDGE = 0.03   # a Kalshi price under 3% or over 97% is a fight under way or a dead market: skipped
+
+
+def _prop(label: str, model: float, market: float, quote: dict, weight: float = PROP_WEIGHT) -> Optional[dict]:
+    if not LIVE_EDGE <= market <= 1 - LIVE_EDGE:
+        return None
     chance = weight * model + (1 - weight) * market
     yes = chance >= market
     return {"label": label if yes else _negate(label), "chance": chance if yes else 1 - chance,
@@ -287,8 +292,8 @@ def best_props(fights: list, min_edge: float = MIN_EDGE, per_fight: int = 2) -> 
 def props_lines(date: str) -> tuple:
     """(lines for the props embed, fights) for the card on `date`."""
     from concurrent.futures import ThreadPoolExecutor
-    from .ufc_model import card, fighter
-    fights = [f for f in card(date) if not (f[4].get("status", {}).get("type", {}).get("completed"))]
+    from .ufc_model import card, fighter, not_started
+    fights = [f for f in card(date) if not_started(f[4])]   # under way: Kalshi is pricing the live fight
     ids = sorted({i for f in fights for i in (f[1], f[3])})
     with ThreadPoolExecutor(max_workers=8) as pool:
         info = dict(zip(ids, pool.map(fighter, ids)))
@@ -302,8 +307,8 @@ def props_lines(date: str) -> tuple:
 
 
 FOOTER = ("Our chance = 30% model + 70% Kalshi (round props 15% model). Worth it at = the price at "
-          "FanDuel / DraftKings (or Kalshi) that's +2% EV: take anything better. Strike and takedown "
-          "props have no line feed: `/ufc` shows those projections.")
+          "FanDuel / DraftKings (or Kalshi) that's +2% EV: take anything better. Fights under way are "
+          "left out.")
 
 
 def props_reply(date: str) -> str:
@@ -483,6 +488,9 @@ def sgo_lines(date: str) -> tuple:
                     "`/set SPORTSGAMEODDS_API_KEY` and FanDuel / DraftKings lines get priced here.")
     try:
         edges, seen = sgo_edges(date)
+    except sgo.PlanError:
+        return [], ("Strike / takedown lines: your SportsGameOdds plan doesn't include UFC (the free plan "
+                    "doesn't; Rookie does). Typed lines still work: `hokit over 45.5 sig strikes -115`.")
     except Exception as e:
         log.warning("sportsgameodds: %s", e)
         return [], f"Strike / takedown lines unavailable right now ({str(e)[:150]})."

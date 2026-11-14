@@ -430,11 +430,17 @@ def expected_rounds(p_early: float, rounds: int) -> float:
     return p_early * e_early + (1 - p_early) * rounds
 
 
+def not_started(comp: dict) -> bool:
+    """ESPN says the fight hasn't begun (state "pre"); without a state, not yet completed."""
+    t = (comp.get("status") or {}).get("type") or {}
+    return t.get("state") == "pre" if t.get("state") else not t.get("completed")
+
+
 def fighter_props(date: str) -> list:
     """Per fighter on the card: win chance, chance the fight ends early, expected minutes and
-    projected significant strikes / takedowns. Free (ESPN only)."""
-    fights = [f for f in card(date)
-              if not (f[4].get("status", {}).get("type", {}).get("completed"))]
+    projected significant strikes / takedowns. Free (ESPN only). Fights under way are left out:
+    the model is pre-fight only."""
+    fights = [f for f in card(date) if not_started(f[4])]
     ids = sorted({i for f in fights for i in (f[1], f[3])})
     with ThreadPoolExecutor(max_workers=8) as pool:
         info = dict(zip(ids, pool.map(fighter, ids)))

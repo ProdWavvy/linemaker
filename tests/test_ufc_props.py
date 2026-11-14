@@ -215,3 +215,40 @@ class SportsGameOddsTest(unittest.TestCase):
         self.assertTrue(ss)
         self.assertEqual(ss[0][3:5], (-110, "FanDuel"))           # best over price of the two books
         self.assertIn("projection far from the line", ss[0][5])   # projects 90 on 45.5
+
+
+class LiveAndPlanTest(unittest.TestCase):
+    def test_started_fights_and_dead_prices_are_skipped(self):
+        from linemaker.ufc_model import not_started
+        self.assertTrue(not_started({"status": {"type": {"state": "pre"}}}))
+        self.assertFalse(not_started({"status": {"type": {"state": "in"}}}))
+        self.assertFalse(not_started({"status": {"type": {"completed": True}}}))
+        self.assertIsNone(ufc_props._prop("Ends before round 2", 0.3, 0.005, {"ask": 0.01, "bid": 0.0}))
+        self.assertIsNone(ufc_props._prop("Goes the distance", 0.9, 0.99, {"ask": 1.0, "bid": 0.98}))
+        self.assertIsNotNone(ufc_props._prop("Goes the distance", 0.5, 0.4, {"ask": 0.41, "bid": 0.39}))
+
+    def test_plan_without_ufc_is_remembered(self):
+        import io
+        import os
+        import tempfile
+        import urllib.error
+        from linemaker import sgo
+        calls = []
+
+        def opener(req, timeout=0):
+            calls.append(1)
+            raise urllib.error.HTTPError(req.full_url, 400, "Bad Request", {}, io.BytesIO(
+                b'{"success":false,"error":"The leagueID UFC is unavailable at your current subscription tier. Upgrade to unlock"}'))
+        with tempfile.TemporaryDirectory() as d, mock.patch.dict(os.environ, {
+                "SPORTSGAMEODDS_API_KEY": "k", "LINEMAKER_CACHE_DIR": d}):
+            sgo._CACHE.clear()
+            sgo._PLAN.clear()
+            with self.assertRaises(sgo.PlanError):
+                sgo.fetch_ufc_events(opener=opener)
+            with self.assertRaises(sgo.PlanError):
+                sgo.fetch_ufc_events(opener=opener)
+            self.assertEqual(len(calls), 1)                      # the second ask didn't call again
+            with mock.patch.object(sgo, "fetch_ufc_events", side_effect=sgo.PlanError("x")):
+                lines, note = ufc_props.sgo_lines("2026-11-14")
+            self.assertIn("doesn't include UFC", note)
+            sgo._PLAN.clear()
