@@ -419,6 +419,11 @@ def espn_projections(sport: str, date: str, wanted: dict) -> list:
     if sport == "NFL":
         _apply_defense(date, out, teams)
     if sport == "NHL":
+        from .nhl_api import apply_toi
+        try:
+            apply_toi(date, out)   # recent ice time (NHL's own feed), before the opponent factors
+        except Exception as e:
+            log.warning("nhl ice time: %s", e)
         _apply_goalies(date, out)
         _apply_shots(date, out, teams)
     if sport == "MLB":
