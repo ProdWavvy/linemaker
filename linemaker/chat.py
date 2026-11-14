@@ -267,6 +267,7 @@ class Turn:
     text: str
     files: list = field(default_factory=list)   # (filename, markdown), e.g. grading reports
     results: list = field(default_factory=list) # (title, ProResult) shown as pick cards
+    embeds: list = field(default_factory=list)  # ready-made cards (UFC props), sent after the rest
 
 
 class LinemakerChat:
@@ -509,13 +510,24 @@ class LinemakerChat:
         if not attached_csv:
             from .ufc_props import stat_prop_ask
             stat_line = stat_prop_ask(text)
-        if stat_line or (not attached_csv and UFC_PROPS_WORDS.search(text)):   # UFC fighter / fight props
-            from .ufc_props import props_reply, stat_prop_reply
-            reply = await asyncio.to_thread(stat_prop_reply if stat_line else props_reply, _today(),
-                                            *([text] if stat_line else []))
+        if stat_line:   # a typed strike / takedown / fight-time line
+            from .ufc_props import stat_prop_reply
+            reply = await asyncio.to_thread(stat_prop_reply, _today(), text)
             history.append({"role": "user", "content": f"{author}: {text}"})
             history.append({"role": "assistant", "content": reply})
             return Turn(reply, ctx["files"], [])
+        if not attached_csv and UFC_PROPS_WORDS.search(text):   # UFC props: the same cards as any ask
+            from .ufc_props import props_card
+            try:
+                cards, summary = await asyncio.to_thread(props_card, _today())
+                reply = ""
+            except Exception as e:
+                log.warning("ufc props card: %s", e)
+                cards, summary = [], ""
+                reply = f"⚠️ Couldn't load UFC props right now ({type(e).__name__}). Try again in a minute."
+            history.append({"role": "user", "content": f"{author}: {text}"})
+            history.append({"role": "assistant", "content": reply or summary})
+            return Turn(reply, ctx["files"], [], cards)
         other = None if attached_csv else unsupported_league(text)
         if quick and other:
             reply = (f"**{other} isn't covered yet**, so I didn't run anything (no credits used). "
@@ -593,9 +605,9 @@ class LinemakerChat:
             reply = "\n".join(errors[s] for s in quick if s in errors)   # the pick cards carry the answer
             if "UFC" in quick and re.search(SPORT_WORDS["UFC"], text, re.I):   # a UFC ask: fight props too
                 try:
-                    from .ufc_props import props_reply
-                    extra = await asyncio.wait_for(asyncio.to_thread(props_reply, _today()), timeout=90)
-                    reply = (reply + "\n\n" if reply else "") + extra
+                    from .ufc_props import props_card
+                    cards, _summary = await asyncio.wait_for(asyncio.to_thread(props_card, _today()), timeout=90)
+                    ctx.setdefault("embeds", []).extend(cards)
                 except Exception as e:
                     log.warning("ufc props with the ask: %s", e)
             if idle:   # say which leagues were checked but aren't on the card, so none goes missing quietly
@@ -615,7 +627,7 @@ class LinemakerChat:
         history.append({"role": "user", "content": f"{author}: {text}"})
         history.append({"role": "assistant", "content": reply or "\n\n".join(
             ctx.get("summaries", []))})
-        return Turn(reply, ctx["files"], ctx.get("results", []))
+        return Turn(reply, ctx["files"], ctx.get("results", []), ctx.get("embeds", []))
 
     async def read_screenshot(self, images: list, text: str = "") -> str:
         """[(bytes, media type)] of a sportsbook page -> the lines on it, priced (ufc_props)."""

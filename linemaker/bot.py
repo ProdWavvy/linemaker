@@ -2198,6 +2198,10 @@ class LinemakerBot(discord.Client):
             mkey, fkey = card_keys(turn.results)
             await _send_card(send_cards, cards, text=chunks[0] if inline and chunks else "",
                              market_key=mkey, fresh_key=fkey)
+        extra = getattr(turn, "embeds", None) or []
+        for i, group in enumerate(chunk_embeds(extra) if extra else []):   # ready-made cards (UFC props)
+            send = message.reply if (i == 0 and not chunks and not cards) else message.channel.send
+            await send(embeds=group, allowed_mentions=none)
 
 
 async def _thread_send(dest, turn):
@@ -2220,6 +2224,9 @@ async def _thread_send(dest, turn):
         mkey, fkey = card_keys(turn.results)
         await _send_card(send_cards, cards, text=chunks[0] if inline and chunks else "",
                          market_key=mkey, fresh_key=fkey)
+    extra = getattr(turn, "embeds", None) or []
+    for group in (chunk_embeds(extra) if extra else []):   # ready-made cards (UFC props)
+        await dest.send(embeds=group, allowed_mentions=none)
 
 
 def cards_for(results: list) -> list:
@@ -2499,34 +2506,19 @@ async def ufc_cmd(interaction: discord.Interaction):
         embed.add_field(name="Ends early", inline=False, value="\n".join(
             f"{a} vs {b}: {p:.0%} ({r} rds)" for (a, b), (p, r) in list(early.items())[:15])[:1024])
         try:
-            from .ufc_props import FOOTER, props_lines
-            plines, priced = await asyncio.to_thread(props_lines, date)
+            from .ufc_props import props_card
+            cards, _summary = await asyncio.to_thread(props_card, date)
         except Exception as e:
-            log.warning("ufc props: %s", e)
-            plines, priced = [], []
-        embeds = []
-        try:
-            from .ufc_props import STAT_FOOTER, propline_lines
-            slines, snote = await asyncio.to_thread(propline_lines, date)
-        except Exception as e:
-            log.warning("ufc stat lines: %s", e)
-            slines, snote = [], ""
-        if slines:
-            embeds.append(discord.Embed(title="🥊 Strike & Takedown Lines", color=0xE74C3C,
-                                        description="\n".join(slines)[:4000]).set_footer(text=STAT_FOOTER))
-        if priced:
-            embeds.append(discord.Embed(
-                title=f"🎯 Fight Props vs Kalshi · {len(priced)} fights", color=0xE74C3C,
-                description=("\n".join(plines) if plines else "No prop is 3+ points better than Kalshi's "
-                             "price right now.")[:4000]).set_footer(text=FOOTER))
+            log.warning("ufc props card: %s", e)
+            cards = []
         embed.set_footer(text="Lean = points the model adds to (or takes from) the fighter's betting-market "
                               "win chance: takedowns, subs, win streak, reach, age (fitted on 6,900 UFC fights). "
                               "Win chances themselves start from the odds: ask for UFC picks. SigStr = significant "
                               "strikes landed · TD = takedowns · Mins = expected fight minutes (ESPN stats). "
                               "Price a book's line by typing it: hokit over 45.5 sig strikes -115")
+        for group in chunk_embeds(cards):   # the same props cards a typed "ufc props" gets
+            await interaction.followup.send(embeds=group)
         await interaction.followup.send(embed=embed)
-        for extra in embeds:   # its own message: two full embeds can pass Discord's 6,000-character cap
-            await interaction.followup.send(embed=extra)
     except Exception as e:
         await _report_error(interaction, e)
 

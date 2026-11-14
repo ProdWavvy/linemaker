@@ -195,6 +195,16 @@ def parlays_embed(date: str) -> Optional[discord.Embed]:
                          color=PURPLE)
 
 
+def ufc_props_embed(date: str) -> Optional[discord.Embed]:
+    """The UFC props the bot priced that day, graded: plays shown, and every prop priced."""
+    from .ufc_props_track import summary_lines
+    lines = summary_lines(date)
+    if not lines:
+        return None
+    return discord.Embed(title="🥊 UFC Props (1 unit each, at the prices shown)", description="\n".join(lines)[:4000],
+                         color=0xE74C3C)
+
+
 def model_embed(main: dict) -> Optional[discord.Embed]:
     """How the model read every two-way market, picks or not."""
     graded = [r for r in main.values() if r.get("result") and r["result"].get("winner") in ("A", "B")
@@ -531,6 +541,7 @@ def grade_report(date: str, summary: list, before: set, remaining) -> tuple:
     newly = len(graded_keys(records) - before)
     embeds = [overview_embed(date, records, newly)]
     for e in (picks_embed(records["main"]), market_picks_embed(records["main"]), parlays_embed(date),
+              ufc_props_embed(date),
               model_embed(records["main"]), segments_embed(records), side_book_embed(records),
               bets_embed(date, settled_now)):
         if e is not None:

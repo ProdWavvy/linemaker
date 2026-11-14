@@ -133,6 +133,14 @@ def grade_day(date: str, rows: list, auto: bool, refit: bool = True):
     n_parlays = grade_parlays(date)
     if n_parlays:
         summary.append(f"- 🎰 Auto-parlays graded: **{n_parlays}**")
+    try:
+        from .ufc_props_track import grade as grade_ufc_props
+        n_ufc = grade_ufc_props(date)
+        if n_ufc:
+            summary.append(f"- 🥊 UFC props graded: **{n_ufc}**")
+    except Exception as e:
+        import logging
+        logging.getLogger("linemaker.grading").warning("ufc props grading %s: %s", date, e)
     if settled:
         summary.append(f"- 🧾 Settled **{settled}** of your logged bets (`/record` for your P/L)")
     if tracked and not refit:

@@ -251,15 +251,17 @@ def fight_props(card: list, info: dict, kalshi: dict) -> list:
                 continue
             mkt = q["mid"] / mov_total
             props.append(_prop(f"{names[key]} by {dict(KO='KO/TKO', SUB='submission', DEC='decision')[meth]}",
-                               pm, mkt, q))
+                               pm, mkt, q, spec={"kind": "mov", "fighter": names[key], "method": meth}))
         dist_model = model[("a", "DEC")] + model[("b", "DEC")]
         if k.get("distance"):
-            props.append(_prop("Goes the distance", dist_model, k["distance"]["mid"], k["distance"]))
+            props.append(_prop("Goes the distance", dist_model, k["distance"]["mid"], k["distance"],
+                               spec={"kind": "distance"}))
         for n, q in sorted(k["rounds"].items()):
             if n > rounds:
                 continue
             pm = (1 - dist_model) * finish_share(n - 1, rounds)
-            props.append(_prop(f"Ends before round {n}", pm, q["mid"], q, ROUND_WEIGHT))
+            props.append(_prop(f"Ends before round {n}", pm, q["mid"], q, ROUND_WEIGHT,
+                               spec={"kind": "rounds", "before": n}))
         out.append({"fight": f"{a} vs {b}", "a": a, "b": b, "rounds": rounds, "win_a": p_a,
                     "finish": 1 - dist_model, "props": [p for p in props if p], "when": comp.get("date", "")})
     return out
@@ -268,14 +270,15 @@ def fight_props(card: list, info: dict, kalshi: dict) -> list:
 LIVE_EDGE = 0.03   # a Kalshi price under 3% or over 97% is a fight under way or a dead market: skipped
 
 
-def _prop(label: str, model: float, market: float, quote: dict, weight: float = PROP_WEIGHT) -> Optional[dict]:
+def _prop(label: str, model: float, market: float, quote: dict, weight: float = PROP_WEIGHT,
+          spec: Optional[dict] = None) -> Optional[dict]:
     if not LIVE_EDGE <= market <= 1 - LIVE_EDGE:
         return None
     chance = weight * model + (1 - weight) * market
     yes = chance >= market
     return {"label": label if yes else _negate(label), "chance": chance if yes else 1 - chance,
             "market": market if yes else 1 - market, "model": model if yes else 1 - model,
-            "kalshi_price": quote["ask"] if yes else 1 - quote["bid"], "yes": yes}
+            "kalshi_price": quote["ask"] if yes else 1 - quote["bid"], "yes": yes, "spec": spec or {}}
 
 
 def _negate(label: str) -> str:
@@ -712,3 +715,109 @@ def propline_lines(date: str) -> tuple:
                          + (f" · ⚠️ {', '.join(r['flags'])}" if r["flags"] else ""))
     note = "" if lines else f"{seen} strike / takedown lines checked: none 3+ points better than its price."
     return lines, note
+
+
+
+# ---- the card (formatted like every other ask) and the log the grader reads -------------------
+def props_card(date: str) -> tuple:
+    """([discord.Embed], short text) for a UFC props ask: header, fight props vs Kalshi, strike /
+    takedown lines, how they're priced. Every priced prop is logged for grading."""
+    import discord
+    from .scan_format import GOLD, GREY, _day
+    from .ufc_model import next_card_date
+    from . import propline
+    day = next_card_date(date)
+    _lines, priced = props_lines(day)
+    plays = best_props(priced)[:MAX_SHOWN]
+    shown_ids = {id(p) for _f, p in plays}
+    strike_all, seen = [], 0
+    strike_note = ""
+    if propline.on():
+        try:
+            strike_all, seen = propline_edges(day, min_edge=0.0)
+        except Exception as e:
+            log.warning("ufc strike lines: %s", e)
+            strike_note = f"Strike / takedown lines unavailable right now ({type(e).__name__})."
+    strike_plays = [r for r in strike_all if r["edge"] >= MIN_EDGE][:MAX_SHOWN]
+    _log_card(day, priced, shown_ids, strike_all)
+    red = 0xE74C3C
+    n_plays = len(plays) + len(strike_plays)
+    head = [f"**{n_plays} play{'s' if n_plays != 1 else ''}** · {len(priced)} fights priced"
+            + (f" · {seen} strike / takedown lines checked" if seen else ""),
+            "Fight props vs Kalshi · strike & takedown lines from the books PropLine carries"]
+    if not priced:
+        head.append("No fight props to price: Kalshi has no open markets for the next card yet, or every fight "
+                    "has started.")
+    header = discord.Embed(title=f"🥊 UFC Props · {_day(day)}", color=GOLD if n_plays else GREY,
+                           description="\n".join(head))
+    header.set_footer(text="Prices read just now · fights under way are left out")
+    out = [header]
+    if plays:
+        rows = []
+        for i, (f, p) in enumerate(plays, 1):
+            rows.append(f"**{i}.** {p['label']} · **{p['chance']:.0%}**\n"
+                        f"\u2003{f['fight']} · Kalshi {p['market']:.0%} · fair {american(p['chance'])} · "
+                        f"bet at **{worth_at(p['chance'])}** or better (Kalshi {p['kalshi_price'] * 100:.0f}¢)")
+        e = discord.Embed(title="🎯 Fight Props", color=red, description="\n".join(rows)[:4096])
+        e.set_footer(text="Bold % = our chance · bet at = the FanDuel / DraftKings price that's +2% EV (Kalshi's "
+                          "own price in brackets)")
+        out.append(e)
+    elif priced:
+        out.append(discord.Embed(title="🎯 Fight Props", color=GREY,
+                                 description="No fight prop is 3+ points better than Kalshi's price right now."))
+    if strike_plays:
+        rows = []
+        for i, r in enumerate(strike_plays, len(plays) + 1):
+            p = r["prop"]
+            stat = {"significant strikes": "sig strikes"}.get(p["stat"], p["stat"])
+            who = " vs ".join(p["fight"]) if p["stat"] == "fight time" else r["row"]["fighter"]
+            if r["odds"] is None:
+                word = "More" if r["side"] == "over" else "Less"
+                price = f"{r['book']} · break-even {r['chance'] - r['edge']:.0%}"
+            else:
+                word = r["side"].title()
+                price = f"{r['book']} {r['odds']:+d} · fair {american(r['chance'])}"
+            rows.append(f"**{i}.** {who} {word} {p['line']:g} {stat} · **{r['chance']:.0%}**\n"
+                        f"\u2003{price} · projects {r['proj']:.1f}"
+                        + (f" · ⚠️ {', '.join(r['flags'])}" if r["flags"] else ""))
+        e = discord.Embed(title="🥊 Strike & Takedown Lines", color=red, description="\n".join(rows)[:4096])
+        e.set_footer(text=STAT_FOOTER)
+        out.append(e)
+    else:
+        note = strike_note or (f"{seen} strike / takedown lines checked: none 3+ points better than its price."
+                               if seen else TYPED_TIP if not propline.on() else
+                               "No strike / takedown lines posted for this card yet.")
+        out.append(discord.Embed(title="🥊 Strike & Takedown Lines", color=GREY, description=note))
+    how = discord.Embed(title="📖 How These Are Priced", color=GREY, description=(
+        "Fight props: our chance = 30% model + 70% Kalshi (round props 15% model). The model: the market-anchored "
+        "win chance x each fighter's finish rate and KO share, tested on 5,461 UFC fights with method odds.\n"
+        "Strike / takedown lines: 30% model + 70% the books' consensus (a pick'em line is the 50/50 point); "
+        "untested model, heed the ⚠️ flags.\nEvery prop shown is logged and graded in the morning report. "
+        "Typed lines and screenshots work too: `hokit over 45.5 sig strikes -115`."))
+    out.append(how)
+    text = (f"UFC props {day}: {n_plays} plays ("
+            + "; ".join(f"{p['label']} {p['chance']:.0%}" for _f, p in plays[:5]) + ")")
+    return out, text
+
+
+def _log_card(day: str, priced: list, shown_ids: set, strike_all: list) -> None:
+    from .ufc_props_track import log_props
+    entries = []
+    for f in priced:
+        for p in f["props"]:
+            entries.append({"fight": f["fight"], "label": p["label"], "kind": p["spec"].get("kind", ""),
+                            "spec": p["spec"], "yes": p["yes"], "chance": round(p["chance"], 4),
+                            "market": round(p["market"], 4), "model": round(p["model"], 4),
+                            "price": round(p["kalshi_price"], 4), "book": "Kalshi", "shown": id(p) in shown_ids})
+    for r in strike_all:
+        p = r["prop"]
+        entries.append({"fight": " vs ".join(p["fight"]),
+                        "label": f"{r['row']['fighter']} {r['side']} {p['line']:g} {p['stat']}",
+                        "kind": "stat", "spec": {"kind": "stat", "stat": p["stat"], "line": p["line"],
+                                                 "fighter": r["row"]["fighter"]},
+                        "yes": r["side"] == "over", "chance": round(r["chance"], 4), "model": round(r["model"], 4),
+                        "odds": r["odds"], "book": r["book"], "shown": r["edge"] >= MIN_EDGE})
+    try:
+        log_props(day, entries)
+    except Exception as e:
+        log.warning("ufc props log: %s", e)
