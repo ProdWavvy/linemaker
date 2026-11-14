@@ -417,6 +417,11 @@ def espn_projections(sport: str, date: str, wanted: dict) -> list:
     if sport in BASKETBALL or sport == "NFL":
         _apply_usage(sport, date, out, index, hurt)
     if sport == "NFL":
+        from .nfl_usage import apply_usage
+        try:
+            apply_usage(date, out)   # recent carries (nflverse), before the defense factors
+        except Exception as e:
+            log.warning("nfl workload: %s", e)
         _apply_defense(date, out, teams)
     if sport == "NHL":
         from .nhl_api import apply_toi
