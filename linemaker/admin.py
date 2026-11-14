@@ -151,6 +151,9 @@ def status_lines() -> list:
     from .propline import on as propline_on, usage_line as propline_usage
     if propline_on():
         out.append(f"• {propline_usage()}")
+        from .feed_merge import status_line as merge_line
+        if merge_line():
+            out.append(f"• {merge_line()}")
     from .oddsapi import credits_today, daily_budget, local_today, spend_breakdown
     budget = daily_budget()
     tz = os.environ.get("LINEMAKER_TZ", "America/New_York").split("/")[-1].replace("_", " ")

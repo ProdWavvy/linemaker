@@ -2458,6 +2458,11 @@ async def propline_cmd(interaction: discord.Interaction, sport: Optional[str] = 
             out += [f"• {b}: {s}/{m} identical" for b, (m, s) in cmp_["by_book"].items()]
             for (book, player, side, point), a, b in cmp_["worst"]:
                 out.append(f"• biggest gap: {book} {player.title()} {side} {point}: Odds API {a:+d} vs PropLine {b:+d}")
+        from .feed_merge import LAST, mode as merge_mode
+        out.append(f"Merge mode: `{merge_mode()}` (LINEMAKER_PROPLINE_MERGE)")
+        for name, st in sorted(LAST.items()):
+            out.append(f"• last {name} scan ({st['at']}): +{st['books_added']} books, {st['refreshed']} fresher "
+                       f"prices, {st['same']}/{st['overlap']} shared identical" + (f" · {st['why']}" if st["why"] else ""))
         out.append(f"Odds API credits left: {left}")
         await interaction.followup.send("\n".join(out)[:1990], ephemeral=True)
     except Exception as e:

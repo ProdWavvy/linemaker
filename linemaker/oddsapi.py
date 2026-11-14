@@ -791,6 +791,11 @@ def fetch_slate(api: OddsAPI, sport: str, date: str, tz: ZoneInfo, props: bool =
     if hasattr(api, "slate"):
         api.slate[sport.upper()] = [(_game(e), e["commence_time"]) for e in events]
     out = parse_game_odds(events, sport, tz) if game_lines else []
+    from .feed_merge import mode as merge_mode
+    how = merge_mode()
+    if game_lines and how != "off" and out:   # PropLine alongside: more books, fresher prices
+        from .feed_merge import merge, propline_games
+        merge(out, propline_games(sport, events, game_markets, tz), how, f"{sport} games")
     if props:
         keys = ",".join(prop_markets or PROP_KEYS.get() or default_prop_markets(sport))
         from concurrent.futures import ThreadPoolExecutor
@@ -804,14 +809,30 @@ def fetch_slate(api: OddsAPI, sport: str, date: str, tz: ZoneInfo, props: bool =
             log.info("%s: props for the next %d of %d games (LINEMAKER_MAX_PROP_GAMES_%s)",
                      sport, cap, len(chosen), sport.upper())
             chosen = sorted(chosen, key=lambda e: e["commence_time"])[:cap]
+        def one(e):
+            try:
+                return fetch_event_props(api, sport, e["id"], keys)
+            except OddsAPIError as ex:
+                if how == "off":
+                    raise
+                log.warning("%s props for %s from PropLine instead (%s)", sport, e["id"], str(ex)[:120])
+                return None   # read from PropLine below
         with ThreadPoolExecutor(max_workers=4) as pool:   # a few at a time; 429s are retried
             # each worker runs in a copy of this thread's context, so the credits it spends
             # are counted toward the job that asked (pre-tip, chat ...)
             ctxs = [contextvars.copy_context() for _ in chosen]
-            payloads = list(pool.map(lambda pair: pair[1].run(fetch_event_props, api, sport, pair[0]["id"], keys),
-                                     zip(chosen, ctxs)))
+            payloads = list(pool.map(lambda pair: pair[1].run(one, pair[0]), zip(chosen, ctxs)))
+        props_out = []
         for payload in payloads:
-            out += parse_event_props(payload, sport, tz)
+            if payload is not None:
+                props_out += parse_event_props(payload, sport, tz)
+        if how != "off":
+            from .feed_merge import merge, propline_props
+            extra = propline_props(sport, chosen, keys, tz)
+            refused = {e["id"] for e, p in zip(chosen, payloads) if p is None}
+            props_out += [fm for fm in extra if fm.game_id in refused]   # Odds API refused: PropLine alone
+            merge(props_out, [fm for fm in extra if fm.game_id not in refused], how, f"{sport} props")
+        out += props_out
     return out
 
 
