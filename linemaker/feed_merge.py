@@ -25,8 +25,10 @@ from typing import Optional
 
 log = logging.getLogger("linemaker.feed_merge")
 PUSH_BOOKS = {"draftkings", "fanduel", "fanatics", "kalshi", "polymarket"}
-DEFAULT_BOOKS = ("draftkings,fanduel,fanatics,betmgm,betrivers,williamhill_us,hardrockbet,pinnacle,"
-                 "betonlineag,lowvig,bovada,kalshi,polymarket,novig,prophetx")
+# The push books (fresher prices) plus the sharp ones The Odds API list lacks. Kept short: a full
+# NBA slate with every book runs ~4 MB per game (18.5 MB for 5 games in one league call), so
+# props are read one game at a time.
+DEFAULT_BOOKS = "draftkings,fanduel,fanatics,kalshi,polymarket,pinnacle,betonlineag"
 MIN_OVERLAP, MIN_SAME, MAX_GAP = 20, 0.5, 0.02
 LAST = {}   # sport -> stats of the latest merge (for /propline and /status)
 

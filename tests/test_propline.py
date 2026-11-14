@@ -113,7 +113,7 @@ class UfcLinesTest(unittest.TestCase):
         self.assertEqual((ss["side"], ss["book"], ss["odds"]), ("over", "FanDuel", -115))
         td = next(e for e in edges if e["prop"]["stat"] == "takedowns")
         self.assertIsNone(td["odds"])                                # priced against the pick'em break-even
-        self.assertTrue(any("Over 9.5 fight time** -120 FanDuel" in l for l in lines))   # 3+ pt edge shown
+        self.assertTrue(any("Over 9.5 fight time (Alatengheili vs Juan Diaz)** -120 FanDuel" in l for l in lines))
         self.assertFalse(any("sig strikes" in l for l in lines))                         # 1 pt edge isn't
 
 

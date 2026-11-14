@@ -592,15 +592,22 @@ def propline_props(events: list, odds_for) -> list:
                     side = (o.get("name") or "").lower()
                     if side not in ("over", "under") or o.get("point") is None or o.get("price") is None:
                         continue
+                    if (o.get("dfs_odds_type") or "standard") not in ("standard", ""):
+                        continue   # PrizePicks goblin / demon lines pay differently from the break-even
                     who = o.get("description") or home   # fight time is fight-level
-                    g = groups.setdefault((who, stat, float(o["point"])), {"books": {}, "dfs": {}})
+                    g = groups.setdefault((who, stat, float(o["point"])), {"books": {}, "dfs": {}, "mult": {}})
                     g["dfs" if dfs else "books"].setdefault(title, {})[side] = int(o["price"])
+                    if o.get("payout_multiplier") is not None:
+                        g["mult"].setdefault(title, {})[side] = float(o["payout_multiplier"])
         for (who, stat, line), g in groups.items():
             pairs = [(_implied(q["over"]), _implied(q["under"])) for q in g["books"].values()
                      if "over" in q and "under" in q]
+            if not pairs:   # no sportsbook: a pick'em app's own two-way price (Underdog, Sleeper) still leans
+                pairs = [(_implied(q["over"]), _implied(q["under"])) for q in g["dfs"].values()
+                         if "over" in q and "under" in q and not (q["over"] == q["under"] == 100)]
             fair = sum(o / (o + u) for o, u in pairs) / len(pairs) if pairs else None
             out.append({"fighter": who, "fight": (home, away), "stat": stat, "line": line,
-                        "books": g["books"], "dfs": g["dfs"], "fair_over": fair})
+                        "books": g["books"], "dfs": g["dfs"], "mult": g["mult"], "fair_over": fair})
     return out
 
 
@@ -609,7 +616,7 @@ def propline_edges(date: str, min_edge: float = MIN_EDGE) -> tuple:
     Sportsbooks: our chance vs your books' best price. Pick'em apps (PrizePicks, Underdog): our
     chance vs the app's per-leg break-even."""
     from . import propline
-    from .pp import break_even
+    from .pp import break_even, use_app
     from .pro import parlay_books
     from .ufc_model import fighter_props, next_card_date, not_started
     day = next_card_date(date)
@@ -619,7 +626,10 @@ def propline_edges(date: str, min_edge: float = MIN_EDGE) -> tuple:
         return [], 0
     rows = fighter_props(day)
     mine = {_bkey(b): b for b in parlay_books()}
-    be = break_even()
+    apps = {}   # the pick'em apps the bot plays: their own per-leg break-even
+    for app in ("prizepicks", "underdog"):
+        with use_app(app):
+            apps[app] = break_even()
     out = []
     for p in props:
         row = next((r for r in rows if same_fighter(r["fighter"], p["fighter"])), None)
@@ -648,10 +658,15 @@ def propline_edges(date: str, min_edge: float = MIN_EDGE) -> tuple:
                     out.append({"prop": p, "side": side, "chance": chance, "model": model, "odds": odds,
                                 "book": book, "edge": edge, "flags": flags, "proj": proj, "row": row})
             for title, q in p["dfs"].items():
-                if side in q and chance - be >= min_edge:
+                app = "underdog" if _bkey(title).startswith("underdog") else _bkey(title)
+                if app not in apps or side not in q:
+                    continue   # Sleeper, Dabble ...: their prices inform the market, not a pick here
+                if (p.get("mult", {}).get(title, {}).get(side) or 1.0) != 1.0:
+                    continue   # an Underdog leg with a payout tweak has its own break-even
+                be = apps[app]
+                if chance - be >= min_edge:
                     out.append({"prop": p, "side": side, "chance": chance, "model": model, "odds": None,
                                 "book": title, "edge": chance - be, "flags": flags, "proj": proj, "row": row})
-                    break
     out.sort(key=lambda x: x["edge"], reverse=True)
     seen, best = set(), []
     for r in out:   # the best way to play each fighter-stat (one line, one book)
@@ -682,6 +697,8 @@ def propline_lines(date: str) -> tuple:
         p = r["prop"]
         stat = {"significant strikes": "sig strikes"}.get(p["stat"], p["stat"])
         who = "" if p["stat"] == "fight time" else f"{r['row']['fighter']} "
+        if p["stat"] == "fight time":
+            stat += f" ({' vs '.join(p['fight'])})"
         if r["odds"] is None:   # pick'em app
             word = "More" if r["side"] == "over" else "Less"
             lines.append(f"**{who}{word} {p['line']:g} {stat}** · {r['book']}\n"
