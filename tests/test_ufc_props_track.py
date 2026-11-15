@@ -147,3 +147,98 @@ class OffersTest(unittest.TestCase):
         self.assertIsNone(ufc_props.offer_key({"spec": {"kind": "mov", "method": "KO", "fighter": "X"}, "yes": False}))
         self.assertIn("projections=16923664-u-57.5",
                       ufc_props.pickem_link("PrizePicks", "16923664", "under", 57.5))
+
+
+class TotalStrikesTest(unittest.TestCase):
+    def test_ratio_typed_line_and_grading_label(self):
+        from linemaker import ufc_model, ufc_props
+        cats = [{"displayName": "striking", "labels": ["TSL", "TSA", "SSL", "SSA"],
+                 "statistics": [{"stats": ["60", "100", "40", "80"]}, {"stats": ["30", "50", "20", "40"]},
+                                {"stats": ["-", "-", "-", "-"]}]}]
+        self.assertEqual(ufc_model.total_ratio(cats), {"ts_ratio": 1.5, "ts_fights": 2})
+        self.assertEqual(ufc_props.stat_prop_ask("hokit over 60.5 total strikes -120"),
+                         {"over": True, "line": 60.5, "stat": "total strikes", "odds": -120})
+        row = {"fighter": "A", "rounds": 3, "early": 0.4, "minutes": 11.0, "sig_strikes": 40.0, "total_strikes": 60.0}
+        over = ufc_props.price_stat_prop(row, "total strikes", 50.5, True)
+        self.assertGreater(over, ufc_props.price_stat_prop(row, "significant strikes", 50.5, True))
+        self.assertEqual(ufc_model.STAT_LABEL["total strikes"], ("striking", "TSL"))
+
+
+class StrikeLinksTest(unittest.TestCase):
+    def _play(self, books, dfs=None, ids=None, links=None, keys=None, side="over", chance=0.6):
+        prop = {"fighter": "Josh Hokit", "fight": ("Josh Hokit", "Ciryl Gane"), "stat": "significant strikes",
+                "line": 45.5, "books": books, "dfs": dfs or {}, "mult": {}, "ids": ids or {},
+                "links": links or {}, "keys": keys or {}}
+        return {"prop": prop, "side": side, "chance": chance, "apps": {"prizepicks": 0.5425, "underdog": 0.5425}}
+
+    def test_feed_slips_pickem_and_fight_pages(self):
+        from linemaker import ufc_props
+        r = self._play({"FanDuel": {"over": -115, "under": -115}}, dfs={"PrizePicks": {"over": 100}},
+                       ids={"FanDuel": {"over": "734.1:9"}, "PrizePicks": {"over": "555"}}, keys={"FanDuel": "fanduel"})
+        quotes, pages = ufc_props.strike_quotes(r, {})
+        self.assertEqual([(t, o, g) for t, o, _u, g in quotes], [("FD", -115, True), ("PP", None, True)])
+        self.assertIn("selectionId[0]=9", quotes[0][2])
+        self.assertIn("projections=555-o-45.5", quotes[1][2])
+        self.assertEqual(pages, [])
+        # not in the feed at FanDuel / DraftKings: FanDuel's builder leg, else the fight's pages
+        bare = self._play({}, dfs={"PrizePicks": {"over": 100}}, ids={"PrizePicks": {"over": "555"}})
+        offers = {("Josh Hokit vs Ciryl Gane", ("page",)): {"DraftKings": (None, "https://dk/event/34")}}
+        quotes, pages = ufc_props.strike_quotes(bare, offers)
+        self.assertEqual([t for t, *_ in quotes], ["PP"])
+        self.assertEqual(pages, [("DK", "https://dk/event/34")])
+        offers[("Josh Hokit vs Ciryl Gane", ("stat", "josh hokit", "significant strikes", 45.5, "over"))] = {
+            "FanDuel": (-120, "https://fd/slip")}
+        quotes, pages = ufc_props.strike_quotes(bare, offers)
+        self.assertEqual(quotes[0][:3], ("FD", -120, "https://fd/slip"))
+        self.assertEqual(pages, [])
+
+    def test_fanduel_builder_strike_legs_and_polymarket(self):
+        from linemaker import propline, ufc_props
+        odds = {"bookmakers": [
+            {"key": "draftkings", "title": "DraftKings", "link": "https://sportsbook.draftkings.com/event/34", "markets": [
+                {"key": "fight_distance", "outcomes": [{"name": "No", "price": -295, "book_outcome_id": "0QA#2"}]}]},
+            {"key": "polymarket_us", "title": "Polymarket US", "link": "https://polymarket.com/event/ufc-gane", "markets": [
+                {"key": "fight_distance", "outcomes": [{"name": "No", "price": -280}]}]}]}
+        legs = {"bookmakers": [{"bookmaker": "fanduel", "legs": [
+            {"market": "player_significant_strikes", "name": "Over", "description": "Josh Hokit", "point": 45.5,
+             "price": -120, "book_outcome_id": "734.2:11"},
+            {"market": "player_total_strikes", "name": "Under", "description": "Ciryl Gane", "point": 70.5,
+             "price": -105, "book_outcome_id": "734.3:12"}]}]}
+        with mock.patch.dict(os.environ, {"PROPLINE_API_KEY": "k"}), \
+                mock.patch.object(propline, "events", return_value=[{"id": "1", "home_team": "Josh Hokit",
+                                                                     "away_team": "Ciryl Gane"}]), \
+                mock.patch.object(propline, "event_odds", return_value=odds), \
+                mock.patch.object(propline, "_call", return_value=legs):
+            propline._CACHE.clear()
+            offers = ufc_props.fight_book_offers(["Josh Hokit vs Ciryl Gane"])
+        f = "Josh Hokit vs Ciryl Gane"
+        self.assertEqual(offers[(f, ("distance", "no"))]["Polymarket"],
+                         (-280, "https://polymarket.com/event/ufc-gane"))
+        self.assertEqual(offers[(f, ("page",))], {"DraftKings": (None, "https://sportsbook.draftkings.com/event/34")})
+        self.assertEqual(offers[(f, ("stat", "josh hokit", "significant strikes", 45.5, "over"))]["FanDuel"][0], -120)
+        self.assertIn((f, ("stat", "ciryl gane", "total strikes", 70.5, "under")), offers)
+
+    def test_fair_buttons_share_the_25(self):
+        from linemaker import ufc_props
+        groups = [[(f"#{i} FD", "u"), (f"#{i} DK", "u"), (f"#{i} PM", "u")] for i in range(1, 11)] + [[("#11 PP", "u")]]
+        out = ufc_props.fair_buttons(groups)
+        self.assertEqual(len(out), 25)
+        self.assertIn(("#11 PP", "u"), out)                       # the strike play still gets its button
+        self.assertEqual(out[:3], [("#1 FD", "u"), ("#1 DK", "u"), ("#1 PM", "u")])   # play order kept
+
+    def test_card_strike_row_lists_books_and_buttons(self):
+        from linemaker import ufc_props
+        r = self._play({"FanDuel": {"over": -115, "under": -115}}, dfs={"PrizePicks": {"over": 100}},
+                       ids={"FanDuel": {"over": "734.1:9"}, "PrizePicks": {"over": "555"}}, keys={"FanDuel": "fanduel"})
+        r.update(model=0.7, odds=-115, book="FanDuel", edge=0.065, flags=[], proj=52.0, row={"fighter": "Josh Hokit"})
+        with tempfile.TemporaryDirectory() as d, \
+                mock.patch.dict(os.environ, {"LINEMAKER_TRACKING_DIR": d, "PROPLINE_API_KEY": "k"}), \
+                mock.patch("linemaker.ufc_model.next_card_date", return_value="2026-11-14"), \
+                mock.patch.object(ufc_props, "props_lines", return_value=([], [])), \
+                mock.patch.object(ufc_props, "propline_edges", return_value=([r], 1)), \
+                mock.patch.object(ufc_props, "fight_book_offers", return_value={}) as fbo:
+            embeds, _text, buttons = ufc_props.props_card("2026-11-14")
+        fbo.assert_called_once_with(["Josh Hokit vs Ciryl Gane"])
+        strike = next(e for e in embeds if e.title.startswith("🥊 Strike"))
+        self.assertIn("FD -115 ✅ · PP ✅", strike.description)
+        self.assertEqual([b[0] for b in buttons], ["#1 FD -115", "#1 PP"])

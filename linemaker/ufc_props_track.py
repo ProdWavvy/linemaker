@@ -7,7 +7,7 @@ first sighting kept (a later sighting as a play updates it, the price you'd have
 
 Graded from ESPN after the fight: the winner and method ("Unofficial Winner Decision" /
 "Submission" / KO-TKO in the fight's details), the round and clock of the finish, and each
-fighter's significant strikes and takedowns. Draws and no contests void method props.
+fighter's significant strikes, total strikes and takedowns. Draws and no contests void method props.
 """
 import datetime as dt
 import hashlib
@@ -106,7 +106,7 @@ def yes_happened(spec: dict, out: dict, stat_value=None) -> Optional[bool]:
 
 
 def _stat_value(spec: dict, comp: dict, out: dict, ids: dict):
-    from .ufc_model import WEB, _get, _stat
+    from .ufc_model import STAT_LABEL, WEB, _get, _stat
     from .oddsapi import norm
     if spec["stat"] == "fight time":
         return out["minutes"]
@@ -117,8 +117,8 @@ def _stat_value(spec: dict, comp: dict, out: dict, ids: dict):
         stats = _get(f"{WEB}/athletes/{aid}/stats", max_age=3600)
     except Exception:
         return None
-    return (_stat(stats, comp.get("uid", ""), "striking", "SSL") if spec["stat"] == "significant strikes"
-            else _stat(stats, comp.get("uid", ""), "clinch", "TDL"))
+    where = STAT_LABEL.get(spec["stat"])
+    return _stat(stats, comp.get("uid", ""), *where) if where else None
 
 
 def grade(date: str) -> int:

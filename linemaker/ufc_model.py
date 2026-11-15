@@ -163,12 +163,37 @@ def fighter(aid: str) -> dict:
         cats = _get(f"{WEB}/athletes/{aid}/stats").get("categories", [])
         f["stat_fights"] = max((len(c.get("statistics", [])) for c in cats
                                 if c.get("displayName", "").lower() == "striking"), default=0)
+        f.update(total_ratio(cats))
     except Exception as e:
         log.warning("ufc stats rows %s: %s", aid, e)
     return f
 
 
 STAT_PRIOR_FIGHTS = 5   # a rate from n fights counts n / (n + 5) against the card's average
+TOTAL_RATIO = 1.4       # total strikes landed per significant strike, a typical UFC fighter
+
+
+def total_ratio(cats: list) -> dict:
+    """{"ts_ratio", "ts_fights"}: total strikes landed over significant strikes landed across his
+    fights on ESPN (total strikes add the light shots, mostly in the clinch and on the ground:
+    1.1 for a pure kickboxer, 2+ for a grinder)."""
+    for c in cats:
+        if c.get("displayName", "").lower() != "striking":
+            continue
+        labels = [l.strip() for l in c.get("labels", [])]
+        if "TSL" not in labels or "SSL" not in labels:
+            return {}
+        i, j = labels.index("TSL"), labels.index("SSL")
+        total = sig = n = 0
+        for row in c.get("statistics", []):
+            try:
+                t, s = float(row["stats"][i]), float(row["stats"][j])
+            except (KeyError, IndexError, TypeError, ValueError):
+                continue
+            if s > 0 and t >= s:
+                total, sig, n = total + t, sig + s, n + 1
+        return {"ts_ratio": total / sig, "ts_fights": n} if sig else {}
+    return {}
 
 
 def shrunk_rate(value: Optional[float], fights: Optional[int], mean: Optional[float]) -> Optional[float]:
@@ -420,7 +445,9 @@ def next_card_note(date: str) -> str:
 # when the opponent is a heavy wrestler (time on the mat is time not striking at range).
 # For pricing, the sim draws the fight length first, then the count around rate x length, so
 # a quick finish drags every over down together (that's the real risk in these props).
-UFC_PROP_MARKETS = ("significant strikes", "takedowns", "fight time")
+UFC_PROP_MARKETS = ("significant strikes", "total strikes", "takedowns", "fight time")
+STAT_LABEL = {"significant strikes": ("striking", "SSL"), "total strikes": ("striking", "TSL"),
+              "takedowns": ("clinch", "TDL")}   # ESPN's per-fight stats
 
 
 def expected_rounds(p_early: float, rounds: int) -> float:
@@ -448,6 +475,7 @@ def fighter_props(date: str) -> list:
         vals = [f[key] for f in info.values() if f.get(key) is not None]
         return sum(vals) / len(vals) if vals else None
     mu_slpm, mu_td = _mean("slpm"), _mean("td")
+    mu_ratio = _mean("ts_ratio") or TOTAL_RATIO
     out = []
     for fa, ida, fb, idb, comp in fights:
         a, b = info[ida], info[idb]
@@ -460,11 +488,14 @@ def fighter_props(date: str) -> list:
             wrestle = 1 - min(0.25, 0.03 * (opp.get("td") or 0))
             slpm = shrunk_rate(me.get("slpm"), me.get("stat_fights"), mu_slpm)
             td = shrunk_rate(me.get("td"), me.get("stat_fights"), mu_td)
+            ratio = max(1.0, shrunk_rate(me.get("ts_ratio") or mu_ratio, me.get("ts_fights") or 0, mu_ratio))
+            sig = slpm * minutes * wrestle if slpm is not None else None
             out.append({"fighter": name, "opponent": opp_name, "rounds": rounds, "win": win,
                         "lean": lean_points(anchor_shift(me, opp)[0]),
                         "early": early, "minutes": minutes, "when": comp.get("date", ""),
                         "stat_fights": me.get("stat_fights"),
-                        "sig_strikes": slpm * minutes * wrestle if slpm is not None else None,
+                        "sig_strikes": sig,
+                        "total_strikes": sig * ratio if sig is not None else None,
                         "takedowns": td / 15 * minutes if td is not None else None})
     return out
 
@@ -508,8 +539,7 @@ def fighter_prop_results(records: dict, date: str) -> list:
             actual = None if length is None else 5 * length
         else:
             stats = _get(f"{WEB}/athletes/{aid}/stats", max_age=3600)
-            actual = (_stat(stats, comp.get("uid", ""), "striking", "SSL") if r["market"] == "significant strikes"
-                      else _stat(stats, comp.get("uid", ""), "clinch", "TDL"))
+            actual = _stat(stats, comp.get("uid", ""), *STAT_LABEL[r["market"]])
         if actual is not None:
             rows.append({"game_id": r["game_id"], "subject": r["subject"], "market": r["market"],
                          "line": str(r["inputs"]["line"]), "actual": f"{actual:g}"})
