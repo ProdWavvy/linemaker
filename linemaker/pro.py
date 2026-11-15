@@ -6,6 +6,7 @@ A = subject win, D = draw, B = opponent win.
 """
 import csv
 import functools
+import math
 import json
 import os
 from dataclasses import dataclass, field, replace
@@ -62,12 +63,15 @@ VOLUME_SETTINGS = {"ODDS_MIN": ("min_odds", int), "ODDS_MAX": ("max_odds", int),
                    "MIN_GAP": ("min_gap", float), "MAX_FAVORITE": ("max_favorite", int)}
 
 
-def volume_overrides(sport: str) -> dict:
-    """{field: value} from LINEMAKER_<SPORT>_VOLUME_* (parlay legs for that sport only, e.g.
+def volume_overrides(sport: str, market: str = "") -> dict:
+    """{field: value} from LINEMAKER_<SPORT>_<MARKET>_VOLUME_* (e.g. NHL_MONEYLINE), else
+    LINEMAKER_<SPORT>_VOLUME_*: parlay legs for that league / market only (e.g.
     LINEMAKER_UFC_VOLUME_ODDS_MAX=-500). MAX_FAVORITE replaces LINEMAKER_MAX_FAVORITE there."""
     out = {}
+    mk = "_".join(market.upper().split())
     for suffix, (field_name, kind) in VOLUME_SETTINGS.items():
-        raw = os.environ.get(f"LINEMAKER_{sport.upper()}_VOLUME_{suffix}", "").strip()
+        raw = (os.environ.get(f"LINEMAKER_{sport.upper()}_{mk}_VOLUME_{suffix}", "").strip() if mk else "") \
+            or os.environ.get(f"LINEMAKER_{sport.upper()}_VOLUME_{suffix}", "").strip()
         if not raw:
             continue
         try:
@@ -77,13 +81,13 @@ def volume_overrides(sport: str) -> dict:
     return out
 
 
-def sport_cfg(cfg, sport: str, cache: dict):
+def sport_cfg(cfg, sport: str, cache: dict, market: str = ""):
     """cfg with this sport's own settings applied: LINEMAKER_<SPORT>_* for picks,
-    LINEMAKER_<SPORT>_VOLUME_* for parlay legs (PrizePicks keeps the app's own)."""
+    LINEMAKER_<SPORT>[_<MARKET>]_VOLUME_* for parlay legs (PrizePicks keeps the app's own)."""
     if cfg.pick_tag == "volume" and not cfg.sport_settings:
-        key = ("volume", sport)
+        key = ("volume", sport, market)
         if key not in cache:
-            o = volume_overrides(sport)
+            o = volume_overrides(sport, market)
             cache[key] = replace(cfg, **o) if o else cfg
         return cache[key]
     if not cfg.sport_settings:
@@ -98,7 +102,12 @@ def sport_cfg(cfg, sport: str, cache: dict):
 # fight model (ufc_model.anchor_shift: the no-vig price plus fitted corrections), so it can carry
 # most of the weight: on 2023-26 fights it scored 0.5763 log loss at weight 1, 0.5770 at 0.8, the
 # market alone 0.5830. UFC rounds/props models blend best around 0.2-0.35.
-START_WEIGHTS = {"UFC": 0.3, "UFC moneyline": 0.85, "NCAAB": 0.35}
+# "NHL moneyline" is the market-anchored back-to-back model (game_model, dist "anchor|..."),
+# so like UFC it carries most of the weight. NCAAB game lines: on 32,565 games (2020-26) the
+# opponent-adjusted ratings added almost nothing to the closing line (best weight on the model
+# about 0.02 for spreads, 0.04 for totals, season by season -0.03 to +0.09), so the market leads.
+START_WEIGHTS = {"UFC": 0.3, "UFC moneyline": 0.85, "NHL moneyline": 0.85, "NCAAB": 0.05,
+                 "NCAAB moneyline": 0.05, "NCAAB spread": 0.05, "NCAAB game total": 0.05, "NCAAB team total": 0.05}
 
 
 def _move_limit() -> Optional[float]:
@@ -611,7 +620,7 @@ def run_sim(m: ProMarket, cfg: ProConfig) -> SimResult:
             raise ValueError(f"{m.game}: 1x2 needs mean (subject goals) and mean_b (opponent goals)")
         return simulate_1x2(m.mean, m.mean_b, cfg.n_sims, seed_key=m.key)
     dist = m.dist or pick_dist(m.market, m.bet_type)
-    if dist.startswith("ufcanchor"):   # market-anchored fight model: evaluate() sets the chance
+    if dist.startswith(("ufcanchor", "anchor|")):   # market-anchored models: evaluate() sets the chance
         dist = "normal"
     sd = m.stdev or default_sd(dist, m.mean, m.market, m.sport, m.bet_type)
     # One simulation per player-stat (or game line); each alt line reads the same draws.
@@ -724,6 +733,14 @@ def evaluate(m: ProMarket, cfg: ProConfig, sim: Optional[SimResult] = None) -> O
         from .ufc_model import anchored
         try:
             a = anchored(market["A"], float(m.dist.split("|", 1)[1]))
+            model = {"A": a, "B": 1 - a}
+        except (ValueError, KeyError):
+            pass
+    elif (m.dist or "").startswith("anchor|"):   # "anchor|slope|shift": the live no-vig price, corrected
+        try:
+            _tag, slope, shift = m.dist.split("|")
+            p = min(max(market["A"], 1e-4), 1 - 1e-4)
+            a = 1 / (1 + math.exp(-(float(slope) * math.log(p / (1 - p)) + float(shift))))
             model = {"A": a, "B": 1 - a}
         except (ValueError, KeyError):
             pass
@@ -923,7 +940,7 @@ def run_pro(markets: list, slate_date: str, cfg: ProConfig, freezer=None,
             volume_shrink(ev)
         if cfg.calibrate:   # after tracking: the record keeps the raw hit chances for the next fit
             apply_calibration(ev)
-        c = sport_cfg(cfg, m.sport, per_sport)   # this sport's own gates, if any
+        c = sport_cfg(cfg, m.sport, per_sport, m.market)   # this sport's (and market's) own gates, if any
         paused = None
         if cfg.pick_tag == "model" and cfg.sport_settings:
             from .autotune import pruned

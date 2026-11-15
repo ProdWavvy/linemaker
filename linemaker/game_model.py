@@ -40,6 +40,12 @@ SUPPORTED = ("NBA", "WNBA", "NFL", "NCAAF", "NHL", "MLB", "UFC", "NCAAB")
 SEASON_K = {"NBA": 15, "WNBA": 10, "NFL": 4, "NCAAF": 4, "NHL": 20, "MLB": 40, "NCAAB": 6}
 HOME_EDGE = {"NBA": 2.3, "WNBA": 2.0, "NFL": 1.5, "NCAAF": 2.8, "NHL": 0.15, "MLB": 0.15, "NCAAB": 3.0}
 REST_PENALTY = {"NBA": 1.5, "WNBA": 1.0, "NHL": 0.12}
+# NHL moneylines are market-anchored: the live no-vig price, shifted against a team on the
+# second night of a back-to-back. On 6,882 games (2021-26, ESPN closing odds) the goals ratings
+# added nothing to the closing price (weight on them -0.09 to +0.04), while back-to-backs were
+# under-priced every way it was tested: fitted on the seasons before each one, -0.17 to -0.21
+# logit; betting the rested team at the best price won 5 of 6 seasons (+4.9% on 1,475 games).
+NHL_B2B_SHIFT = 0.18
 SD = {**{k[0]: v for k, v in DEFAULT_NORMAL_SD.items() if k[1] == "margin"}, "MLB": 4.4}
 TOTAL_SD = {**{k[0]: v for k, v in DEFAULT_NORMAL_SD.items() if k[1] == "total"}, "MLB": 4.5}
 LAST_SEASON_REGRESS = 1 / 3
@@ -274,8 +280,16 @@ def game_projections(sport: str, date: str, games: list, use_kalshi: bool = True
                                               for p in (pa, ph) if p and p.get("rates"))
         sd = SD.get(sport, 12.0)
         for market in ("moneyline", "spread"):
-            rows.append({"sport": sport, "subject": home, "market": market,
-                         "mean": f"{g['margin']:.3f}", "stdev": f"{sd:g}", "notes": note})
+            row = {"sport": sport, "subject": home, "market": market,
+                   "mean": f"{g['margin']:.3f}", "stdev": f"{sd:g}", "notes": note}
+            if sport == "NHL" and market == "moneyline":
+                shift = NHL_B2B_SHIFT * ((norm(away) in tired) - (norm(home) in tired))
+                row["dist"] = f"anchor|1|{shift:.4f}"
+                row["notes"] = ("NHL moneyline: the market's no-vig price"
+                                + (f", {abs(shift):.2f} logit toward the rested team ("
+                                   f"{away if shift < 0 else home} rested)" if shift else ", no back-to-back")
+                                + f" (fitted on 2021-26 closing odds); {note}")
+            rows.append(row)
         rows.append({"sport": sport, "subject": home, "market": "game total",
                      "mean": f"{g['total']:.3f}", "stdev": f"{TOTAL_SD.get(sport, 15.0):g}",
                      "notes": note})

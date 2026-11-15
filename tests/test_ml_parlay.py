@@ -225,3 +225,36 @@ class SportVolumeWindowTest(unittest.TestCase):
             self.assertEqual((ufc.min_odds, effective_max_odds(ufc), ufc.min_prob, ufc.min_gap), (-110, -500, 0.55, 0.0))
             self.assertEqual(effective_max_odds(nba), -250)            # every other league keeps the -250 cap
             self.assertIs(nba, cfg)
+
+
+class NhlAnchorTest(unittest.TestCase):
+    def test_back_to_back_shift_on_the_live_price(self):
+        from linemaker.pro import ProConfig, evaluate
+        row = {"date": "2026-11-15", "sport": "NHL", "game_id": "g", "game": "A @ H", "bet_type": "moneyline",
+               "subject": "H", "opponent": "A", "market": "moneyline", "line": "0", "mean": "3.0", "stdev": "2.3",
+               "books": "FanDuel:-120/+100|DraftKings:-118/-102"}
+        plain = evaluate(rows_to_markets([dict(row, dist="anchor|1|0")])[0], ProConfig(n_sims=2000, track=False))
+        rested = evaluate(rows_to_markets([dict(row, dist="anchor|1|0.18")])[0], ProConfig(n_sims=2000, track=False))
+        h0 = next(s for s in plain.sides if s.side == "A")
+        h1 = next(s for s in rested.sides if s.side == "A")
+        self.assertAlmostEqual(h0.model_prob, h0.market_prob, places=6)   # no back-to-back: the market's price
+        self.assertGreater(h1.model_prob, h0.model_prob + 0.03)          # away team tired: home +0.18 logit
+        self.assertLess(h0.model_prob, 0.6)                              # the stats mean (3 goals) is ignored
+
+    def test_game_model_marks_tired_teams_and_market_windows(self):
+        from linemaker import game_model
+        from linemaker.pro import sport_cfg
+        ratings = {"home team": {"scored": 3.2, "allowed": 2.9, "avg": 3.0, "basis": "x"},
+                   "away team": {"scored": 3.0, "allowed": 3.0, "avg": 3.0, "basis": "x"}}
+        with mock.patch.object(game_model, "team_ratings", return_value=ratings), \
+                mock.patch.object(game_model, "played_yesterday", return_value={"away team"}), \
+                mock.patch("linemaker.nhl_goalies.goalie_effects", return_value={}):
+            rows = game_model.game_projections("NHL", "2026-11-15", [("Away Team", "Home Team")], use_kalshi=False)
+        ml = next(r for r in rows if r["market"] == "moneyline")
+        self.assertEqual(ml["dist"], "anchor|1|0.1800")
+        self.assertNotIn("dist", next(r for r in rows if r["market"] == "spread"))
+        env = {"LINEMAKER_NHL_MONEYLINE_VOLUME_ODDS_MIN": "-130", "LINEMAKER_NHL_MONEYLINE_VOLUME_MAX_FAVORITE": "-400"}
+        with mock.patch.dict(os.environ, env):
+            cfg = volume_config(track=False)
+            self.assertEqual(sport_cfg(cfg, "NHL", {}, "moneyline").min_odds, -130)
+            self.assertIs(sport_cfg(cfg, "NHL", {}, "shots on goal"), cfg)   # props keep the normal window
