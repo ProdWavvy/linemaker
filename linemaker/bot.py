@@ -1783,8 +1783,8 @@ def build_live(sports: list, projections: list, date: str, cfg: ProConfig,
 
 BLUE_BOARD = 0x3498DB
 SPORT_CHOICES = [app_commands.Choice(name=k, value=k) for k in SPORT_KEYS]
-FP_CHOICES = [app_commands.Choice(name=k, value=k)
-              for k in ("NBA", "WNBA", "NFL", "NCAAF", "MLB", "NHL")]
+FP_CHOICES = [app_commands.Choice(name=k, value=k)   # UFC: fight winners / total rounds (no props in the feed);
+              for k in ("NBA", "WNBA", "NFL", "NCAAF", "NCAAB", "MLB", "NHL", "UFC")]   # college: game lines (NY)
 KIND_CHOICES = [app_commands.Choice(name="Player props", value="props"),
                 app_commands.Choice(name="Moneylines, spreads, totals", value="games"),
                 app_commands.Choice(name="Live in-game lines", value="live"),
