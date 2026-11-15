@@ -211,3 +211,17 @@ class CalibrationPriorTest(unittest.TestCase):
         with mock.patch.dict(os.environ, {"LINEMAKER_CALIBRATION_PRIORS": "on"}), \
                 mock.patch.object(autotune, "load_weights", return_value=fitted):
             self.assertAlmostEqual(autotune.calibrated(0.85, "NBA", "prop"), 0.85)       # the fit wins
+
+
+class SportVolumeWindowTest(unittest.TestCase):
+    def test_ufc_parlay_legs_get_their_own_window(self):
+        from linemaker.pro import effective_max_odds, sport_cfg
+        env = {"LINEMAKER_MAX_FAVORITE": "-250", "LINEMAKER_UFC_VOLUME_ODDS_MIN": "-110",
+               "LINEMAKER_UFC_VOLUME_ODDS_MAX": "-500", "LINEMAKER_UFC_VOLUME_MAX_FAVORITE": "-500",
+               "LINEMAKER_UFC_VOLUME_MIN_PROB": "0.55", "LINEMAKER_UFC_VOLUME_MIN_GAP": "0"}
+        with mock.patch.dict(os.environ, env):
+            cfg = volume_config(track=False)
+            ufc, nba = sport_cfg(cfg, "UFC", {}), sport_cfg(cfg, "NBA", {})
+            self.assertEqual((ufc.min_odds, effective_max_odds(ufc), ufc.min_prob, ufc.min_gap), (-110, -500, 0.55, 0.0))
+            self.assertEqual(effective_max_odds(nba), -250)            # every other league keeps the -250 cap
+            self.assertIs(nba, cfg)

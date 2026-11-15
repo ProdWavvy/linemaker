@@ -729,7 +729,10 @@ def stats_page(detail: dict) -> discord.Embed:
 def volume_messages(sections: list, date: str, cfg, title: str = "") -> list:
     """[(embeds, None)]: header, high-hit-rate legs, parlays per book, notes."""
     from .parlay import build_parlays, build_sgps
+    from .pro import sport_cfg
     sections = _norm_sections(sections)
+    if len({sp for sp, _r, _e in sections}) == 1:   # one league: its own leg settings (UFC's window)
+        cfg = sport_cfg(cfg, sections[0][0], {})
     for _sport, res, ex in sections:
         apply_hit_gate(res, ex["profiles"], floor=cfg.min_prob)
     legs = sorted((ev for _s, res, _e in sections for ev in res.picks),
@@ -756,8 +759,10 @@ def volume_messages(sections: list, date: str, cfg, title: str = "") -> list:
              + (f" Projections: {', '.join(sources)}." if sources else ""),
              f"Each leg is priced {fmt_odds(cfg.min_odds)} to {fmt_odds(effective_max_odds(cfg))}, has an "
              f"estimated hit chance of {cfg.min_prob:.0%}+, a season hit rate of "
-             f"{cfg.min_prob:.0%}+ where there's a sample, and isn't priced more than "
-             f"{abs(cfg.min_gap) * 100:.0f} points above our estimate."]
+             f"{cfg.min_prob:.0%}+ where there's a sample, and "
+             + (f"isn't priced more than {abs(cfg.min_gap) * 100:.0f} points above our estimate." if cfg.min_gap < 0
+                else "is priced at or below our estimate." if cfg.min_gap == 0
+                else f"beats its price by {cfg.min_gap * 100:.0f}+ points.")]
     if ml:
         which = {"Moneyline": "each game's **likelier winner**",
                  "Spread": "each game's **best-value spread** (main or alternate line)",

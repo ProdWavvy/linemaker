@@ -58,8 +58,34 @@ def sport_overrides(sport: str) -> dict:
     return out
 
 
+VOLUME_SETTINGS = {"ODDS_MIN": ("min_odds", int), "ODDS_MAX": ("max_odds", int), "MIN_PROB": ("min_prob", float),
+                   "MIN_GAP": ("min_gap", float), "MAX_FAVORITE": ("max_favorite", int)}
+
+
+def volume_overrides(sport: str) -> dict:
+    """{field: value} from LINEMAKER_<SPORT>_VOLUME_* (parlay legs for that sport only, e.g.
+    LINEMAKER_UFC_VOLUME_ODDS_MAX=-500). MAX_FAVORITE replaces LINEMAKER_MAX_FAVORITE there."""
+    out = {}
+    for suffix, (field_name, kind) in VOLUME_SETTINGS.items():
+        raw = os.environ.get(f"LINEMAKER_{sport.upper()}_VOLUME_{suffix}", "").strip()
+        if not raw:
+            continue
+        try:
+            out[field_name] = kind(float(raw.replace("+", ""))) if kind is int else kind(raw)
+        except ValueError:
+            continue
+    return out
+
+
 def sport_cfg(cfg, sport: str, cache: dict):
-    """cfg with this sport's own settings applied (volume / PrizePicks keep theirs)."""
+    """cfg with this sport's own settings applied: LINEMAKER_<SPORT>_* for picks,
+    LINEMAKER_<SPORT>_VOLUME_* for parlay legs (PrizePicks keeps the app's own)."""
+    if cfg.pick_tag == "volume" and not cfg.sport_settings:
+        key = ("volume", sport)
+        if key not in cache:
+            o = volume_overrides(sport)
+            cache[key] = replace(cfg, **o) if o else cfg
+        return cache[key]
     if not cfg.sport_settings:
         return cfg
     if sport not in cache:
@@ -172,6 +198,7 @@ class ProConfig:
     # Tuned weights per segment (pre/live x props/games), league and market (see autotune).
     segment_weights: dict = field(default_factory=lambda: _segment_weights())
     sport_settings: bool = True        # apply LINEMAKER_<SPORT>_* gates (off for volume / PrizePicks)
+    max_favorite: Optional[int] = None  # this sport's own heaviest price (else LINEMAKER_MAX_FAVORITE)
     force_model_weight: Optional[float] = None   # market-edge mode: 0 = the sharp consensus alone
     min_books: int = 0                 # complete two-sided books needed in the consensus
     pick_tag: str = "model"            # what a pick is logged as in tracking ("model" / "market")
@@ -800,7 +827,7 @@ def heaviest_allowed() -> Optional[int]:
 
 
 def effective_max_odds(cfg) -> Optional[int]:
-    cap = heaviest_allowed()
+    cap = getattr(cfg, "max_favorite", None) or heaviest_allowed()
     if cap is None:
         return cfg.max_odds
     return cap if cfg.max_odds is None else max(cfg.max_odds, cap)
