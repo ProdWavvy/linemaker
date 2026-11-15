@@ -181,6 +181,13 @@ def _decimal(odds: int) -> float:
     return 1 + (odds / 100 if odds > 0 else 100 / -odds)
 
 
+def shown_units(date: str) -> Optional[float]:
+    """Units won or lost on the plays shown (None: none graded with a price)."""
+    rows = [v for v in load(date).values() if v.get("shown") and v.get("result") in ("won", "lost")
+            and v.get("profit") is not None]
+    return sum(v["profit"] for v in rows) if rows else None
+
+
 def summary_lines(date: str) -> list:
     """Record of the shown plays (units at the prices shown) and of every priced prop."""
     data = [v for v in load(date).values() if v.get("result") in ("won", "lost")]

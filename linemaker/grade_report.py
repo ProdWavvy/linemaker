@@ -197,12 +197,13 @@ def parlays_embed(date: str) -> Optional[discord.Embed]:
 
 def ufc_props_embed(date: str) -> Optional[discord.Embed]:
     """The UFC props the bot priced that day, graded: plays shown, and every prop priced."""
-    from .ufc_props_track import summary_lines
+    from .ufc_props_track import shown_units, summary_lines
     lines = summary_lines(date)
     if not lines:
         return None
+    units = shown_units(date)   # green when the plays shown made money, red when they lost, like the other records
     return discord.Embed(title="🥊 UFC Props (1 unit each, at the prices shown)", description="\n".join(lines)[:4000],
-                         color=0xE74C3C)
+                         color=GREY if units is None else GREEN if units >= 0 else RED)
 
 
 def model_embed(main: dict) -> Optional[discord.Embed]:

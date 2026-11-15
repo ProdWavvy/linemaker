@@ -776,57 +776,68 @@ def props_card(date: str) -> tuple:
         except Exception as e:
             log.warning("ufc fight offers: %s", e)
     if plays:
-        rows = []
+        by_book = {}   # where each play pays best -> its rows (the book's colour, like every card)
         for i, (f, p) in enumerate(plays, 1):
             quotes = offers.get((f["fight"], offer_key(p)), {}) if offer_key(p) else {}
             books, mine = [], []
+            best, best_dec = "Kalshi", 1 / p["kalshi_price"] if p.get("kalshi_price") else 0
             for book, (odds, url) in sorted(quotes.items()):
                 good = _implied(odds) * 1.02 <= p["chance"]   # +2% EV or better at this price
-                tag = SHORT_BOOK.get(book, book)
-                books.append(f"{tag} {odds:+d}{' ✅' if good else ''}")
+                tag, emoji, _c = book_look(book)
+                books.append(f"{emoji} {tag} {odds:+d}{' ✅' if good else ''}")
                 if url:
-                    mine.append((f"#{i} {tag} {odds:+d}", url))
+                    mine.append((f"{emoji} #{i} {tag} {odds:+d}", url))
+                if 1 / _implied(odds) > best_dec:
+                    best, best_dec = book, 1 / _implied(odds)
             groups.append(mine)
-            where = (" · " + " · ".join(books)) if books else ""
-            rows.append(f"**{i}.** {p['label']} · **{p['chance']:.0%}**\n"
-                        f"\u2003{f['fight']} · Kalshi {p['market']:.0%} · fair {american(p['chance'])} · "
-                        f"bet at **{worth_at(p['chance'])}**+ (Kalshi {p['kalshi_price'] * 100:.0f}¢){where}")
-        e = discord.Embed(title="🎯 Fight Props", color=red, description="\n".join(rows)[:4096])
-        e.set_footer(text="Bold % = our chance · bet at = the price that's +2% EV · FD / DK / PM = FanDuel's, "
-                          "DraftKings' and Polymarket's price for the same prop, ✅ = worth it there · buttons "
-                          "load the slip (Polymarket: the market)")
-        out.append(e)
+            where = ("\n\u2003" + " · ".join(books)) if books else ""
+            by_book.setdefault(best, []).append(
+                f"**{i}.** {p['label']} · **{p['chance']:.0%}**\n"
+                f"\u2003{f['fight']} · fair {american(p['chance'])} · bet at **{worth_at(p['chance'])}**+\n"
+                f"\u2003{book_look('Kalshi')[1]} Kalshi {p['kalshi_price'] * 100:.0f}¢ (market {p['market']:.0%}){where}")
+        for book in sorted(by_book, key=book_order):
+            tag, emoji, colour = book_look(book)
+            e = discord.Embed(title=f"{emoji} 🎯 Fight Props · best at {BOOK_NAME.get(tag, book)}", color=colour,
+                              description="\n".join(by_book[book])[:4096])
+            out.append(e)
+        out[-1].set_footer(text="Grouped by where each play pays most · bold % = our chance · bet at = the price "
+                                "that's +2% EV · 🟦 FanDuel 🟩 DraftKings 🟧 Polymarket 🟢 Kalshi, ✅ = worth it "
+                                "there · buttons load the slip (Polymarket: the market)")
     elif priced:
         out.append(discord.Embed(title="🎯 Fight Props", color=GREY,
                                  description="No fight prop is 3+ points better than Kalshi's price right now."))
     if strike_plays:
-        rows = []
+        by_book = {}
         for i, r in enumerate(strike_plays, len(plays) + 1):
             p = r["prop"]
             stat = SHORT_STAT.get(p["stat"], p["stat"])
             who = " vs ".join(p["fight"]) if p["stat"] == "fight time" else r["row"]["fighter"]
             quotes, pages = strike_quotes(r, offers)
-            mine = [(f"#{i} {tag}" + (f" {odds:+d}" if odds is not None else ""), url)
+            mine = [(f"{book_look(tag)[1]} #{i} {tag}" + (f" {odds:+d}" if odds is not None else ""), url)
                     for tag, odds, url, _good in quotes if url]
-            mine += [(f"#{i} {tag} fight", url) for tag, url in pages]
+            mine += [(f"{book_look(tag)[1]} #{i} {tag} fight", url) for tag, url in pages]
             groups.append(mine)
-            where = " · ".join(f"{tag}" + (f" {odds:+d}" if odds is not None else "") + (" ✅" if good else "")
-                               for tag, odds, url, good in quotes)
+            where = " · ".join(f"{book_look(tag)[1]} {tag}" + (f" {odds:+d}" if odds is not None else "")
+                               + (" ✅" if good else "") for tag, odds, url, good in quotes)
             if pages:
-                where += (" · " if where else "") + "/".join(t for t, _u in pages) + ": open the fight"
+                where += ((" · " if where else "") + " ".join(book_look(t)[1] for t, _u in pages) + " "
+                          + "/".join(t for t, _u in pages) + ": open the fight")
             if r["odds"] is None:
                 word = "More" if r["side"] == "over" else "Less"
                 price = f"{r['book']} · break-even {r['chance'] - r['edge']:.0%}"
             else:
                 word = r["side"].title()
                 price = f"{r['book']} {r['odds']:+d} · fair {american(r['chance'])}"
-            rows.append(f"**{i}.** {who} {word} {p['line']:g} {stat} · **{r['chance']:.0%}**\n"
-                        f"\u2003{price} · projects {r['proj']:.1f}"
-                        + (f" · ⚠️ {', '.join(r['flags'])}" if r["flags"] else "")
-                        + (f"\n\u2003{where}" if where else ""))
-        e = discord.Embed(title="🥊 Strike & Takedown Lines", color=red, description="\n".join(rows)[:4096])
-        e.set_footer(text=STAT_FOOTER)
-        out.append(e)
+            by_book.setdefault(r["book"], []).append(
+                f"**{i}.** {who} {word} {p['line']:g} {stat} · **{r['chance']:.0%}**\n"
+                f"\u2003{price} · projects {r['proj']:.1f}"
+                + (f" · ⚠️ {', '.join(r['flags'])}" if r["flags"] else "")
+                + (f"\n\u2003{where}" if where else ""))
+        for book in sorted(by_book, key=book_order):
+            tag, emoji, colour = book_look(book)
+            out.append(discord.Embed(title=f"{emoji} 🥊 Strike & Takedown · best at {BOOK_NAME.get(tag, book)}",
+                                     color=colour, description="\n".join(by_book[book])[:4096]))
+        out[-1].set_footer(text=STAT_FOOTER)
     else:
         note = strike_note or (f"{seen} strike / takedown lines checked: none 3+ points better than its price."
                                if seen else TYPED_TIP if not propline.on() else
@@ -843,6 +854,20 @@ def props_card(date: str) -> tuple:
     text = (f"UFC props {day}: {n_plays} plays ("
             + "; ".join(f"{p['label']} {p['chance']:.0%}" for _f, p in plays[:5]) + ")")
     return out, text, fair_buttons(groups)
+
+
+def reply_card(text: str):
+    """A priced typed line or screenshot as a card, coloured like the rest: green when
+    something's worth betting, grey when nothing is. None for anything else (errors, hints)."""
+    import discord
+    if not text or not (text.startswith("🥊 **") or text.startswith("📸 **Read")):
+        return None
+    head, _, body = text.partition("\n")
+    good = "worth it at" in text
+    e = discord.Embed(title=head.replace("**", "")[:256], description=body[:4096],
+                      color=0x2ECC71 if good else 0x95A5A6)
+    e.set_footer(text="✅ green = worth a bet at the price shown or better · grey = no edge")
+    return e
 
 
 def _log_card(day: str, priced: list, shown_ids: set, strike_all: list) -> None:
@@ -872,6 +897,30 @@ def _log_card(day: str, priced: list, shown_ids: set, strike_all: list) -> None:
 # ---- FanDuel / DraftKings prices and betslip links for fight props (via PropLine) -----------
 BET_BOOKS = {"fanduel": "FanDuel", "draftkings": "DraftKings", "polymarket_us": "Polymarket", "polymarket": "Polymarket"}
 SHORT_BOOK = {"FanDuel": "FD", "DraftKings": "DK", "Polymarket": "PM", "PrizePicks": "PP", "Underdog": "UD"}
+BOOK_NAME = {"FD": "FanDuel", "DK": "DraftKings", "PM": "Polymarket", "PP": "PrizePicks", "UD": "Underdog",
+             "Kalshi": "Kalshi"}
+LOOKS = {"fd": ("FD", "🟦", 0x1493FF), "dk": ("DK", "🟩", 0x53D337), "pm": ("PM", "🟧", 0xF57C00),
+         "kalshi": ("Kalshi", "🟢", 0x00B386), "pp": ("PP", "🟣", 0x8E44AD), "ud": ("UD", "🟡", 0xF1C40F)}
+_LOOK_KEYS = {"fanduel": "fd", "draftkings": "dk", "polymarket": "pm", "polymarketus": "pm", "kalshi": "kalshi",
+              "prizepicks": "pp", "underdog": "ud", "underdogfantasy": "ud"}
+ORDER = ("fd", "dk", "pm", "kalshi", "pp", "ud")
+
+
+def _look_key(book: str) -> Optional[str]:
+    k = _bkey(book)
+    return k if k in LOOKS else _LOOK_KEYS.get(k)
+
+
+def book_look(book: str) -> tuple:
+    """(tag, emoji, embed colour) in the bot's book colours: 🟦 FanDuel 🟩 DraftKings 🟧 Polymarket,
+    plus 🟢 Kalshi 🟣 PrizePicks 🟡 Underdog; ⬜ grey for anything else."""
+    k = _look_key(book)
+    return LOOKS[k] if k else (book, "⬜", 0x95A5A6)
+
+
+def book_order(book: str) -> int:
+    k = _look_key(book)
+    return ORDER.index(k) if k in ORDER else len(ORDER)
 
 
 def _slip(book: str, bk: dict, outcome: dict) -> Optional[str]:

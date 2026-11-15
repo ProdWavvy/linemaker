@@ -490,7 +490,9 @@ class LinemakerChat:
             reply = await self.read_screenshot(images, text)
             history.append({"role": "user", "content": f"{author}: [screenshot] {text}".strip()})
             history.append({"role": "assistant", "content": reply})
-            return Turn(reply, ctx["files"], [])
+            from .ufc_props import reply_card
+            card = reply_card(reply)
+            return Turn("" if card else reply, ctx["files"], [], [card] if card else [])
         if attached_csv:
             ctx["attached_rows"] = list(csv.DictReader(io.StringIO(attached_csv)))
             text += f"\n\n[attached projections CSV with {len(ctx['attached_rows'])} rows]"
@@ -512,11 +514,12 @@ class LinemakerChat:
             from .ufc_props import stat_prop_ask
             stat_line = stat_prop_ask(text)
         if stat_line:   # a typed strike / takedown / fight-time line
-            from .ufc_props import stat_prop_reply
+            from .ufc_props import reply_card, stat_prop_reply
             reply = await asyncio.to_thread(stat_prop_reply, _today(), text)
             history.append({"role": "user", "content": f"{author}: {text}"})
             history.append({"role": "assistant", "content": reply})
-            return Turn(reply, ctx["files"], [])
+            card = reply_card(reply)   # green when it's worth a bet, grey when not
+            return Turn("" if card else reply, ctx["files"], [], [card] if card else [])
         if not attached_csv and UFC_PROPS_WORDS.search(text):   # UFC props: the same cards as any ask
             from .ufc_props import props_card
             try:

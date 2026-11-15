@@ -98,7 +98,8 @@ class CardTest(unittest.TestCase):
             logged = t.load("2026-11-14")
         titles = [e.title for e in embeds]
         self.assertTrue(titles[0].startswith("🥊 UFC Props"))
-        self.assertIn("🎯 Fight Props", titles)
+        self.assertEqual(titles[1], "🟢 🎯 Fight Props · best at Kalshi")   # no book price: Kalshi's colour
+        self.assertEqual(embeds[1].colour.value, 0x00B386)
         self.assertIn("📖 How These Are Priced", titles)
         self.assertIn("Doesn't go the distance · **44%**", embeds[1].description)
         self.assertIn("bet at **+132**+", embeds[1].description)
@@ -239,6 +240,58 @@ class StrikeLinksTest(unittest.TestCase):
                 mock.patch.object(ufc_props, "fight_book_offers", return_value={}) as fbo:
             embeds, _text, buttons = ufc_props.props_card("2026-11-14")
         fbo.assert_called_once_with(["Josh Hokit vs Ciryl Gane"])
-        strike = next(e for e in embeds if e.title.startswith("🥊 Strike"))
-        self.assertIn("FD -115 ✅ · PP ✅", strike.description)
-        self.assertEqual([b[0] for b in buttons], ["#1 FD -115", "#1 PP"])
+        strike = next(e for e in embeds if "🥊 Strike" in e.title)
+        self.assertEqual(strike.title, "🟦 🥊 Strike & Takedown · best at FanDuel")
+        self.assertEqual(strike.colour.value, 0x1493FF)                 # FanDuel blue, like every FanDuel card
+        self.assertIn("🟦 FD -115 ✅ · 🟣 PP ✅", strike.description)
+        self.assertEqual([b[0] for b in buttons], ["🟦 #1 FD -115", "🟣 #1 PP"])
+
+
+class ColoursTest(unittest.TestCase):
+    def test_fight_props_grouped_by_best_book(self):
+        from linemaker import ufc_props
+        def prop(label, chance, kalshi, spec):
+            return {"label": label, "chance": chance, "market": kalshi + 0.01, "model": chance, "kalshi_price": kalshi,
+                    "yes": True, "spec": spec}
+        priced = [{"fight": "Josh Hokit vs Ciryl Gane", "props": [
+            prop("Goes the distance", 0.45, 0.33, {"kind": "distance"}),
+            prop("Ciryl Gane by KO/TKO", 0.55, 0.47, {"kind": "mov", "fighter": "Ciryl Gane", "method": "KO"})]}]
+        offers = {("Josh Hokit vs Ciryl Gane", ("distance", "yes")): {"DraftKings": (215, "https://dk"),
+                                                                      "Polymarket": (190, "https://pm")},
+                  ("Josh Hokit vs Ciryl Gane", ("mov", "ciryl gane", "KO")): {"FanDuel": (125, "https://fd")}}
+        with tempfile.TemporaryDirectory() as d, \
+                mock.patch.dict(os.environ, {"LINEMAKER_TRACKING_DIR": d, "PROPLINE_API_KEY": "k"}), \
+                mock.patch("linemaker.ufc_model.next_card_date", return_value="2026-11-14"), \
+                mock.patch.object(ufc_props, "props_lines", return_value=([], priced)), \
+                mock.patch.object(ufc_props, "propline_edges", return_value=([], 0)), \
+                mock.patch.object(ufc_props, "fight_book_offers", return_value=offers):
+            embeds, _t, buttons = ufc_props.props_card("2026-11-14")
+        looks = {e.title: e.colour.value for e in embeds if "Fight Props" in e.title}
+        self.assertEqual(looks, {"🟦 🎯 Fight Props · best at FanDuel": 0x1493FF,     # KO +125 beats Kalshi 47¢ (+113)
+                                 "🟩 🎯 Fight Props · best at DraftKings": 0x53D337})  # +215 beats PM +190, Kalshi 33¢
+        self.assertIn("🟩 DK +215 ✅ · 🟧 PM +190", next(e for e in embeds if "DraftKings" in e.title).description)
+        self.assertIn(("🟧 #1 PM +190", "https://pm"), buttons)
+        self.assertEqual(ufc_props.book_look("Underdog Fantasy"), ("UD", "🟡", 0xF1C40F))
+        self.assertEqual(ufc_props.book_look("Sleeper")[1], "⬜")
+
+    def test_reply_cards_and_report_colour(self):
+        from linemaker import ufc_props
+        good = ufc_props.reply_card("🥊 **Hokit Over 45.5 sig strikes -115** vs Gane\nOur chance **58%** · fair -138 · "
+                                    "worth it at **-133** or better")
+        self.assertEqual((good.title, good.colour.value), ("🥊 Hokit Over 45.5 sig strikes -115 vs Gane", 0x2ECC71))
+        meh = ufc_props.reply_card("📸 **Read 3 lines from your screenshot** · 0 worth a look\n**Hokit Over 45.5** no edge")
+        self.assertEqual(meh.colour.value, 0x95A5A6)
+        self.assertIsNone(ufc_props.reply_card("Name one fighter on the card with the line"))
+        entries = [{"fight": "A vs B", "label": "x", "yes": True, "chance": 0.6, "price": 0.5, "book": "Kalshi",
+                    "spec": {"kind": "distance"}, "shown": True}]
+        with tempfile.TemporaryDirectory() as d, mock.patch.dict(os.environ, {"LINEMAKER_TRACKING_DIR": d, "LINEMAKER_TRACKING": "on"}):
+            self.assertIsNone(t.shown_units("2026-11-14"))
+            t.log_props("2026-11-14", entries)
+            data = t.load("2026-11-14")
+            for v in data.values():
+                v.update(result="lost", profit=-1.0)
+            from linemaker.jsonio import save_json
+            save_json(t._path("2026-11-14"), data)
+            self.assertEqual(t.shown_units("2026-11-14"), -1.0)
+            from linemaker.grade_report import ufc_props_embed
+            self.assertEqual(ufc_props_embed("2026-11-14").colour.value, 0xE74C3C)   # a losing night: red
