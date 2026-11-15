@@ -445,3 +445,13 @@ class ParlayCsvTest(unittest.TestCase):
         self.assertEqual(rows[1][0], "parlay")
         self.assertIn("A Over 10.5 (80%) -300", rows[1][4])
         self.assertEqual(rows[1][16], "lost")
+
+    def test_game_lines_already_bet_are_swapped_too(self):
+        from linemaker import parlay
+        a, b, c, d = (leg(f"g{i}", f"Team{i}", "spread", p=0.68 - i * 0.02, odds=-200) for i in range(4))
+        for ev in (a, b, c, d):
+            ev.market.bet_type = "spread"
+        p = parlay.price("FanDuel", [(a, -200), (b, -200), (c, -200)])
+        held = {parlay.exposure(a): {"n": 1, "label": "Team0"}, parlay.exposure(b): {"n": 1, "label": "Team1"}}
+        new, _notes = parlay.swap_held(p, [a, b, c, d], held, 1)
+        self.assertEqual([ev.market.subject for ev, _o in new.legs], ["Team2", "Team3"])   # Steelers / Mavs out

@@ -1153,9 +1153,8 @@ def parlay_board(key: str) -> tuple:
             blocks.append(f"🧯 ~~{num}~~ its players are in your bets now, nothing fresh to swap in")
             continue
         current[j] = new
-        for ev, _o in new.legs:   # the next parlays can't reuse these players
-            if ev.market.bet_type == "prop":
-                held[exposure(ev)] = {"n": cap, "label": ev.best.label}
+        for ev, _o in new.legs:   # the next parlays can't reuse these players / games
+            held[exposure(ev)] = {"n": cap, "label": ev.best.label}
         kind = "Edge" if new.style == "edge" else new.kind or ("Value" if new.style == "value" else "Safest")
         head = (f"{'🟦' if new.book == 'FanDuel' else '🟩'} **{num}** · {len(new.legs)}-leg {kind} · "
                 f"**{fmt_odds(new.american)}** · {new.prob:.0%} hit")
@@ -1220,12 +1219,20 @@ def card_boxes(key: str, embeds: list) -> list:
     from .bets import load_bets
     from .scan_format import parlay_box
     from .staking import _money
+    from .bets import _whose, mine
+    from .parlay_format import short_label
     d = PICK_DETAILS[key]
     nums = d.get("numbers") or []
     open_ids = {b["id"]: b for b in load_bets() if b.get("status") == "open"}
+    who = _whose(None)
+    in_bets = {short_label(l.get("label", "")) for b in open_ids.values() if who != "" and mine(b, who)
+               for l in b.get("legs", [])} - {""}
     out = []
     for e in embeds:
         import re
+        if (e.title or "").startswith("✅ High-Hit-Rate Legs"):   # the legs you've bet, marked
+            out.append(mark_bet_legs(e, in_bets))
+            continue
         m = re.match(r"(?:✅ |🧯 )?#(\d+) · ", e.title or "")
         n = m.group(1) if m else None
         j = next((i for i, x in enumerate(nums) if n and str(x) == n), None)
@@ -1249,6 +1256,22 @@ def card_boxes(key: str, embeds: list) -> list:
             box.set_footer(text=e.footer.text)
         out.append(box)
     return out
+
+
+def mark_bet_legs(e, in_bets: set):
+    """The High-Hit-Rate Legs embed with every leg that's in one of your open bets marked
+    "✅ in your bets" (and unmarked again if the bet is undone)."""
+    import re
+    e = e.copy()
+    rows = []
+    for line in (e.description or "").split("\n"):
+        line = line.replace(" · ✅ in your bets", "")
+        m = re.match(r"\*\*\d+\.\*\* (?:🎯 )?(.+?) · \*\*", line)
+        if m and m.group(1) in in_bets:
+            line += " · ✅ in your bets"
+        rows.append(line)
+    e.description = "\n".join(rows)[:4096]
+    return e
 
 
 async def update_card(key: str):

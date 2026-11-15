@@ -435,8 +435,8 @@ def exposure(ev) -> tuple:
 
 
 def swap_held(p, pool: list, held: Optional[dict] = None, cap: Optional[int] = None):
-    """(parlay, notes) for a card's parlay opened after you've placed others: each player
-    already in `cap`+ open bets is swapped for the best leg of the pool (same style: biggest
+    """(parlay, notes) for a card's parlay opened after you've placed others: each player (or
+    game, for moneylines / spreads / totals) already in `cap`+ open bets is swapped for the best leg of the pool (same style: biggest
     edge / best value / likeliest) that isn't held or already on the ticket, from another
     game (from the same game for a same-game group). A leg with no replacement is dropped
     while 2+ legs remain. (None, notes) when the ticket can't be rebuilt; (p, []) unchanged."""
@@ -447,8 +447,8 @@ def swap_held(p, pool: list, held: Optional[dict] = None, cap: Optional[int] = N
     if not cap:
         return p, []
 
-    def is_held(ev):
-        return ev.market.bet_type == "prop" and held.get(exposure(ev), {}).get("n", 0) >= cap
+    def is_held(ev):   # a player (props) or a game's result (moneyline / spread / total) you've bet
+        return held.get(exposure(ev), {}).get("n", 0) >= cap
     if not any(is_held(ev) for ev, _o in p.legs):
         return p, []
     spec = getattr(p, "boost_spec", None)
