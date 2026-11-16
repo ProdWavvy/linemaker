@@ -68,3 +68,37 @@ class WebTest(unittest.IsolatedAsyncioTestCase):
             async with TestClient(TestServer(web.make_app())) as c:
                 wk = await (await c.get("/api/weekly", headers={"Cookie": f"lm_session={sid}"})).json()
             self.assertTrue(any(l.startswith("🎯 **Picks:**") for l in wk))
+
+    async def test_owner_sees_everyone_members_dont(self):
+        from linemaker import bets
+        with tempfile.TemporaryDirectory() as d, mock.patch.dict(os.environ, {"LINEMAKER_CACHE_DIR": d, "LINEMAKER_TRACKING_DIR": d,
+                                                                              "LINEMAKER_WEB_URL": "https://dash.test",
+                                                                              "LINEMAKER_SECRETS_DIR": os.path.join(d, "s"),
+                                                                              "LINEMAKER_PER_USER_BETS": "on"}):
+            bets.add_bet([{"label": "Lakers ML", "sport": "NBA", "date": "2026-11-16"}], 120, 8, "FanDuel", "friend1")
+            boss = web.redeem(web.login_link("1", "wavvy", True).split("t=", 1)[1])
+            pal = web.redeem(web.login_link("2", "friend2", False).split("t=", 1)[1])
+            async with TestClient(TestServer(web.make_app())) as c:
+                hb, hp = {"Cookie": f"lm_session={boss}"}, {"Cookie": f"lm_session={pal}"}
+                self.assertTrue((await (await c.get("/api/me", headers=hb)).json())["owner"])
+                self.assertEqual((await c.get("/api/members", headers=hp)).status, 403)
+                self.assertEqual((await c.get("/api/activity", headers=hp)).status, 403)
+                names = [m["name"] for m in await (await c.get("/api/members", headers=hb)).json()]
+                self.assertIn("friend1", names)
+                theirs = await (await c.get("/api/bets?user=friend1", headers=hb)).json()
+                self.assertEqual(theirs["open"][0]["what"], "Lakers ML")                 # owner: anyone's dashboard
+                mine = await (await c.get("/api/bets?user=friend1", headers=hp)).json()
+                self.assertEqual(mine["open"], [])                                      # members: only their own
+
+    def test_stars(self):
+        from types import SimpleNamespace as NS
+        from linemaker.gamelogs import HitProfile, Window
+        from linemaker.scan_format import pick_stars
+        ev = NS(best=NS(best_implied=0.52, gap=0.09, market_prob=0.55, side="A", label="X Over 1.5 points"),
+                market=NS(notes="DvP ×1.08 vs Utah Jazz (G)", bet_type="prop", sport="NBA"), model_weight=0.5, vig_assumed=False)
+        strong = HitProfile(season=Window(14, 20, 2.0), recent={10: Window(8, 10, 2.1)})
+        self.assertEqual(pick_stars(ev, strong), 5)
+        ev.best.gap = 0.055
+        self.assertEqual(pick_stars(ev, HitProfile(season=Window(5, 20, 1.0))), 4)   # sharp + DvP
+        ev.market.notes, ev.best.market_prob = "", 0.5
+        self.assertEqual(pick_stars(ev, None), 3)

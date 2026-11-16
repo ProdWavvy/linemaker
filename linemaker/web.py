@@ -31,8 +31,9 @@ log = logging.getLogger("linemaker.web")
 TOKEN_TTL = 15 * 60
 SESSION_TTL = 30 * 24 * 3600
 CARDS_KEPT = 8
-_TOKENS = {}      # token -> (user id, name, expires)
-_SESSIONS = {}    # session -> (user id, name, expires)
+_TOKENS = {}      # token -> (user id, name, expires, owner, avatar)
+_SESSIONS = {}    # session -> (user id, name, expires, owner, avatar)
+LAST_SEEN = {}    # member name -> ISO time they last opened the dashboard
 _CARDS = collections.deque(maxlen=CARDS_KEPT)
 STATE = {"url": None, "proc": None}
 _CACHE = {}
@@ -54,7 +55,8 @@ def base_url() -> Optional[str]:
 
 
 # ---- login -------------------------------------------------------------------------------------
-def login_link(user_id: str, name: str) -> Optional[str]:
+def login_link(user_id: str, name: str, owner: bool = False, avatar: str = "") -> Optional[str]:
+    """A one-use sign-in link. owner: the bot's owner (Members tab: everyone's dashboard)."""
     url = base_url()
     if not url:
         return None
@@ -62,7 +64,7 @@ def login_link(user_id: str, name: str) -> Optional[str]:
     for t in [t for t, v in _TOKENS.items() if v[2] < now]:
         _TOKENS.pop(t, None)
     tok = secrets.token_urlsafe(32)
-    _TOKENS[tok] = (str(user_id), name, now + TOKEN_TTL)
+    _TOKENS[tok] = (str(user_id), name, now + TOKEN_TTL, bool(owner), avatar or "")
     return f"{url}/login?t={tok}"
 
 
@@ -72,7 +74,8 @@ def redeem(token: str) -> Optional[str]:
     if not got or got[2] < time.time():
         return None
     sid = secrets.token_urlsafe(32)
-    _SESSIONS[sid] = (got[0], got[1], time.time() + SESSION_TTL)
+    _SESSIONS[sid] = (got[0], got[1], time.time() + SESSION_TTL, got[3] if len(got) > 3 else False,
+                      got[4] if len(got) > 4 else "")
     return sid
 
 
@@ -92,7 +95,7 @@ def _cards_path() -> str:
 def _ev_json(ev, profile=None) -> dict:
     from .parlay_format import short_label
     from .pro import book_prices
-    from .scan_format import reason_tags
+    from .scan_format import pick_stars, reason_tags
     s, m = ev.best, ev.market
     try:
         prices = book_prices(m, s.side)
@@ -105,7 +108,7 @@ def _ev_json(ev, profile=None) -> dict:
         links = []
     return {"label": short_label(s.label), "sport": m.sport, "game": m.game, "commence": getattr(m, "commence", ""),
             "book": s.best_book, "odds": s.best_odds, "ours": round(s.blended, 4), "implied": round(s.best_implied, 4),
-            "gap": round(s.gap, 4), "tags": reason_tags(ev, profile), "links": links,
+            "gap": round(s.gap, 4), "tags": reason_tags(ev, profile), "links": links, "stars": pick_stars(ev, profile),
             "books": [{"book": b, "odds": o} for b, o in sorted(prices.items(), key=lambda kv: kv[0]) if o is not None]}
 
 
@@ -224,6 +227,46 @@ def weekly_data(name: str) -> list:
         CURRENT_USER.reset(tok)
 
 
+def members_data() -> list:
+    """Owner view: every member the bot knows (bets, linked Polymarket, dashboard visits)."""
+    from .bets import load_bets
+    from .pm_accounts import linked
+    cut = (dt.date.today() - dt.timedelta(days=30)).isoformat()
+    pm = set(linked().values())
+    by = {}
+    for b in load_bets():
+        if b.get("paper"):
+            continue
+        name = b.get("user") or "everyone"
+        g = by.setdefault(name, {"name": name, "won": 0, "lost": 0, "profit": 0.0, "staked": 0.0, "open": 0,
+                                 "last_bet": ""})
+        g["last_bet"] = max(g["last_bet"], b.get("placed", ""))
+        if b.get("status") == "open":
+            g["open"] += 1
+        elif b.get("placed", "") >= cut:
+            g["won"] += b["status"] == "won"
+            g["lost"] += b["status"] == "lost"
+            g["profit"] += b.get("profit", 0.0)
+            g["staked"] += 0.0 if b.get("bonus") else b.get("stake", 0.0)
+    for name in pm | set(LAST_SEEN):
+        by.setdefault(name, {"name": name, "won": 0, "lost": 0, "profit": 0.0, "staked": 0.0, "open": 0, "last_bet": ""})
+    out = []
+    for g in by.values():
+        g.update(pm=g["name"] in pm, seen=LAST_SEEN.get(g["name"], ""), profit=round(g["profit"], 2),
+                 roi=round(g["profit"] / g["staked"], 4) if g["staked"] else None)
+        out.append(g)
+    return sorted(out, key=lambda g: (g["last_bet"] or g["seen"]), reverse=True)
+
+
+def activity_data(limit: int = 40) -> list:
+    """Owner view: the newest bets from everyone."""
+    from .bets import load_bets
+    rows = sorted((b for b in load_bets() if not b.get("paper")), key=lambda b: b.get("placed", ""), reverse=True)[:limit]
+    return [{"user": b.get("user") or "everyone", "what": " + ".join(l.get("label", "") for l in b.get("legs", []))[:160],
+             "book": b.get("book", ""), "odds": b.get("odds"), "stake": b.get("stake"), "status": b.get("status"),
+             "profit": b.get("profit"), "placed": b.get("placed", "")[:16], "pm": bool(b.get("pm_slug"))} for b in rows]
+
+
 def bets_data(name: str) -> dict:
     from .bets import load_bets, mine, per_user_on
     who = name if per_user_on() else None
@@ -284,23 +327,31 @@ def make_app():
         resp.del_cookie("lm_session")
         raise resp
 
-    def api(fn):
+    def api(fn, owner_only: bool = False):
         async def handler(request):
             s = who(request)
             if not s:
                 return web.json_response({"error": "signed out"}, status=401)
-            data = await asyncio.to_thread(fn, s)
+            is_owner = len(s) > 3 and s[3]
+            if owner_only and not is_owner:
+                return web.json_response({"error": "owner only"}, status=403)
+            LAST_SEEN[s[1]] = dt.datetime.now().isoformat(timespec="minutes")
+            name = request.query.get("user") if is_owner and request.query.get("user") else s[1]   # owner: anyone's
+            data = await asyncio.to_thread(fn, s, name)
             return web.json_response(data, headers={"Cache-Control": "no-store"})
         return handler
 
     app = web.Application()
     app.add_routes([web.get("/", index), web.get("/login", login), web.get("/logout", logout),
-                    web.get("/api/me", api(lambda s: {"name": s[1]})),
-                    web.get("/api/cards", api(lambda s: cards())),
-                    web.get("/api/record", api(lambda s: record_data(s[1]))),
-                    web.get("/api/weekly", api(lambda s: weekly_data(s[1]))),
-                    web.get("/api/bets", api(lambda s: bets_data(s[1]))),
-                    web.get("/api/group", api(lambda s: group_data()))])
+                    web.get("/api/me", api(lambda s, n: {"name": s[1], "owner": bool(len(s) > 3 and s[3]),
+                                                         "avatar": s[4] if len(s) > 4 else ""})),
+                    web.get("/api/cards", api(lambda s, n: cards())),
+                    web.get("/api/record", api(lambda s, n: record_data(n))),
+                    web.get("/api/weekly", api(lambda s, n: weekly_data(n))),
+                    web.get("/api/bets", api(lambda s, n: bets_data(n))),
+                    web.get("/api/group", api(lambda s, n: group_data())),
+                    web.get("/api/members", api(lambda s, n: members_data(), owner_only=True)),
+                    web.get("/api/activity", api(lambda s, n: activity_data(), owner_only=True))])
     return app
 
 

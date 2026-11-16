@@ -293,6 +293,30 @@ def reason_tags(ev, prof=None, limit: int = 2) -> str:
     return " · ".join(t for _s, t in tags[:limit])
 
 
+def pick_stars(ev, prof=None) -> int:
+    """3 to 5: how many independent signals back a pick that already cleared every gate.
+    Signals: the season hit rate at this line beats the price (10+ games), so do the last 10,
+    the sharp books alone beat the price, a matchup / usage / rest reason points its way.
+    5 = edge 8+ points and 3+ signals; 4 = edge 5+ and 2+ signals; else 3. Agreement, not a
+    promise: every pick on a card already has an edge."""
+    s = ev.best
+    signals = 0
+    if prof and prof.season and prof.season.games >= 10 and prof.season.rate > s.best_implied:
+        signals += 1
+    w10 = (prof.recent or {}).get(10) if prof else None
+    if w10 and w10.games >= 8 and w10.rate > s.best_implied:
+        signals += 1
+    if ev.model_weight and sharp_agrees(ev):
+        signals += 1
+    if reason_tags(ev, prof, limit=1):
+        signals += 1
+    if s.gap >= 0.08 and signals >= 3:
+        return 5
+    if s.gap >= 0.05 and signals >= 2:
+        return 4
+    return 3
+
+
 def _board(picks: list, profiles: dict) -> str:
     """Phone-friendly board: two short lines per pick (a fixed-width table wraps on a phone)."""
     from .parlay_format import BOOK_EMOJI, short_label
@@ -305,7 +329,8 @@ def _board(picks: list, profiles: dict) -> str:
                and prof.season.games >= MIN_SEASON_GAMES else "")
         proj = f" · proj {ev.market.mean:.1f}" if ev.market.bet_type == "prop" else ""
         tags = reason_tags(ev, prof)
-        rows.append(f"**{i}.** {sharp}{short_label(s.label)}\n"
+        stars = "⭐" * pick_stars(ev, prof)
+        rows.append(f"**{i}.** {sharp}{short_label(s.label)} {stars}\n"
                     f"\u2003{BOOK_EMOJI.get(s.best_book, '')} {fmt_odds(s.best_odds)} · ours **{_pct(s.blended)}** "
                     f"vs {_pct(s.best_implied)} · gap **{_pts(s.gap)}**{proj}{why}"
                     + (f"\n\u2003{tags}" if tags else ""))
@@ -457,7 +482,7 @@ def scan_messages(sections: list, date: str, cfg, title: str = "") -> list:
                               "projection · season = hit rate at this line" + (
                                   " · ⚡ sharp books agree" if any(sharp_agrees(ev) and ev.model_weight
                                                                   for ev, _s, _p in ranked) else "")
-                              + " · pick one in the menu for the full write-up")
+                              + " · ⭐ = signals agreeing (3-5) · pick one in the menu for the full write-up")
         embeds.append(board)
     messages.append((embeds, {"moneylines": mls, "books": books} if len(mls) >= 2 else None))
 

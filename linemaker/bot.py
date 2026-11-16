@@ -3985,7 +3985,10 @@ class PMLinkModal(discord.ui.Modal):
 @bot.tree.command(name="web", description="Your private link to the web dashboard (picks, line shop, record, bets)")
 async def web_cmd(interaction: discord.Interaction):
     from . import web
-    link = web.login_link(str(interaction.user.id), str(interaction.user)) if web.on() else None
+    from .admin import is_owner
+    owner = await is_owner(bot, interaction.user)
+    avatar = str(getattr(getattr(interaction.user, "display_avatar", None), "url", "") or "")
+    link = web.login_link(str(interaction.user.id), str(interaction.user), owner, avatar) if web.on() else None
     if not link:
         await interaction.response.send_message(
             "🌐 The dashboard isn't reachable yet (it starts a minute after the bot, or it's turned off with "
