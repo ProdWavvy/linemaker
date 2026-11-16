@@ -10,7 +10,6 @@ font:16px/1.5 system-ui,sans-serif;display:flex;min-height:100vh;align-items:cen
 PAGE = r"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <meta name="theme-color" content="#141518"><title>Linemaker</title>
-<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
 <style>
 :root{--bg:#141518;--card:#1e1f24;--card2:#26282e;--line:#ffffff12;--text:#dbdee1;--dim:#8e949c;--gold:#f5c542;--green:#3ddc84;--red:#ff5d5d;--purple:#8b6cff}
 *{box-sizing:border-box}html,body{margin:0;background:var(--bg);color:var(--text);font:15px/1.45 system-ui,-apple-system,"Segoe UI",sans-serif}
@@ -89,7 +88,9 @@ const md=t=>esc(t).replace(/\*\*(.+?)\*\*/g,"<b>$1</b>").replace(/`(.+?)`/g,"<co
 const chip=(b,o,u,good,txt)=>{const t=(txt||((TAGS[key(b)]||b)+(o!=null?" "+odds(o):"")))+(good?" ✅":"");
  return u?`<a class="chip${good?" good":""}" href="${esc(u)}" target="_blank" rel="noopener">${sq(b)}${esc(t)}</a>`:`<span class="chip${good?" good":""}">${sq(b)}${esc(t)}</span>`};
 const api=async p=>{const r=await fetch(p,{credentials:"same-origin"});if(r.status==401){location.href="/";throw 0}if(!r.ok)throw new Error(r.status);return r.json()};
-let ME={},VIEW=null,charts=[],AFTER=[],PICKS={},PM=null;let NEXT=0;
+let ME={},VIEW=null,charts=[],AFTER=[],PICKS={},PM=null;let NEXT=0;let CHART=null;
+const loadChart=()=>CHART||(CHART=new Promise((ok,no)=>{const sc=document.createElement("script");sc.src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js";sc.onload=ok;sc.onerror=no;document.head.appendChild(sc)}));
+const later=(id,f)=>AFTER.push(async()=>{const el=document.getElementById(id);if(!el)return;try{el.innerHTML=await f()}catch(e){el.innerHTML=""}});
 const post=async(p,b)=>{const r=await fetch(p,{method:"POST",credentials:"same-origin",headers:{"Content-Type":"application/json","X-Linemaker":"1"},body:JSON.stringify(b)});
  const d=await r.json().catch(()=>({error:"no answer"}));if(r.status==401){location.href="/";throw 0}if(!r.ok)throw new Error(d.error||r.status);return d};
 const dlg=document.getElementById("dlg");const shut=()=>dlg.close();
@@ -139,30 +140,48 @@ const ufcCard=u=>{const f=(u.fight||[]).map(r=>`<div class="pick"><div class="pt
 const betRow=b=>`<div class="pick"><div class="ptop">${sq(b.book)}<b>${esc(b.what)}</b><span class="pill ${b.status}" style="margin-left:auto">${b.status=="open"?"open":b.status+" "+money(b.profit)}</span></div>
  <div class="meta"><span><b>${odds(b.odds)}</b> ${esc(b.book)}</span><span>$${(b.stake||0).toFixed(2)}</span>${b.pm?"<span>🟧 synced</span>":""}<span>${ago(b.placed)}</span></div></div>`;
 const viewing=()=>VIEW?`<div class="viewing">👁️ Viewing <b>${esc(VIEW)}</b>'s dashboard <button onclick="VIEW=null;show(current)">Back to mine</button></div>`:"";
+function renderCard(c){const list=c.picks.length?c.picks:c.legs;const acc=c.ufc?"#ff5d5d":list.length&&list[0].sport?"var(--gold)":"var(--purple)";
+ return`<div class="card fade" style="--accent:${acc}"><h3>${esc(c.title)}</h3><div class="dim">${ago(c.at)}</div>
+ ${list.map((p,i)=>pickRow(p,i+1)).join("")}${c.ufc?ufcCard(c.ufc):""}${c.parlays.length?`<div class="sec">🎰 Parlays & entries <span class="dim">${c.parlays.length}</span></div>${c.parlays.map(ticket).join("")}`:""}</div>`}
+const hex=n=>n?"#"+n.toString(16).padStart(6,"0"):"var(--gold)";
+function renderEmbed(e){return`<div class="card fade" style="--accent:${hex(e.color)}">${e.title?`<h3>${md(e.title)}</h3>`:""}${e.description?`<div style="margin-top:4px">${md(e.description)}</div>`:""}
+ ${(e.fields||[]).map(f=>`<div style="margin-top:8px"><b>${md(f.name)}</b><div>${md(f.value)}</div></div>`).join("")}${e.footer&&e.footer.text?`<div class="dim" style="margin-top:8px">${md(e.footer.text)}</div>`:""}</div>`}
+let CONVO=[];
+const QUICK=["NBA picks","NBA parlay","UFC props","NHL picks","best props","NFL picks","PrizePicks NBA","live picks"];
+function askView(){return`<div class="card fade" style="--accent:var(--purple)"><h3>💬 Ask the bot</h3><div class="dim">Anything you'd ask in Discord: picks, parlays, a game, a player, UFC props, a line to price.</div>
+ <div style="display:flex;gap:8px;margin-top:10px"><input id="askq" class="inp" style="margin:0" placeholder="e.g. best nba props tonight" onkeydown="if(event.key=='Enter')ask()"><button class="btn go" style="flex:none;padding:10px 16px" onclick="ask()">Ask</button></div>
+ <div>${QUICK.map(t=>`<button class="chip" onclick="ask('${t}')">${t}</button>`).join("")}</div></div><div id="convo">${CONVO.map(convoItem).join("")}</div>`}
+function convoItem(x){const a=x.answer;if(!a)return`<div class="card" style="--accent:#5c6370"><b>🙋 ${esc(x.q)}</b><div class="dim" style="margin-top:6px"><span class="live" style="display:inline-block"></span> working on it… (scans can take a minute)</div></div>`;
+ const own=a.card?renderCard(a.card):"";const emb=(a.embeds||[]).filter((e,i)=>!(a.card&&i>0&&i<(a.embeds||[]).length&&!(e.title||"").startsWith("🔎"))).map(renderEmbed).join("");
+ return`<div class="card" style="--accent:#5c6370"><b>🙋 ${esc(x.q)}</b>${a.text?`<div style="margin-top:6px">${md(a.text)}</div>`:""}${(a.buttons||[]).map(b=>chip("",null,b.url,false,b.label)).join("")}</div>${own}${emb}`}
+async function ask(t){const q=(t||document.getElementById("askq").value||"").trim();if(!q)return;const item={q,answer:null};CONVO.unshift(item);if(CONVO.length>8)CONVO.pop();
+ const box=document.getElementById("convo");if(box)box.innerHTML=CONVO.map(convoItem).join("");const inp=document.getElementById("askq");if(inp)inp.value="";
+ try{const j=await post("/api/ask",{text:q});for(let i=0;i<150;i++){await new Promise(r=>setTimeout(r,2000));const r=await api("/api/ask/"+j.job);if(r.done){item.answer=r.answer;break}}
+  if(!item.answer)item.answer={text:"⏱️ Still working after 5 minutes; check Discord or try again."}}catch(e){item.answer={text:"⚠️ "+(e&&e.message||"couldn't ask")}}
+ if(current=="Ask"){const b=document.getElementById("convo");if(b)b.innerHTML=CONVO.map(convoItem).join("")}}
 async function kpis(){const d=await api(q("/api/record"));let u=d.series.reduce((a,s)=>a+s.units,0);const mine=d.mine.length?d.mine[d.mine.length-1].profit:0;
  return`<div class="kpis"><div class="kpi"><div class="t">Model · 14 days</div><div class="v ${cls(u)}">${u>=0?"+":""}${u.toFixed(1)}u</div><div class="dim">${d.series.reduce((a,s)=>a+s.won,0)}-${d.series.reduce((a,s)=>a+s.lost,0)}</div></div>
  <div class="kpi"><div class="t">Beat the close</div><div class="v">${d.clv.n?pct(d.clv.beat):"–"}</div><div class="dim">${d.clv.n?d.clv.n+" picks":""}</div></div>
  <div class="kpi"><div class="t">${VIEW?esc(VIEW)+"'s":"Your"} bets</div><div class="v ${cls(mine)}">${money(mine)}</div><div class="dim">all time</div></div></div>`}
 const VIEWS={
- "Today":async()=>{const [cs,k]=await Promise.all([api("/api/cards"),kpis()]);
-  if(!cs.length)return k+`<div class="empty">No cards yet today.<br>Ask the bot for picks, parlays or UFC props in Discord.</div>`;
-  return k+cs.map(c=>{const list=c.picks.length?c.picks:c.legs;const acc=c.ufc?"#ff5d5d":list.length&&list[0].sport?"var(--gold)":"var(--purple)";
-   return`<div class="card fade" style="--accent:${acc}"><h3>${esc(c.title)}</h3><div class="dim">${ago(c.at)}</div>
-   ${list.map((p,i)=>pickRow(p,i+1)).join("")}${c.ufc?ufcCard(c.ufc):""}${c.parlays.length?`<div class="sec">🎰 Parlays & entries <span class="dim">${c.parlays.length}</span></div>${c.parlays.map(ticket).join("")}`:""}</div>`}).join("")},
+ "Today":async()=>{const cs=await api("/api/cards");later("kp",kpis);const k='<div id="kp"><div class="kpis"><div class="kpi"><div class="t">Loading numbers…</div><div class="v">·</div></div></div></div>';
+  if(!cs.length)return k+`<div class="empty">No cards yet today.<br>Ask for picks, parlays or UFC props in the 💬 Ask tab or in Discord.</div>`;
+  return k+cs.map(renderCard).join("")},
+ "Ask":async()=>askView(),
  "Line shop":async()=>{const cs=await api("/api/cards");const seen=new Set();const list=cs.flatMap(c=>c.picks.length?c.picks:c.legs).filter(p=>!seen.has(p.label)&&seen.add(p.label));
   if(!list.length)return`<div class="empty">Nothing to compare yet.</div>`;
   const books=[...new Set(list.flatMap(p=>p.books.map(b=>b.book)))].sort((a,b)=>(TAGS[key(a)]?0:1)-(TAGS[key(b)]?0:1)||a.localeCompare(b)).slice(0,8);const dec=o=>o>0?1+o/100:1+100/-o;
   return`<div class="card fade"><h3>🛒 Line shop</h3><div class="dim">Every pick's price, book by book · highlighted = best</div><div class="wrap"><table><tr><th>Pick</th>${books.map(b=>`<th>${sq(b)} ${esc(TAGS[key(b)]||b)}</th>`).join("")}</tr>
   ${list.map(p=>{const m=Object.fromEntries(p.books.map(b=>[b.book,b.odds]));const best=Math.max(...p.books.map(b=>dec(b.odds)));
    return`<tr><td>${SPORT[p.sport]||""} ${esc(p.label)} ${stars(p.stars)}<div class="dim">ours ${pct(p.ours)}</div></td>${books.map(b=>`<td class="${m[b]!=null&&dec(m[b])==best?"best":""}">${odds(m[b])}</td>`).join("")}</tr>`}).join("")}</table></div></div>`},
- "Record":async()=>{const [d,wk,k]=await Promise.all([api(q("/api/record")),api(q("/api/weekly")),kpis()]);let run=0;const cum=d.series.map(s=>(run+=s.units,Math.round(run*100)/100));
+ "Record":async()=>{const [d,k]=await Promise.all([api(q("/api/record")),kpis(),loadChart()]);later("wk",async()=>(await api(q("/api/weekly"))).map(l=>`<p>${md(l)}</p>`).join(""));let run=0;const cum=d.series.map(s=>(run+=s.units,Math.round(run*100)/100));
   AFTER.push(()=>{const ax={x:{ticks:{color:"#8e949c"},grid:{color:"#ffffff08"}},y:{ticks:{color:"#8e949c"},grid:{color:"#ffffff10"}}};
    charts.push(new Chart(document.getElementById("c1"),{data:{labels:d.series.map(s=>s.date.slice(5)),datasets:[
     {type:"bar",label:"Units that day",data:d.series.map(s=>s.units),backgroundColor:d.series.map(s=>s.units>=0?"#3ddc8488":"#ff5d5d88"),borderRadius:4},
     {type:"line",label:"Running",data:cum,borderColor:"#f5c542",backgroundColor:"#f5c542",tension:.3,pointRadius:2}]},
     options:{plugins:{legend:{labels:{color:"#dbdee1"}}},scales:ax}}));
    if(d.mine.length)charts.push(new Chart(document.getElementById("c2"),{type:"line",data:{labels:d.mine.map(s=>s.date.slice(5)),datasets:[{label:(VIEW?VIEW+"'s":"Your")+" bets, $ running",data:d.mine.map(s=>s.profit),borderColor:"#3ddc84",backgroundColor:"#3ddc8422",fill:true,tension:.3}]},options:{plugins:{legend:{labels:{color:"#dbdee1"}}},scales:ax}}))});
-  return viewing()+k+`<canvas id="c1"></canvas>${d.mine.length?'<canvas id="c2"></canvas>':""}<div class="card week fade" style="--accent:var(--purple)"><h3>🗓️ This week</h3>${wk.map(l=>`<p>${md(l)}</p>`).join("")}</div>`},
+  return viewing()+k+`<canvas id="c1"></canvas>${d.mine.length?'<canvas id="c2"></canvas>':""}<div class="card week fade" style="--accent:var(--purple)"><h3>🗓️ This week</h3><div id="wk"><p class="dim">Loading…</p></div></div>`},
  "My bets":async()=>{const d=await api(q("/api/bets"));if(!VIEW)PM=await api("/api/pm");
   const pmPanel=VIEW?"":PM.linked?`<div class="card fade" style="--accent:#F57C00"><h3>🟧 Polymarket linked</h3><div class="dim">Max $${PM.max} per order · your positions sync into your bets every 10 minutes</div>
    <button class="chip" onclick="pmUnlink()">Unlink</button></div>`:
@@ -186,7 +205,7 @@ async function show(name){current=name;document.querySelectorAll("nav button").f
  AFTER=[];try{m.innerHTML=`<div class="fade">${await VIEWS[name]()}</div>`;AFTER.splice(0).forEach(f=>f())}catch(e){if(e)m.innerHTML='<div class="empty">Couldn\'t load this. Try again in a minute.</div>'}}
 api("/api/me").then(d=>{ME=d;document.getElementById("me").innerHTML=(d.avatar?`<img src="${esc(d.avatar)}" alt="">`:ini(d.name))+`<span>${esc(d.name)}</span>`+(d.owner?'<span class="badge">OWNER</span>':"")+(d.guest?'<span class="badge" style="background:#3a6df0">GUEST</span>':"");
  const tabs=Object.keys(VIEWS).filter(n=>n!="Members"||d.owner);
- document.getElementById("tabs").innerHTML=tabs.map(n=>`<button data-v="${n}">${{"Today":"🎯 Today","Line shop":"🛒 Line shop","Record":"📈 Record","My bets":"🎟️ My bets","Group":"🏆 Group","Members":"👥 Members"}[n]}</button>`).join("");
+ document.getElementById("tabs").innerHTML=tabs.map(n=>`<button data-v="${n}">${{"Today":"🎯 Today","Ask":"💬 Ask","Line shop":"🛒 Line shop","Record":"📈 Record","My bets":"🎟️ My bets","Group":"🏆 Group","Members":"👥 Members"}[n]}</button>`).join("");
  document.querySelectorAll("nav button").forEach(b=>b.onclick=()=>show(b.dataset.v));show("Today")});
 setInterval(()=>{if(!document.hidden&&!dlg.open&&(current=="Today"||current=="Members"))show(current)},90000);   // only while you're looking
 </script></body></html>"""

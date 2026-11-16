@@ -36,6 +36,9 @@ _SESSIONS = {}    # sha256(session) -> (user id, name, expires, owner, avatar, g
 LAST_SEEN = {}    # member name -> ISO time they last opened the dashboard
 _CARDS = collections.deque(maxlen=CARDS_KEPT)
 STATE = {"url": None, "proc": None}
+ASK = {"handler": None}   # set by the bot: async (user id, name, text) -> answer dict
+_JOBS = {}                # job id -> {"user", "done", "answer", "at"}
+_ASKS = {}                # (name, date) -> asks today
 _CACHE = {}
 
 
@@ -281,7 +284,7 @@ def record_data(name: str, days: int = 14) -> dict:
             series.append({"date": d, "units": round(pr["units"], 2), "won": pr["won"], "lost": pr["lost"]})
         c = clv_summary(allrecs)
         return {"series": series, "clv": {"n": c["n"], "beat": c.get("beat"), "pts": c.get("avg_prob")}}
-    out = dict(_cached("model", 1800, model))
+    out = dict(_cached("model", 2400, model))
     who = name if per_user_on() else None
     settled = sorted((b for b in load_bets() if mine(b, who) and not b.get("paper") and b.get("status") != "open"
                       and b.get("settled")), key=lambda b: b["settled"])
@@ -413,6 +416,53 @@ def pm_buy(uid: str, name: str, body: dict) -> dict:
     return got
 
 
+def ask_limit(s: tuple) -> Optional[int]:
+    """Asks a day (they spend odds credits): the owner unlimited, members 40, guests 15."""
+    if is_owner(s):
+        return None
+    var, default = ("LINEMAKER_WEB_GUEST_ASKS", "15") if is_guest(s) else ("LINEMAKER_WEB_ASKS", "40")
+    try:
+        return int(os.environ.get(var, default))
+    except ValueError:
+        return int(default)
+
+
+async def start_ask(s: tuple, text: str) -> dict:
+    text = (text or "").strip()[:500]
+    if not text:
+        raise ValueError("type a question")
+    if ASK["handler"] is None:
+        raise ValueError("asking isn't available right now")
+    day = dt.date.today().isoformat()
+    cap, used = ask_limit(s), _ASKS.get((s[1], day), 0)
+    if cap is not None and used >= cap:
+        raise ValueError(f"that's your {cap} asks for today (they use the bot's odds credits); more tomorrow")
+    _ASKS[(s[1], day)] = used + 1
+    for k in [k for k, j in _JOBS.items() if time.time() - j["at"] > 3600]:
+        _JOBS.pop(k, None)
+    jid = secrets.token_urlsafe(12)
+    job = _JOBS[jid] = {"user": s[0], "done": False, "answer": None, "at": time.time()}
+
+    async def run():
+        try:
+            job["answer"] = await ASK["handler"](s[0], s[1], text)
+        except asyncio.TimeoutError:
+            job["answer"] = {"text": "⏱️ That took too long, so I stopped. Try again, or ask something narrower."}
+        except Exception as e:
+            log.warning("web ask failed: %s", type(e).__name__)
+            job["answer"] = {"text": f"⚠️ Something went wrong ({type(e).__name__}). Try again in a minute."}
+        job["done"] = True
+    asyncio.get_running_loop().create_task(run())
+    return {"job": jid, "left": None if cap is None else cap - used - 1}
+
+
+def ask_result(s: tuple, jid: str) -> dict:
+    job = _JOBS.get(jid)
+    if not job or job["user"] != s[0]:
+        raise ValueError("that ask expired")
+    return {"done": job["done"], "answer": job["answer"]}
+
+
 def bets_data(name: str) -> dict:
     from .bets import load_bets, mine, per_user_on
     who = name if per_user_on() else None
@@ -509,7 +559,36 @@ def make_app():
                 return web.json_response({"error": str(e)[:200]}, status=502)
         return handler
 
-    app = web.Application()
+    async def ask(request):
+        s = who(request)
+        if not s:
+            return web.json_response({"error": "signed out"}, status=401)
+        if request.headers.get("X-Linemaker") != "1":
+            return web.json_response({"error": "bad request"}, status=400)
+        try:
+            body = await request.json()
+            return web.json_response(await start_ask(s, str((body or {}).get("text", ""))))
+        except ValueError as e:
+            return web.json_response({"error": str(e)}, status=400)
+
+    async def ask_poll(request):
+        s = who(request)
+        if not s:
+            return web.json_response({"error": "signed out"}, status=401)
+        try:
+            return web.json_response(ask_result(s, request.match_info["jid"]), headers={"Cache-Control": "no-store"})
+        except ValueError as e:
+            return web.json_response({"error": str(e)}, status=404)
+
+    @web.middleware
+    async def gzip(request, handler):   # smaller pages and data over the tunnel
+        resp = await handler(request)
+        if isinstance(resp, web.Response) and resp.body is not None and len(resp.body) > 1024 \
+                and "gzip" in request.headers.get("Accept-Encoding", ""):
+            resp.enable_compression()
+        return resp
+
+    app = web.Application(middlewares=[gzip])
     app.add_routes([web.get("/", index), web.get("/login", login), web.get("/logout", logout),
                     web.get("/api/me", api(lambda s, n: {"name": s[1], "owner": is_owner(s), "guest": is_guest(s),
                                                          "avatar": s[4] if len(s) > 4 else ""})),
@@ -525,7 +604,8 @@ def make_app():
                     web.post("/api/pm/link", action(lambda s, b: pm_link(s[0], s[1], b))),
                     web.post("/api/pm/unlink", action(lambda s, b: {"ok": __import__("linemaker.pm_accounts", fromlist=["x"]).unlink(s[0])})),
                     web.post("/api/pm/quote", action(lambda s, b: pm_quote(s[0], b))),
-                    web.post("/api/pm/buy", action(lambda s, b: pm_buy(s[0], s[1], b)))])
+                    web.post("/api/pm/buy", action(lambda s, b: pm_buy(s[0], s[1], b))),
+                    web.post("/api/ask", ask), web.get("/api/ask/{jid}", ask_poll)])
     return app
 
 
@@ -538,6 +618,7 @@ async def start() -> None:
     await runner.setup()
     await web.TCPSite(runner, "127.0.0.1", port()).start()
     log.info("web dashboard on 127.0.0.1:%d", port())
+    asyncio.get_running_loop().create_task(_warm())
     if os.environ.get("LINEMAKER_WEB_URL") or os.environ.get("LINEMAKER_WEB_TUNNEL", "quick").lower() == "off":
         return
     try:
@@ -547,6 +628,22 @@ async def start() -> None:
         await _tunnel()
     except Exception as e:
         log.warning("web tunnel not started: %s", e)
+
+
+async def _warm() -> None:
+    """Rebuild the record numbers in the background (at start, then every 20 minutes while
+    someone used the site in the last 2 hours), so the page never waits on them."""
+    await asyncio.sleep(90)
+    while True:
+        recent = any(v >= (dt.datetime.now() - dt.timedelta(hours=2)).isoformat(timespec="minutes")
+                     for v in LAST_SEEN.values())
+        if recent or "model" not in _CACHE:
+            try:
+                _CACHE.pop("model", None)
+                await asyncio.to_thread(record_data, "")
+            except Exception as e:
+                log.warning("web warm-up: %s", e)
+        await asyncio.sleep(20 * 60)
 
 
 def _ngrok_bin() -> str:

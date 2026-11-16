@@ -129,3 +129,30 @@ class WebTest(unittest.IsolatedAsyncioTestCase):
             b = bets.load_bets()[-1]
             self.assertEqual((b["user"], b["stake"], b["source"]), ("Cousin Mike", 12.0, "web"))
             self.assertNotIn("evil", b["legs"][0])                                   # only bet fields are kept
+
+    async def test_ask_runs_in_the_background_with_a_daily_cap(self):
+        import asyncio
+        with tempfile.TemporaryDirectory() as d, mock.patch.dict(os.environ, {"LINEMAKER_CACHE_DIR": d, "LINEMAKER_TRACKING_DIR": d,
+                                                                              "LINEMAKER_WEB_URL": "https://dash.test",
+                                                                              "LINEMAKER_SECRETS_DIR": os.path.join(d, "s"),
+                                                                              "LINEMAKER_WEB_GUEST_ASKS": "1"}):
+            async def fake(uid, name, text):
+                await asyncio.sleep(0.05)
+                return {"text": f"answer for {name}: {text}"}
+            web.ASK["handler"] = fake
+            web._ASKS.clear()
+            sid = web.redeem(web.invite_link("Pal").split("t=", 1)[1])
+            async with TestClient(TestServer(web.make_app())) as c:
+                h = {"Cookie": f"lm_session={sid}", "X-Linemaker": "1"}
+                j = await (await c.post("/api/ask", json={"text": "nba picks"}, headers=h)).json()
+                self.assertEqual(j["left"], 0)
+                for _ in range(40):
+                    r = await (await c.get(f"/api/ask/{j['job']}", headers=h)).json()
+                    if r["done"]:
+                        break
+                    await asyncio.sleep(0.02)
+                self.assertEqual(r["answer"]["text"], "answer for Pal: nba picks")
+                capped = await c.post("/api/ask", json={"text": "again"}, headers=h)
+                self.assertEqual(capped.status, 400)                                     # guests: the daily cap
+                self.assertIn("asks for today", (await capped.json())["error"])
+            web.ASK["handler"] = None

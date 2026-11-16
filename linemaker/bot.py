@@ -2021,7 +2021,9 @@ class LinemakerBot(discord.Client):
 
     async def setup_hook(self):
         try:   # private web dashboard (127.0.0.1 + its own HTTPS tunnel): never holds up the bot
+            from . import web as _web
             from .web import start as web_start
+            _web.ASK["handler"] = web_ask   # the Ask tab: the same chat as Discord
             asyncio.get_running_loop().create_task(web_start())
         except Exception as e:
             log.warning("web dashboard not started: %s", e)
@@ -3975,6 +3977,38 @@ class PMLinkModal(discord.ui.Modal):
             "Polymarket get a **Buy on Polymarket** button (always with a confirm step). "
             f"Max per order: ${pm_accounts.max_stake(str(interaction.user.id)):g} (`/polymarket maxbet` to lower it). "
             "`/polymarket unlink` removes the key.", ephemeral=True)
+
+
+async def web_ask(uid: str, name: str, text: str) -> dict:
+    """The website's Ask tab: the same chat as Discord, answered as data the page draws. A card
+    with picks / parlays / UFC props also comes back as the interactive card (Log, Buy, links)."""
+    from . import web
+    from .bets import CURRENT_USER
+    from .busy import busy
+    if bot.chat is None:
+        return {"text": "Chat isn't set up on the bot (no AI provider configured)."}
+    CURRENT_USER.set(name)   # "your open bets" = whoever asked
+    before = (web.cards() or [{}])[0].get("at")
+    with busy():
+        turn = await asyncio.wait_for(bot.chat.respond(f"web:{uid}", name, text), timeout=CHAT_TIMEOUT)
+    out = {"text": "", "embeds": [], "card": None, "buttons": []}
+    if turn.text == "HELP" and not turn.results:
+        from .dashboard import help_embed
+        out["embeds"].append(help_embed().to_dict())
+    else:
+        out["text"] = turn.text or ""
+    cards = await asyncio.to_thread(cards_for, turn.results)
+    if cards:
+        msgs = cards if isinstance(cards[0], tuple) else [(cards, None)]
+        embeds = (compact_card(msgs)[0] if any(d is not None for _e, d in msgs)
+                  else [e for group, _d in msgs for e in group])
+        out["embeds"] += [e.to_dict() for e in embeds]
+    out["embeds"] += [e.to_dict() for e in (turn.embeds or [])]
+    out["buttons"] = [{"label": l, "url": u} for l, u in (turn.buttons or []) if u]
+    top = (web.cards() or [{}])[0]
+    if top.get("at") and top.get("at") != before:
+        out["card"] = top
+    return out
 
 
 @bot.tree.command(name="web", description="Your private link to the web dashboard (picks, line shop, record, bets)")
