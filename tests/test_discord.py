@@ -171,11 +171,12 @@ class ScanFormatTest(unittest.TestCase):
         self.assertIn("📊 The Board, Ranked by Probability Gap", titles)
         self.assertNotIn("🧠 How to Think About These Long-Term", titles)   # lives in /tips now
         self.assertIn("📌 Staking Note", titles)
-        self.assertIn("⚠️ Scoping & Data Notes", titles)
+        self.assertIn("🔎 Behind the Scan", titles)
         self.assertFalse(any("Bench Guy" in (t or "") for t in titles))
         notes = embeds[-1].description
-        self.assertIn("Bench Guy Under 3.5 assists", notes)
-        self.assertIn("excluded on data grounds", notes)
+        self.assertIn("Bench Guy u3.5 assists", notes)
+        self.assertIn("Season rate says no", notes)
+        self.assertNotIn("Sources:", notes)                               # boilerplate lives in How These Were Picked
         star_card = next(e for e in embeds if "Star Guard" in (e.title or ""))
         body = star_card.description
         for piece in ("Implied 52.4% → Estimated", "Over the last 80 games, Guard has cleared 22.5 "
@@ -278,12 +279,14 @@ class SlateNotesTest(unittest.TestCase):
         res.slate = [("Road @ Home", "2026-10-21T23:30:00Z"), ("A @ B", "2026-10-22T00:00:00Z"),
                      ("Early @ Game", "2020-01-01T00:00:00Z"), ("Late @ Game", "2099-01-01T00:00:00Z")]
         embeds = scan_embeds([("NBA", res, {})], "2026-10-21", ProConfig(track=False))
-        self.assertIn("NBA (4 games on the slate, 2 with props I could price)", embeds[0].description)
+        self.assertIn("😶 **Nothing cleared** · NBA · 4 games (2 with props priced)", embeds[0].description)
+        self.assertNotIn("No plays are forced", embeds[0].description)
         notes = embeds[-1].description
-        self.assertIn("no priceable props yet (1):** Late @ Game", notes)
-        self.assertIn("already started (1):** Early @ Game", notes)
-        self.assertIn("1 the best price didn't beat our estimate", notes)
-        self.assertIn("1 price outside your odds window", notes)
+        self.assertIn("⏳ **Not priced yet:** Late @ Game", notes)
+        self.assertIn("🔴 **Started:** Early @ Game", notes)
+        self.assertIn("1 price didn't beat ours", notes)
+        self.assertIn("1 outside your odds window", notes)
+        self.assertNotIn("market agreed** were passed", notes)
 
 
 @unittest.skipIf(discord is None, "discord.py not installed")
@@ -298,6 +301,5 @@ class ClosestMissesTest(unittest.TestCase):
                         bet_books=("FanDuel", "DraftKings"))
         res = run_pro(rows_to_markets(rows), "2026-10-21", cfg)
         notes = scan_embeds([("NBA", res, {})], "2026-10-21", cfg)[-1].description
-        self.assertIn("closest misses", notes)
-        self.assertIn("Near Miss Over 20.5 points -110", notes)
-        self.assertIn("outside window", notes)
+        self.assertIn("🎯 **Closest misses**", notes)
+        self.assertIn("Near Miss o20.5 points -110 FD · 58.8% vs 52.4% → outside your odds window", notes)

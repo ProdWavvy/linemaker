@@ -318,10 +318,8 @@ def props_lines(date: str) -> tuple:
 
 TYPED_TIP = ("Strike / takedown lines: post a screenshot of the DraftKings / FanDuel props page, or type "
              "the line, e.g. `hokit over 45.5 sig strikes -115` or `hokit over 60.5 total strikes -120`.")
-STAT_FOOTER = ("Strike / takedown lines: our chance = 30% model + 70% the books' consensus (a pick'em line "
-               "counts as the 50/50 point); untested model, heed the ⚠️ flags. FD / DK / PP / UD = where it's "
-               "posted, ✅ = worth it there · \"open the fight\" = no FanDuel / DraftKings price for this line in the "
-               "feed: the button opens the fight there to check.")
+STAT_FOOTER = ("Untested strike model: heed the ⚠️ flags · ✅ = worth it at that book · \"open the fight\" = "
+               "no FD/DK price in the feed, the button opens the fight")
 FOOTER = ("Our chance = 30% model + 70% Kalshi (round props 15% model). Worth it at = the price at "
           "FanDuel / DraftKings (or Kalshi) that's +2% EV: take anything better. Fights under way are "
           "left out.")
@@ -758,14 +756,14 @@ def props_card(date: str) -> tuple:
     red = 0xE74C3C
     n_plays = len(plays) + len(strike_plays)
     head = [f"**{n_plays} play{'s' if n_plays != 1 else ''}** · {len(priced)} fights priced"
-            + (f" · {seen} strike / takedown lines checked" if seen else ""),
-            "Fight props vs Kalshi · strike & takedown lines from the books PropLine carries"]
+            + (f" · {seen} strike / takedown lines checked" if seen else "")]
     if not priced:
         head.append("No fight props to price: Kalshi has no open markets for the next card yet, or every fight "
                     "has started.")
     header = discord.Embed(title=f"🥊 UFC Props · {_day(day)}", color=GOLD if n_plays else GREY,
                            description="\n".join(head))
-    header.set_footer(text="Prices read just now · fights under way are left out")
+    header.set_footer(text="Prices read just now · fights under way are left out · our chance = 30% model + "
+                           "70% market · every play is graded in the morning report")
     out = [header]
     groups = []   # each play's buttons
     labels = sorted({f["fight"] for f, _p in plays} | {" vs ".join(r["prop"]["fight"]) for r in strike_plays})
@@ -800,9 +798,7 @@ def props_card(date: str) -> tuple:
             e = discord.Embed(title=f"{emoji} 🎯 Fight Props · best at {BOOK_NAME.get(tag, book)}", color=colour,
                               description="\n".join(by_book[book])[:4096])
             out.append(e)
-        out[-1].set_footer(text="Grouped by where each play pays most · bold % = our chance · bet at = the price "
-                                "that's +2% EV · 🟦 FanDuel 🟩 DraftKings 🟧 Polymarket 🟢 Kalshi, ✅ = worth it "
-                                "there · buttons load the slip (Polymarket: the market)")
+        out[-1].set_footer(text="Bold % = our chance · bet at = +2% EV price · ✅ = worth it at that book")
     elif priced:
         out.append(discord.Embed(title="🎯 Fight Props", color=GREY,
                                  description="No fight prop is 3+ points better than Kalshi's price right now."))
@@ -843,14 +839,6 @@ def props_card(date: str) -> tuple:
                                if seen else TYPED_TIP if not propline.on() else
                                "No strike / takedown lines posted for this card yet.")
         out.append(discord.Embed(title="🥊 Strike & Takedown Lines", color=GREY, description=note))
-    how = discord.Embed(title="📖 How These Are Priced", color=GREY, description=(
-        "Fight props: our chance = 30% model + 70% Kalshi (round props 15% model). The model: the market-anchored "
-        "win chance x each fighter's finish rate and KO share, tested on 5,461 UFC fights with method odds.\n"
-        "Strike / takedown lines: 30% model + 70% the books' consensus (a pick'em line is the 50/50 point); "
-        "total strikes = projected sig strikes x the fighter's own total-to-sig ratio on ESPN. Untested model, "
-        "heed the ⚠️ flags.\nEvery prop shown is logged and graded in the morning report. "
-        "Typed lines and screenshots work too: `hokit over 45.5 sig strikes -115`."))
-    out.append(how)
     text = (f"UFC props {day}: {n_plays} plays ("
             + "; ".join(f"{p['label']} {p['chance']:.0%}" for _f, p in plays[:5]) + ")")
     return out, text, fair_buttons(groups)

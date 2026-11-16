@@ -139,7 +139,9 @@ class CompactCardTest(unittest.TestCase):
         async def build():
             return bot.compact_card(messages)
         embeds, view = asyncio.run(build())
-        self.assertTrue(any("Scoping" in (e.title or "") for e in embeds))
+        self.assertTrue(any("Behind the Scan" in (e.title or "") for e in embeds))
+        self.assertFalse(any((e.title or "").startswith("📖") for e in embeds))   # the explainer stays in 📂 More
+        self.assertTrue(any(c for c in view.children if "More" in str(getattr(c, "label", ""))))
 
 
 if __name__ == "__main__":

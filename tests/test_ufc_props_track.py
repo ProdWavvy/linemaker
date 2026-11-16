@@ -100,7 +100,7 @@ class CardTest(unittest.TestCase):
         self.assertTrue(titles[0].startswith("🥊 UFC Props"))
         self.assertEqual(titles[1], "🟢 🎯 Fight Props · best at Kalshi")   # no book price: Kalshi's colour
         self.assertEqual(embeds[1].colour.value, 0x00B386)
-        self.assertIn("📖 How These Are Priced", titles)
+        self.assertNotIn("📖 How These Are Priced", titles)          # no explainer after every ask
         self.assertIn("Doesn't go the distance · **44%**", embeds[1].description)
         self.assertIn("bet at **+132**+", embeds[1].description)
         self.assertEqual(buttons, [])                                # no PropLine key: no book prices

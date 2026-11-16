@@ -980,7 +980,7 @@ def news_note(sport: str, date: str, games: set) -> str:
     hits = [e for e in news_today(sport, date) if norm(e["game"]) in games]
     if not hits:
         return ""
-    return "🩹 **News today, already in these numbers:** " + " · ".join(
+    return "🩹 **News (already in the numbers):** " + " · ".join(
         f"{e['what']} ({e['game']})" for e in hits[:6])
 
 

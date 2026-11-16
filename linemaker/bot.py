@@ -751,9 +751,12 @@ def compact_card(messages: list, budget: Optional[int] = None, max_boxes: Option
     shown = parlay_boxes[:max_boxes] + [p[0] for p in parlays if "parlays" not in p[1]]
     hidden = len(parlay_boxes) - min(len(parlay_boxes), max_boxes)
     embeds = [e for e in [header] + boards + shown if e is not None][:10]
-    if not picks and not parlays:        # nothing cleared: the notes are the answer
-        embeds += notes[:10 - len(embeds)]
-        notes = []
+    if not picks and not parlays:        # nothing cleared: the notes are the answer (explainers stay in More)
+        explain = ("📖", "🧠", "📌")
+        facts = [n for n in notes if not (n.title or "").startswith(explain)]
+        room = 10 - len(embeds)
+        embeds += facts[:room]
+        notes = [n for n in notes if (n.title or "").startswith(explain)] + facts[room:]
     if header is not None:
         over = sum(_embed_len(e) for e in embeds) - budget
         if over > 0:

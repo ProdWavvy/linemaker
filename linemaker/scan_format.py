@@ -307,9 +307,9 @@ def scan_messages(sections: list, date: str, cfg, title: str = "") -> list:
     def _scope(sp, res):
         n = len(res.slate) or res.games
         if res.slate and res.games < n:
-            return (f"{SPORT_NAMES.get(sp, sp)} ({n} game{'s' if n != 1 else ''} on the slate, "
-                    f"{res.games} with {_what(res)} I could price)")
-        return f"{SPORT_NAMES.get(sp, sp)} ({n} game{'s' if n != 1 else ''})"
+            return (f"{SPORT_NAMES.get(sp, sp)} · {n} game{'s' if n != 1 else ''} "
+                    f"({res.games} with {_what(res)} priced)")
+        return f"{SPORT_NAMES.get(sp, sp)} · {n} game{'s' if n != 1 else ''}"
     scanned = ", ".join(_scope(sp, res) for sp, res, _p in sections)
     live = all(getattr(res, "kind", "") == "live" for _s, res, _p in sections)
     only = books_of([res for _s, res, _p in sections])
@@ -366,16 +366,13 @@ def scan_messages(sections: list, date: str, cfg, title: str = "") -> list:
         where = f" The softest prices cluster in {', '.join(top)}." if top else ""
         intro.append(f"Below are the **{len(ranked)} plays** that clear every gate: "
                      + "; ".join(gates) + "." + where)
-    else:
-        intro.append("**Nothing cleared every gate today.** No plays are forced.")
+    intro.append(SOURCES)
     news = [n for n in (getattr(res, "news_note", "") for _s, res, _p in sections) if n]
-    # The card leads with the result; how it was built sits behind More → Notes.
-    short = [f"**{len(ranked)} play{'s' if len(ranked) != 1 else ''}** cleared every gate · {scanned}"
-             if ranked else f"**Nothing cleared every gate** · {scanned}. No plays are forced."]
-    if live_props:
-        short.append("🔴 Live props, games in progress: check the line in the app first")
-    elif live:
-        short.append("🔴 Live, games in progress: prices move fast")
+    # The card leads with the result; how it was built sits behind 📂 More → Notes.
+    short = [f"**{len(ranked)} play{'s' if len(ranked) != 1 else ''}** · {scanned}"
+             if ranked else f"😶 **Nothing cleared** · {scanned}"]
+    if live:
+        short.append("🔴 Live: check the line in the app before betting")
     if market:
         short.append("⚡ FanDuel/DraftKings prices still beating the sharp books: move fast")
     header = discord.Embed(title=f"🎯 {title} · {_day(date)}",
@@ -475,7 +472,7 @@ PASS_GROUPS = (   # pass reason prefix -> plain-English label for the summary
 )
 
 
-def _pass_summary(res) -> str:
+def _pass_summary(res, short: bool = False) -> str:
     counts = {}
     for _lbl, reason in res.passes:
         label = next((lbl for prefix, lbl in PASS_GROUPS if reason.startswith(prefix)), None)
@@ -486,10 +483,12 @@ def _pass_summary(res) -> str:
         counts["season hit rate contradicted the price"] = vetoes
     if not counts:
         return ""
+    if short:
+        return " · ".join(f"{n} {SHORT_PASS.get(lbl, lbl)}" for lbl, n in sorted(counts.items(), key=lambda kv: -kv[1]))
     return ", ".join(f"{n} {lbl}" for lbl, n in sorted(counts.items(), key=lambda kv: -kv[1]))
 
 
-def _closest_misses(res, n: int = 5) -> list:
+def _closest_misses(res, n: int = 5, short: bool = False) -> list:
     """The best-looking markets that didn't make the board, with the gate each one failed."""
     reasons = {}
     for lbl, reason in res.passes:
@@ -506,8 +505,14 @@ def _closest_misses(res, n: int = 5) -> list:
             why = f"season hit rate {_pct(w.rate)} over {w.games} games"
         else:
             why = reasons.get(s.label) or reasons.get(ev.market.side_label("A"), "didn't clear a gate")
-        rows.append(f"• {s.label} {fmt_odds(s.best_odds)} ({s.best_book}): ours {_pct(s.blended)} vs "
-                    f"{_pct(s.best_implied)} implied, gap {_pts(s.gap)} → {why}")
+        if short:
+            from .discord_format import BOOK_TAGS
+            from .parlay_format import short_label
+            rows.append(f"• {short_label(s.label)} {fmt_odds(s.best_odds)} {BOOK_TAGS.get(s.best_book, s.best_book)} · "
+                        f"{_pct(s.blended)} vs {_pct(s.best_implied)} → {_short_reason(why)}")
+        else:
+            rows.append(f"• {s.label} {fmt_odds(s.best_odds)} ({s.best_book}): ours {_pct(s.blended)} vs "
+                        f"{_pct(s.best_implied)} implied, gap {_pts(s.gap)} → {why}")
         if len(rows) == n:
             break
     return rows
@@ -550,60 +555,86 @@ def odds_age_note(sections: list) -> str:
             "to update · the Bet buttons always open the live price")
 
 
+SOURCES = ("**Sources:** FantasyPros consensus projections, The Odds API and PropLine prices, ESPN game "
+           "logs and team averages (unofficial feed), Kalshi market prices, and the bot's own price history "
+           "for line movement. Pace and defensive ratings are estimates from ESPN team averages.")
+SHORT_PASS = {   # PASS_GROUPS wording -> the notes' short form
+    "the market already agreed with the projection": "market agreed",
+    "the best price didn't beat our estimate": "price didn't beat ours",
+    "price outside your odds window": "outside your odds window",
+    "estimate below your probability floor": "below your % floor",
+    "expected return below your EV floor": "below your EV floor",
+    "gap too large to trust": "gap too big to trust",
+    "no FanDuel/DraftKings price": "no FD/DK price",
+    "player ruled out": "ruled out",
+    "qualified but outside the top plays": "outside the top plays",
+    "a better line on the same player-stat is already on the board": "better line already shown",
+    "season hit rate contradicted the price": "season rate disagreed",
+}
+
+
+def _short_reason(why: str) -> str:
+    """A pass reason in a few words, for the closest misses."""
+    import re
+    w = why.lower()
+    m = re.search(r"sharp market rates it ([\d.]+) pts? worse", w)
+    if m:
+        return f"sharp books {m.group(1)} pts worse"
+    for prefix, short in (("odds ", "outside your odds window"), ("no gap", "price doesn't beat ours"),
+                          ("market caught up", "market already agrees"), ("blended", "below your % floor"),
+                          ("no bettable price", "no FD/DK price"), ("injury status", "ruled out")):
+        if w.startswith(prefix):
+            return short
+    if "paused" in w:
+        return "market paused"
+    return why if len(why) <= 60 else why[:57] + "…"
+
+
 def _scoping(sections: list) -> discord.Embed:
+    """🔎 Behind the Scan: what wasn't priced, why markets missed, the closest misses."""
+    from .discord_format import BOOK_TAGS
+    from .parlay_format import short_label
     lines = []
+    multi = len(sections) > 1
     for sport, res, _p in sections:
         name = SPORT_NAMES.get(sport, sport)
+        tag = f"{name} · " if multi else ""
         if getattr(res, "source_warning", None):
             lines.append(f"🚨 **{name}: {res.source_warning}**")
         if res.slate:
             started, waiting = _missing_games(res)
+            live = _what(res) == "live lines"
             if waiting:
-                why = ("these games aren't in progress yet, or are in their last few minutes "
-                       "(the live model sits those out)." if _what(res) == "live lines" else
-                       "the game model had no ESPN ratings for a team, or FanDuel/DraftKings "
-                       "haven't posted the line yet." if _what(res) == "lines" else
-                       "FanDuel/DraftKings often post player props a few hours before tip-off, "
-                       "or no projection matched a posted line. Ask again closer to game time.")
-                lines.append(f"**{name}, no priceable {_what(res)} yet ({len(waiting)}):** "
-                             + "; ".join(waiting[:8]) + ". " + why)
+                why = ("not in progress yet" if live else "no line or rating yet" if _what(res) == "lines"
+                       else "props post a few hours before tip")
+                lines.append(f"⏳ **{tag}Not priced yet:** " + "; ".join(waiting[:6])
+                             + (f" +{len(waiting) - 6}" if len(waiting) > 6 else "") + f" ({why})")
             if started:
-                lines.append(f"**{name}, already started ({len(started)}):** " + "; ".join(started[:8])
-                             + f". Pre-game {_what(res)} are off the board once a game tips.")
-        summary = _pass_summary(res)
+                lines.append((f"⏸️ **{tag}In progress, not priced:** " if live else f"🔴 **{tag}Started:** ")
+                             + "; ".join(started[:6]) + (f" +{len(started) - 6}" if len(started) > 6 else ""))
+        summary = _pass_summary(res, short=True)
         if summary:
-            lines.append(f"**{name}, {len(res.evaluated)} markets priced. Why they didn't make "
-                         f"the board:** {summary}.")
-        misses = _closest_misses(res)
+            lines.append(f"📊 **{tag}{len(res.evaluated)} priced:** {summary}")
+        misses = _closest_misses(res, short=True)
         if misses:
-            lines.append(f"**{name}, closest misses:**\n" + "\n".join(misses))
+            lines.append(f"🎯 **{tag}Closest misses**\n" + "\n".join(misses))
         vetoes = getattr(res, "hit_vetoes", [])
         if vetoes:
-            items = [f"{ev.best.label} (season rate {_pct(w.rate)} over {w.games} games vs "
-                     f"{_pct(ev.best.best_implied)} implied)" for ev, w in vetoes[:5]]
-            lines.append(f"**{name}, excluded on data grounds:** " + "; ".join(items) + ".")
+            items = [f"{short_label(ev.best.label)} ({_pct(w.rate)} over {w.games} games vs "
+                     f"{_pct(ev.best.best_implied)})" for ev, w in vetoes[:5]]
+            lines.append(f"🚫 **{tag}Season rate says no:** " + "; ".join(items))
         outs = sorted({lbl.split(" Over ")[0].split(" Under ")[0] for lbl, r in res.passes
                        if r.startswith("injury status")})
         if outs:
-            lines.append(f"**{name}, ruled out:** " + ", ".join(outs[:8])
-                         + (" and others." if len(outs) > 8 else "."))
-        wide = [lbl for lbl, r in res.passes if "too large to trust" in r]
+            lines.append(f"🩹 **{tag}Ruled out:** " + ", ".join(outs[:8]) + (" +more" if len(outs) > 8 else ""))
+        wide = [short_label(lbl) for lbl, r in res.passes if "too large to trust" in r]
         if wide:
-            lines.append(f"**{name}, gap too large to trust:** " + "; ".join(wide[:5])
-                         + ". Edges this big against a sharp market usually mean stale data; "
-                         "check injuries and the line before betting them.")
-        caught = [(lbl, r) for lbl, r in res.passes if r.startswith("market caught up")]
-        if caught:
-            lines.append(f"**{name}:** {len(caught)} markets where the projection and the market "
-                         "already agree were passed.")
+            lines.append(f"⚠️ **{tag}Gap too big to trust:** " + "; ".join(wide[:5])
+                         + " (usually stale data: check injuries and the line)")
         if not res.evaluated:
-            lines.append(f"**{name}:** no priced markets with a projection today.")
-    lines.append("**Sources:** FantasyPros consensus projections, The Odds API prices, ESPN game "
-                 "logs and team averages (unofficial feed), Kalshi market prices, and the bot's own "
-                 "price history for line movement. Pace and defensive ratings are estimates from "
-                 "ESPN team averages. Sharp-money splits and defense-versus-position aren't in these "
-                 "sources, so they aren't claimed.")
-    return discord.Embed(title="⚠️ Scoping & Data Notes", description=_clip("\n\n".join(lines), 4096),
+            lines.append(f"**{tag}**No priced markets with a projection today." if multi
+                         else "No priced markets with a projection today.")
+    return discord.Embed(title="🔎 Behind the Scan", description=_clip("\n\n".join(lines) or "Nothing to add.", 4096),
                          color=RED)
 
 
