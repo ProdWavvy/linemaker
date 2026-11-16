@@ -760,18 +760,22 @@ def compact_card(messages: list, budget: Optional[int] = None, max_boxes: Option
             _clip_embed(header, max(len(header.description or "") - over, 300))
     boxes = {id(e) for e in parlay_boxes}
     while len(embeds) > 1 and sum(_embed_len(e) for e in embeds) > budget:
-        last = embeds.pop()                  # still too long: parlays to the menu, the rest behind Notes
+        last = embeds.pop()                  # still too long: parlays to the next message, the rest behind Notes
         if id(last) in boxes:
             hidden += 1
         else:
             notes.insert(0, last)
+    on_card = {id(e) for e in embeds}
+    more = [e for e in parlay_boxes if id(e) not in on_card]   # posted right under the card
     if hidden and header is not None and "more parlay" not in (header.description or ""):
         header.description = (header.description or "") + (
-            f"\n\n🧾 **{hidden} more parlay{'s' if hidden != 1 else ''}** in the parlay menu below.")
+            f"\n\n🧾 **{hidden} more parlay{'s' if hidden != 1 else ''}** right below this card "
+            "(bet any of them from the parlay menu).")
         over = sum(_embed_len(e) for e in embeds) - budget
         if over > 0:
             _clip_embed(header, max(len(header.description or "") - over, 300))
     view = CompactView(picks, parlays, notes, legs, mls, books, market_key, fresh_key)
+    view.more_boxes = more
     return embeds, view
 
 
@@ -849,6 +853,7 @@ class CompactView(discord.ui.View):
                         seen.add(id(ev))
                         board["pool"].append(ev)
             bkey = _remember(board)
+            self.board_key = bkey
             for d in boxes:
                 d["board"] = bkey
         auto = [(_remember(d), d) for d in boxes]
@@ -1280,14 +1285,18 @@ async def update_card(key: str):
     ref = d.get("card_msg")
     if not ref:
         return
-    try:
-        channel = bot.get_channel(ref[0]) or await bot.fetch_channel(ref[0])
-        msg = await channel.fetch_message(ref[1])
-        view = discord.ui.View.from_message(msg, timeout=None)
-        card_menu(key, view)
-        await msg.edit(embeds=card_boxes(key, msg.embeds), view=view)
-    except Exception as e:
-        log.warning("couldn't redraw the card: %s", e)
+    for i, r in enumerate([ref] + list(d.get("card_more") or [])):   # the card, then the boxes under it
+        try:
+            channel = bot.get_channel(r[0]) or await bot.fetch_channel(r[0])
+            msg = await channel.fetch_message(r[1])
+            if i == 0:
+                view = discord.ui.View.from_message(msg, timeout=None)
+                card_menu(key, view)
+                await msg.edit(embeds=card_boxes(key, msg.embeds), view=view)
+            else:
+                await msg.edit(embeds=card_boxes(key, msg.embeds))
+        except Exception as e:
+            log.warning("couldn't redraw the card%s: %s", "" if i == 0 else f" (more parlays {i})", e)
 
 
 def log_parlay(p, user: str) -> tuple:
@@ -1741,6 +1750,26 @@ def _slip_tap(key: str, mask: str, page: str, action: str, boost: str = "0"):
     return callback
 
 
+async def _send_more_boxes(send, view) -> None:
+    """The parlays that didn't fit on the card (one Discord message holds 10 embeds / 6,000
+    characters), as boxes in the messages right under it. Their places are kept on the card's
+    board, so a bet from the card redraws them too (update_card)."""
+    more = getattr(view, "more_boxes", None) or []
+    refs = []
+    for group in chunk_embeds(more):
+        try:
+            msg = await send(embeds=group)
+        except discord.HTTPException as e:
+            log.warning("more parlay boxes not sent: %s", e)
+            break
+        channel = getattr(getattr(msg, "channel", None), "id", None) or getattr(msg, "channel_id", None)
+        if channel and getattr(msg, "id", None):
+            refs.append((channel, msg.id))
+    bkey = getattr(view, "board_key", None)
+    if refs and bkey in PICK_DETAILS:
+        PICK_DETAILS[bkey]["card_more"] = refs
+
+
 async def _send_card(send, messages: list, markdown=None, filename=None, text: str = "",
                      market_key: Optional[str] = None, fresh_key: Optional[str] = None):
     """Post a value scan. Compact (default): one message with a pick dropdown. Full: header
@@ -1754,11 +1783,13 @@ async def _send_card(send, messages: list, markdown=None, filename=None, text: s
         embeds, view = build()
         try:
             await send(content=text[:2000] or None, embeds=embeds, view=view)
+            await _send_more_boxes(send, view)
         except discord.HTTPException as e:
             log.error("sending the card failed (%s): %s; retrying a slimmer card", e.status, str(e)[:500])
-            try:   # too big together with the buttons: fewer boxes (the rest are in the menus)
+            try:   # too big together with the buttons: fewer boxes (the rest go in the next messages)
                 embeds, view = build(budget=3000, max_boxes=3)
                 await send(content=text[:2000] or None, embeds=embeds, view=view)
+                await _send_more_boxes(send, view)
             except discord.HTTPException as e2:
                 # Still refused: the card itself without the buttons rather than nothing.
                 log.error("slim card refused too (%s): %s", e2.status, str(e2)[:500])

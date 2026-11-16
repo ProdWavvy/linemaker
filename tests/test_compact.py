@@ -686,10 +686,33 @@ class CardSizeTest(unittest.TestCase):
             if calls[0] == 1:
                 raise TooLarge()
             sent.append(kw)
-        asyncio.run(bot._send_card(send, self._messages()))
-        self.assertEqual(len(sent), 1)
+        messages = self._messages()
+        n_parlays = sum(len(d["parlays"]) for _e, d in messages if d and "parlays" in d)
+        asyncio.run(bot._send_card(send, messages))
         self.assertIsNotNone(sent[0].get("view"))                     # buttons kept on the retry
         self.assertLessEqual(sum(1 for e in sent[0]["embeds"] if (e.title or "").startswith("#")), 3)
+        boxes = [e.title for m in sent for e in m["embeds"] if (e.title or "").startswith("#")]
+        self.assertEqual(len(boxes), n_parlays)                        # every parlay shows: the rest right below
+        self.assertTrue(all(m.get("view") is None for m in sent[1:]))
+        self.assertTrue(all(len(m["embeds"]) <= 10 for m in sent))
+
+    def test_every_parlay_shows_and_the_extra_boxes_redraw(self):
+        from types import SimpleNamespace
+        from linemaker import bot
+        sent = []
+
+        async def send(**kw):
+            sent.append(kw)
+            return SimpleNamespace(id=100 + len(sent), channel=SimpleNamespace(id=7))
+        messages = self._messages()
+        n_parlays = sum(len(d["parlays"]) for _e, d in messages if d and "parlays" in d)
+        asyncio.run(bot._send_card(send, messages))
+        boxes = [e.title for m in sent for e in m["embeds"] if (e.title or "").startswith("#")]
+        self.assertEqual(len(boxes), n_parlays)
+        if len(sent) > 1:
+            self.assertIn("right below this card", sent[0]["embeds"][0].description)
+            bkey = next(d.get("board") for _e, d in messages if d and d.get("board"))
+            self.assertEqual(bot.PICK_DETAILS[bkey]["card_more"], [(7, 100 + i) for i in range(2, len(sent) + 1)])
 
 
 class AutoLogTest(unittest.TestCase):
