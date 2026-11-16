@@ -788,6 +788,14 @@ def compact_card(messages: list, budget: Optional[int] = None, max_boxes: Option
             _clip_embed(header, max(len(header.description or "") - over, 300))
     view = CompactView(picks, parlays, notes, legs, mls, books, market_key, fresh_key)
     view.more_boxes = more
+    try:   # the web dashboard's Today tab
+        from .web import record_card
+        record_card(header.title if header is not None else "Card",
+                    [(d["ev"], d.get("profile")) for _e, d in picks],
+                    [(l["ev"], l.get("profile")) for l in legs or []],
+                    [p for _e, d in parlays if "parlays" in d for p in d["parlays"]])
+    except Exception as e:
+        log.warning("web card not kept: %s", e)
     return embeds, view
 
 
@@ -2011,6 +2019,11 @@ class LinemakerBot(discord.Client):
             self.chat_channels.add(self.home)
 
     async def setup_hook(self):
+        try:   # private web dashboard (127.0.0.1 + its own HTTPS tunnel): never holds up the bot
+            from .web import start as web_start
+            asyncio.get_running_loop().create_task(web_start())
+        except Exception as e:
+            log.warning("web dashboard not started: %s", e)
         # Scans, grading, re-fits and background logging all run in worker threads: a small
         # default pool (CPU count + 4) left buttons and slash commands waiting past
         # Discord's 3-second window ("application did not respond").
@@ -3966,6 +3979,22 @@ class PMLinkModal(discord.ui.Modal):
             "Polymarket get a **Buy on Polymarket** button (always with a confirm step). "
             f"Max per order: ${pm_accounts.max_stake(str(interaction.user.id)):g} (`/polymarket maxbet` to lower it). "
             "`/polymarket unlink` removes the key.", ephemeral=True)
+
+
+@bot.tree.command(name="web", description="Your private link to the web dashboard (picks, line shop, record, bets)")
+async def web_cmd(interaction: discord.Interaction):
+    from . import web
+    link = web.login_link(str(interaction.user.id), str(interaction.user)) if web.on() else None
+    if not link:
+        await interaction.response.send_message(
+            "🌐 The dashboard isn't reachable yet (it starts a minute after the bot, or it's turned off with "
+            "LINEMAKER_WEB=off). Try again shortly.", ephemeral=True)
+        return
+    view = discord.ui.View()
+    view.add_item(discord.ui.Button(label="Open the dashboard", emoji="🌐", url=link))
+    await interaction.response.send_message(
+        "🌐 Your private link: works once, expires in 15 minutes, keeps you signed in on that device for 30 days. "
+        "Don't share it.", view=view, ephemeral=True)
 
 
 pm_group = app_commands.Group(name="polymarket", description="Your own Polymarket US account: link, sync, buy")
