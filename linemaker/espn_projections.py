@@ -116,6 +116,8 @@ def basketball_mean(games: list, market: str, factors: dict, minutes_delta: floa
     rates = [v / _minutes(g) for v, g in zip(vals, played) if v is not None]
     if not rates:
         return None
+    from .dvp import skipped_markets
+    plain = market.lower() in skipped_markets()   # no matchup factor at all (see dvp.skipped_markets)
     recent = played[:5]
     inp = ProjectionInputs(
         season_games=len(played),
@@ -124,8 +126,8 @@ def basketball_mean(games: list, market: str, factors: dict, minutes_delta: floa
         rate_season=sum(v for v in vals if v is not None) / sum(_minutes(g) for g in played),
         rate_recent=_avg(rates[:10]), rate_recent_games=min(10, len(rates)),
         pace_factor=factors.get("pace"),
-        matchup_factor=(factors.get("dvp") or {}).get(market.lower())
-        or (factors.get("defense") if market.lower() in ("points", "threes") else None))
+        matchup_factor=None if plain else ((factors.get("dvp") or {}).get(market.lower())
+                                           or (factors.get("defense") if market.lower() in ("points", "threes") else None)))
     proj = build_projection(inp)
     mean, steps = proj.mean, list(proj.steps)
     if minutes_delta and proj.opportunity > 0:
@@ -394,7 +396,9 @@ def espn_projections(sport: str, date: str, wanted: dict) -> list:
                 if pos and (dvp.get(norm(opp)) or {}).get(pos):
                     table = dvp[norm(opp)][pos]
                     f["dvp"] = dict(table, pra=None)
-                    parts = [table.get(m) for m in COMBOS.get(market.lower(), (market.lower(),)) if table.get(m)]
+                    from .dvp import skipped_markets
+                    parts = [table.get(m) for m in COMBOS.get(market.lower(), (market.lower(),))
+                             if table.get(m) and m not in skipped_markets()]
                     if parts:   # for the card's reason tags ("🛡️ Grizzlies soft vs guards")
                         dvp_note = f"; DvP ×{sum(parts) / len(parts):.2f} vs {opp} ({pos})"
                 res = basketball_mean(games, market, f, delta)

@@ -18,6 +18,16 @@ from .oddsapi import norm
 
 log = logging.getLogger("linemaker.dvp")
 SHRINK = 15
+
+
+def skipped_markets() -> set:
+    """Markets projected without a matchup factor. Threes: on 1,441 graded threes lines
+    (10/22-11/14) overs against the toughest quarter of matchups hit 52.2% where the market
+    said 49.0% and the bot (with this factor) 46.2%, the soft quarter was priced about right,
+    and shot-zone matchup measures showed the same thing: threes made allowed is mostly noise,
+    and leaning on it pushed the bot to unders that lost. LINEMAKER_DVP_THREES=on restores it."""
+    on = os.environ.get("LINEMAKER_DVP_THREES", "off").strip().lower() in ("on", "1", "yes", "true")
+    return set() if on else {"threes"}
 MARKETS = {"points": "points", "rebounds": "rebounds", "assists": "assists",
            "threes": "threePointFieldGoalsMade"}
 

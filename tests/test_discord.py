@@ -324,3 +324,20 @@ class ReasonTagsTest(unittest.TestCase):
         self.assertEqual(reason_tags(ev("A", under)), "")                    # nothing supports the over
         ml = "NHL moneyline: the market's no-vig price, 0.18 logit toward the rested team (Toronto Maple Leafs rested)"
         self.assertEqual(reason_tags(ev("A", ml, "moneyline", "Toronto Maple Leafs ML")), "😴 other team on a back-to-back")
+
+
+class ThreesMatchupTest(unittest.TestCase):
+    def test_threes_projected_without_a_matchup_factor(self):
+        import os
+        from unittest import mock
+        from linemaker.espn_projections import basketball_mean
+        games = [{"stats": {"minutes": 30.0, "threePointFieldGoalsMade": 3.0, "points": 20.0}} for _ in range(10)]
+        tough = {"dvp": {"threes": 0.8, "points": 0.8}, "defense": 0.9}
+        with mock.patch.dict(os.environ, {"LINEMAKER_DVP_THREES": "off"}):
+            plain = basketball_mean(games, "threes", {})
+            soft = basketball_mean(games, "threes", tough)
+            pts = basketball_mean(games, "points", tough)
+        self.assertAlmostEqual(plain[0], soft[0], places=6)           # threes ignore the matchup
+        self.assertLess(pts[0], basketball_mean(games, "points", {})[0])   # points still use it
+        with mock.patch.dict(os.environ, {"LINEMAKER_DVP_THREES": "on"}):
+            self.assertLess(basketball_mean(games, "threes", tough)[0], plain[0])
