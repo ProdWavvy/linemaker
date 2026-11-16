@@ -55,3 +55,16 @@ class WebTest(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual((await c.get("/api/group", headers=h)).status, 200)
                 await c.get("/logout", headers=h, allow_redirects=False)
                 self.assertEqual((await c.get("/api/me", headers=h)).status, 401)
+
+    async def test_ufc_card_and_weekly(self):
+        with tempfile.TemporaryDirectory() as d, mock.patch.dict(os.environ, {"LINEMAKER_CACHE_DIR": d,
+                                                                              "LINEMAKER_TRACKING_DIR": d,
+                                                                              "LINEMAKER_WEB_URL": "https://dash.test"}):
+            web._CARDS.clear()
+            web.record_card("🥊 UFC Props", [], [], [], ufc={"fight": [{"n": 1, "label": "Gane by KO/TKO", "quotes": []}],
+                                                            "strike": []})
+            self.assertEqual(web.cards()[0]["ufc"]["fight"][0]["label"], "Gane by KO/TKO")
+            sid = web.redeem(web.login_link("42", "wavvy").split("t=", 1)[1])
+            async with TestClient(TestServer(web.make_app())) as c:
+                wk = await (await c.get("/api/weekly", headers={"Cookie": f"lm_session={sid}"})).json()
+            self.assertTrue(any(l.startswith("🎯 **Picks:**") for l in wk))

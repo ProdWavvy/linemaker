@@ -98,28 +98,58 @@ def _ev_json(ev, profile=None) -> dict:
         prices = book_prices(m, s.side)
     except Exception:
         prices = {}
+    try:
+        from .betlinks import pick_links
+        links = [{"book": b, "url": u} for b, u in pick_links(ev) if u and len(u) < 2000]
+    except Exception:
+        links = []
     return {"label": short_label(s.label), "sport": m.sport, "game": m.game, "commence": getattr(m, "commence", ""),
             "book": s.best_book, "odds": s.best_odds, "ours": round(s.blended, 4), "implied": round(s.best_implied, 4),
-            "gap": round(s.gap, 4), "tags": reason_tags(ev, profile),
+            "gap": round(s.gap, 4), "tags": reason_tags(ev, profile), "links": links,
             "books": [{"book": b, "odds": o} for b, o in sorted(prices.items(), key=lambda kv: kv[0]) if o is not None]}
 
 
 def _parlay_json(p) -> dict:
     from .parlay_format import short_label
     kind = "Edge" if p.style == "edge" else getattr(p, "kind", "") or ("Value" if p.style == "value" else "Safest")
-    return {"book": p.book, "kind": kind, "odds": p.american, "prob": round(p.prob, 4),
-            "legs": [{"label": short_label(ev.best.label), "odds": o} for ev, o in p.legs]}
+    try:
+        from .betlinks import leg_links, parlay_link
+        url = parlay_link(p)
+        legs_urls = [u for _l, u in leg_links(p)] if not url else []
+    except Exception:
+        url, legs_urls = None, []
+    return {"book": p.book, "kind": kind, "odds": p.american, "prob": round(p.prob, 4), "url": url,
+            "legs": [{"label": short_label(ev.best.label), "odds": o,
+                      "url": legs_urls[i] if i < len(legs_urls) else None} for i, (ev, o) in enumerate(p.legs)]}
 
 
-def record_card(title: str, picks: list, legs: list, parlays: list) -> None:
+def _entry_json(e) -> dict:
+    """A PrizePicks / Underdog entry (its multiplier instead of odds)."""
+    from .parlay_format import short_label
+    try:
+        from .pp import entry_link
+        url = entry_link(e)
+    except Exception:
+        url = None
+    from .pp import APPS
+    return {"book": (APPS.get(e.app) or {}).get("book", e.app.title()),
+            "kind": e.label, "odds": None, "pays": e.payouts[0] if e.payouts else None, "prob": round(e.p_all, 4),
+            "url": url, "legs": [{"label": short_label(ev.best.label), "odds": None} for ev in e.legs]}
+
+
+def record_card(title: str, picks: list, legs: list, parlays: list, entries: Optional[list] = None,
+                ufc: Optional[dict] = None) -> None:
     """Keep what a posted card showed (newest first, last CARDS_KEPT), also on disk for restarts.
-    picks / legs: [(ev, profile)]; parlays: [Parlay]."""
+    picks / legs: [(ev, profile)]; parlays: [Parlay]; entries: pick'em entries; ufc: the UFC
+    props card's rows (ufc_props.props_card)."""
     try:
         card = {"title": title, "at": dt.datetime.now().isoformat(timespec="seconds"),
                 "picks": [_ev_json(ev, pr) for ev, pr in picks][:25],
                 "legs": [_ev_json(ev, pr) for ev, pr in legs][:25],
-                "parlays": [_parlay_json(p) for p in parlays][:25]}
-        if not (card["picks"] or card["legs"] or card["parlays"]):
+                "parlays": ([_parlay_json(p) for p in parlays] + [_entry_json(e) for e in entries or []])[:25]}
+        if ufc:
+            card["ufc"] = ufc
+        if not (card["picks"] or card["legs"] or card["parlays"] or ufc):
             return
         same = lambda c: (c["title"], [p["label"] for p in c["picks"] + c["legs"]])
         if _CARDS and same(_CARDS[0]) == same(card):   # the same card built again (a slimmer retry)
@@ -181,6 +211,17 @@ def record_data(name: str, days: int = 14) -> dict:
         pts.append({"date": b["settled"][:10], "profit": round(run, 2)})
     out["mine"] = pts
     return out
+
+
+def weekly_data(name: str) -> list:
+    """The weekly summary's lines (the Monday post's numbers, any day)."""
+    from .bets import CURRENT_USER
+    from .reports import weekly_lines
+    tok = CURRENT_USER.set(name)   # "Your bets" = this member's
+    try:
+        return _cached(f"weekly|{name}", 900, lambda: weekly_lines(dt.date.today().isoformat()))
+    finally:
+        CURRENT_USER.reset(tok)
 
 
 def bets_data(name: str) -> dict:
@@ -257,6 +298,7 @@ def make_app():
                     web.get("/api/me", api(lambda s: {"name": s[1]})),
                     web.get("/api/cards", api(lambda s: cards())),
                     web.get("/api/record", api(lambda s: record_data(s[1]))),
+                    web.get("/api/weekly", api(lambda s: weekly_data(s[1]))),
                     web.get("/api/bets", api(lambda s: bets_data(s[1]))),
                     web.get("/api/group", api(lambda s: group_data()))])
     return app

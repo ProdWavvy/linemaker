@@ -766,6 +766,7 @@ def props_card(date: str) -> tuple:
                            "70% market · every play is graded in the morning report")
     out = [header]
     groups = []   # each play's buttons
+    web_rows = {"fight": [], "strike": []}   # the same plays for the web dashboard
     labels = sorted({f["fight"] for f, _p in plays} | {" vs ".join(r["prop"]["fight"]) for r in strike_plays})
     offers = {}
     if labels:
@@ -788,6 +789,11 @@ def props_card(date: str) -> tuple:
                 if 1 / _implied(odds) > best_dec:
                     best, best_dec = book, 1 / _implied(odds)
             groups.append(mine)
+            web_rows["fight"].append({"n": i, "label": p["label"], "fight": f["fight"], "chance": round(p["chance"], 4),
+                                      "kalshi": round(p["kalshi_price"], 4), "fair": american(p["chance"]),
+                                      "bet_at": worth_at(p["chance"]), "best": BOOK_NAME.get(book_look(best)[0], best),
+                                      "quotes": [{"book": b, "odds": o, "url": u, "good": _implied(o) * 1.02 <= p["chance"]}
+                                                 for b, (o, u) in sorted(quotes.items())]})
             where = ("\n\u2003" + " · ".join(books)) if books else ""
             by_book.setdefault(best, []).append(
                 f"**{i}.** {p['label']} · **{p['chance']:.0%}**\n"
@@ -824,6 +830,11 @@ def props_card(date: str) -> tuple:
             else:
                 word = r["side"].title()
                 price = f"{r['book']} {r['odds']:+d} · fair {american(r['chance'])}"
+            web_rows["strike"].append({"n": i, "label": f"{who} {word} {p['line']:g} {stat}", "chance": round(r["chance"], 4),
+                                       "book": r["book"], "odds": r["odds"], "proj": round(r["proj"], 1), "flags": r["flags"],
+                                       "quotes": [{"book": BOOK_NAME.get(t, t), "odds": o, "url": u, "good": g}
+                                                  for t, o, u, g in quotes],
+                                       "pages": [{"book": BOOK_NAME.get(t, t), "url": u} for t, u in pages]})
             by_book.setdefault(r["book"], []).append(
                 f"**{i}.** {who} {word} {p['line']:g} {stat} · **{r['chance']:.0%}**\n"
                 f"\u2003{price} · projects {r['proj']:.1f}"
@@ -841,6 +852,12 @@ def props_card(date: str) -> tuple:
         out.append(discord.Embed(title="🥊 Strike & Takedown Lines", color=GREY, description=note))
     text = (f"UFC props {day}: {n_plays} plays ("
             + "; ".join(f"{p['label']} {p['chance']:.0%}" for _f, p in plays[:5]) + ")")
+    if web_rows["fight"] or web_rows["strike"]:
+        try:
+            from .web import record_card
+            record_card(header.title, [], [], [], ufc=web_rows)
+        except Exception as e:
+            log.warning("web ufc card not kept: %s", e)
     return out, text, fair_buttons(groups)
 
 

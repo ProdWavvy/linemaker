@@ -793,7 +793,8 @@ def compact_card(messages: list, budget: Optional[int] = None, max_boxes: Option
         record_card(header.title if header is not None else "Card",
                     [(d["ev"], d.get("profile")) for _e, d in picks],
                     [(l["ev"], l.get("profile")) for l in legs or []],
-                    [p for _e, d in parlays if "parlays" in d for p in d["parlays"]])
+                    [p for _e, d in parlays if "parlays" in d for p in d["parlays"]],
+                    entries=[e for _e, d in parlays if "pp" in d for e in d["pp"]])
     except Exception as e:
         log.warning("web card not kept: %s", e)
     return embeds, view
