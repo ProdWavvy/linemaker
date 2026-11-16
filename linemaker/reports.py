@@ -26,64 +26,87 @@ def pick_record(records: list) -> dict:
     return {"won": w, "lost": l, "push": p, "units": units, "roi": units / n if n else None}
 
 
-def weekly_lines(today: str) -> list:
+def _units(u: float) -> str:
+    return f"{'🟢' if u > 0 else '🔴' if u < 0 else '⚪'} {u:+.1f}u"
+
+
+def weekly_lines(today: str, details: bool = False) -> list:
+    """The week in a few short lines: picks, segments, closing-line value, your bets, what the
+    tuner paused or brought back, auto-parlays, what's working. details=True adds every tuned
+    weight (/weekly details:true)."""
     tdir = os.environ.get("LINEMAKER_TRACKING_DIR", "tracking")
     recs = load_records(tdir, 7, today, lean=True)
     live = load_records(os.path.join(tdir, "live"), 7, today, lean=True)
     out = []
-    pr = pick_record(recs)
+    pr, lr = pick_record(recs), pick_record(live)
+    picks = []
     if pr["won"] + pr["lost"]:
-        out.append(f"**Model picks:** {pr['won']}-{pr['lost']}" + (f"-{pr['push']}" if pr["push"] else "")
-                   + f" · {pr['units']:+.2f} units · ROI {pr['roi']:+.1%} (1 unit each, at the price picked)")
-    else:
-        out.append("**Model picks:** none graded this week.")
-    lr = pick_record(live)
+        picks.append(f"Pre-game **{pr['won']}-{pr['lost']}" + (f"-{pr['push']}" if pr["push"] else "")
+                     + f"** {_units(pr['units'])} ({pr['roi']:+.1%})")
     if lr["won"] + lr["lost"]:
-        out.append(f"**Live picks:** {lr['won']}-{lr['lost']} · {lr['units']:+.2f} units")
+        picks.append(f"Live **{lr['won']}-{lr['lost']}** {_units(lr['units'])}")
+    out.append("🎯 **Picks:** " + (" · ".join(picks) if picks else "none graded this week")
+               + "  (1 unit each)")
     per = []
-    for phase, rs in (("Pre-game", recs), ("Live", live)):
+    for phase, rs in (("", recs), ("Live ", live)):
         segs = {}
         for r in rs:
             segs.setdefault(r.get("segment", "?"), []).append(r)
-        for seg, srs in sorted(segs.items()):
+        for seg, srs in segs.items():
             sr = pick_record(srs)
             if sr["won"] + sr["lost"]:
                 sport, kind = (seg.rsplit("-", 1) + [""])[:2]
-                per.append(f"{phase} {sport} {'ML/spreads/totals' if kind == 'games' else 'props'} "
-                           f"{sr['won']}-{sr['lost']} ({sr['units']:+.2f}u)")
+                per.append((sr["units"], f"{phase}{sport} {'lines' if kind == 'games' else 'props'} "
+                                         f"{sr['won']}-{sr['lost']} {_units(sr['units'])}"))
     if len(per) > 1:
-        out.append("**By segment:** " + " · ".join(per))
+        out.append("📊 **By segment**\n" + "\n".join(t for _u, t in sorted(per, key=lambda x: -x[0])))
     c = clv_summary(recs)
     if c["n"]:
-        out.append(f"**Closing-line value:** beat the close {c['beat']:.0%} of the time, "
-                   f"{c['avg_prob'] * 100:+.2f} pts on average ({c['n']} picks)")
+        verdict = (" · ✅ getting better prices than the close" if c["beat"] >= 0.55 else
+                   " · ⚠️ the market moves against these picks after they're made" if c["beat"] < 0.45 else "")
+        out.append(f"📉 **Closing line:** beat it {c['beat']:.0%} · {c['avg_prob'] * 100:+.2f} pts "
+                   f"({c['n']} picks){verdict}")
     from .bets import per_user_on, summary, viewer
     who = viewer()   # /weekly: the caller's bets; the Monday post: everyone's
     b = summary(7, today, user=who)
     if b["settled"]:
-        out.append(f"**{'Your' if who or not per_user_on() else 'Everyone' + chr(39) + 's'} bets:** {b['won']}-{b['lost']}" + (f"-{b['push']}" if b["push"] else "")
-                   + f" · staked ${b['staked']:,.2f} · {fmt_money(b['profit'])}"
-                   + (f" · ROI {b['roi']:+.1%}" if b["roi"] is not None else ""))
-    if b["open"]:
-        out.append(f"**Open bets:** {len(b['open'])}")
-    from .autotune import current_summary, load_weights
+        out.append(f"💵 **{'Your' if who or not per_user_on() else 'Everyone' + chr(39) + 's'} bets:** "
+                   f"{b['won']}-{b['lost']}" + (f"-{b['push']}" if b["push"] else "")
+                   + f" · ${b['staked']:,.2f} staked · {fmt_money(b['profit'])}"
+                   + (f" ({b['roi']:+.1%})" if b["roi"] is not None else "")
+                   + (f" · {len(b['open'])} open" if b["open"] else ""))
+    from .autotune import current_summary, load_weights, manual_pauses, SEGMENTS, SEGMENT_LABELS
+    w = load_weights()
     start = (dt.date.fromisoformat(today) - dt.timedelta(days=7)).isoformat()
-    week = [h for h in load_weights().get("history", []) if h.get("date", "") >= start]
-    # Each re-fit's list repeats most of the one before, so the week is the latest re-fit's
-    # changes (minus "still collecting" notes) and how many re-fits ran, not every list glued.
-    latest = [c for c in (week[-1].get("changes", []) if week else []) if not c.startswith("Still collecting")]
-    note = (f"{len(week)} re-fit{'s' if len(week) != 1 else ''} this week; latest ({week[-1].get('date', '')}): "
-            + ("; ".join(latest) if latest else "no changes") if week else "no changes this week")
-    out.append("**Weights:** " + (note[:1200] + ("…" if len(note) > 1200 else "")) + f"\n{current_summary()}")
-    graded = sum(1 for r in recs if r.get("result"))
+    week = [h for h in w.get("history", []) if h.get("date", "") >= start]
+    paused = sorted({k for n in SEGMENTS for k in (w.get("segments", {}).get(n, {}).get("pruned") or {})})
+    lifted = w.get("manual_lifted") or {}
+    paused += [f"{m} (by you)" for m in sorted(manual_pauses()) if m not in lifted]
+    back = []
+    for h in week:
+        for ch in h.get("changes", []):
+            if "▶️" in ch:
+                back.append(ch.split("▶️", 1)[1].strip().split(" back on")[0].strip())
+    tune = [f"{len(week)} re-fit{'s' if len(week) != 1 else ''} this week"]
+    if paused:
+        tune.append("⏸️ paused: " + ", ".join(paused))
+    if back:
+        tune.append("▶️ back: " + ", ".join(dict.fromkeys(back)))
+    out.append("🔧 **Tuning:** " + " · ".join(tune) + ("" if details else "  (`/weekly details:true` for every weight)"))
+    if details:
+        latest = [c for c in (week[-1].get("changes", []) if week else []) if not c.startswith("Still collecting")]
+        if latest:
+            out.append("**Latest re-fit:** " + "; ".join(latest)[:1500])
+        out.append(current_summary()[:1500])
     from .parlay_track import load_range, summary_lines
     parlay_lines = summary_lines(load_range(7, today))
     if parlay_lines:
-        out.append("🎰 **Auto-parlays**\n" + "\n".join(parlay_lines))
+        out.append("🎰 **Auto-parlays**\n" + "\n".join(parlay_lines[:6]))
     working = whats_working(recs)
     if working:
-        out.append("🔍 **What's working**\n" + "\n".join(working))
-    out.append(f"Tracked {len(recs)} markets this week, {graded} graded.")
+        out.append("🔍 **What's working**\n" + "\n".join(working[:6]))
+    graded = sum(1 for r in recs if r.get("result"))
+    out.append(f"_Tracked {len(recs):,} markets this week, {graded:,} graded._")
     return out
 
 

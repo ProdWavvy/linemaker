@@ -589,14 +589,22 @@ class LateGradeTest(unittest.TestCase):
 
     def test_weekly_weights_not_repeated(self):
         from linemaker import reports
-        hist = [{"date": "2026-11-0%d" % i, "changes": ["NBA points ×0.92 → ×0.93", "Still collecting x"]} for i in range(3, 9)]
-        with mock.patch("linemaker.autotune.load_weights", return_value={"history": hist}), \
-                mock.patch("linemaker.autotune.current_summary", return_value=""), \
+        hist = [{"date": "2026-11-0%d" % i, "changes": ["NBA points ×0.92 → ×0.93", "Still collecting x",
+                                                       "Pre-game props: ▶️ NBA pts + ast back on (no longer losing)"]}
+                for i in range(3, 9)]
+        weights = {"history": hist, "segments": {"pre props": {"pruned": {"NBA points": "losing"}}}}
+        with mock.patch("linemaker.autotune.load_weights", return_value=weights), \
+                mock.patch("linemaker.autotune.current_summary", return_value="ALL WEIGHTS"), \
+                mock.patch("linemaker.autotune.manual_pauses", return_value={"nba unders"}), \
                 mock.patch.object(reports, "load_records", return_value=[]):
             lines = reports.weekly_lines("2026-11-09")
-        w = next(l for l in lines if l.startswith("**Weights:**"))
-        self.assertEqual(w.count("NBA points"), 1)
+            full = reports.weekly_lines("2026-11-09", details=True)
+        w = next(l for l in lines if l.startswith("🔧 **Tuning:**"))
         self.assertIn("6 re-fits this week", w)
+        self.assertIn("⏸️ paused: NBA points, nba unders (by you)", w)
+        self.assertEqual(w.count("NBA pts + ast"), 1)                       # one ▶️ even after 6 re-fits
+        self.assertNotIn("ALL WEIGHTS", "\n".join(lines))
+        self.assertIn("ALL WEIGHTS", "\n".join(full))
 
 
 class LeanCacheTest(unittest.TestCase):

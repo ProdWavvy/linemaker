@@ -21,8 +21,9 @@ class ReportTest(unittest.TestCase):
             with open(os.path.join(d, "2026-10-20.json"), "w") as f:
                 json.dump(recs, f)
             text = "\n".join(reports.weekly_lines("2026-10-21"))
-        self.assertIn("**Model picks:** 1-1-1", text)
-        self.assertIn("no changes this week", text)
+        self.assertIn("🎯 **Picks:** Pre-game **1-1-1**", text)
+        self.assertIn("🔧 **Tuning:** 0 re-fits this week", text)
+        self.assertNotIn("Auto-tuned weights", text)                    # the long list only with details
 
     def test_live_weight_tunes_on_live_reads_only(self):
         import json

@@ -2560,11 +2560,12 @@ async def propline_cmd(interaction: discord.Interaction, sport: Optional[str] = 
 
 
 @bot.tree.command(name="weekly", description="The last 7 days: record, closing-line value, what's working, weight changes")
-async def weekly_cmd(interaction: discord.Interaction):
+@app_commands.describe(details="Also list every tuned weight (long)")
+async def weekly_cmd(interaction: discord.Interaction, details: bool = False):
     await interaction.response.defer(thinking=True)
     try:
         from .reports import weekly_lines
-        lines = await asyncio.to_thread(weekly_lines, today())
+        lines = await asyncio.to_thread(weekly_lines, today(), details)
         await interaction.followup.send(embed=discord.Embed(
             title="🗓️ Weekly Summary · last 7 days", description="\n\n".join(lines)[:4000], color=0x9B59B6))
     except Exception as e:
