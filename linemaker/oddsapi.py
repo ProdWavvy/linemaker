@@ -852,6 +852,14 @@ def fetch_slate(api: OddsAPI, sport: str, date: str, tz: ZoneInfo, props: bool =
             props_out += [fm for fm in extra if fm.game_id in refused]   # Odds API refused: PropLine alone
             merge(props_out, [fm for fm in extra if fm.game_id not in refused], how, f"{sport} props")
         out += props_out
+    if not pickem and out:   # Polymarket US's own book (fee included) on the games it lists, pre-game
+        try:
+            from .polymarket_us import inject
+            now = dt.datetime.now(dt.timezone.utc)
+            inject([fm for fm in out if fm.commence and
+                    dt.datetime.fromisoformat(fm.commence.replace("Z", "+00:00")) > now], sport)
+        except Exception as e:
+            log.warning("polymarket us prices %s: %s", sport, e)
     return out
 
 

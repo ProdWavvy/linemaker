@@ -134,7 +134,13 @@ async def route_component(interaction: discord.Interaction) -> bool:
     parts = cid.split(":")
     kind, key = parts[1], parts[2] if len(parts) > 2 else ""
     pages = {k: page for k, _label, _emoji, page in BUTTONS}
-    if kind == "bet":
+    if kind == "pmbuy":
+        handler = _pm_buy(key)
+    elif kind == "pmok":
+        handler = _pm_confirm(key, parts[3])
+    elif kind == "pmamt":
+        handler = _pm_amount(key)
+    elif kind == "bet":
         handler = PickView._bet_single(key)
     elif kind == "betp":
         handler = PickView._bet_parlay(key, int(parts[3]))
@@ -215,6 +221,9 @@ class PickView(discord.ui.View):
             button = discord.ui.Button(label="I bet this", emoji="📝", row=1,
                                        style=discord.ButtonStyle.success, custom_id=f"lm:bet:{key}")
             self.add_item(button)
+            if pm_side(detail["ev"]):   # one tap from your linked Polymarket account (confirm first)
+                self.add_item(discord.ui.Button(label="Buy on Polymarket", emoji="🟧", row=2,
+                                                style=discord.ButtonStyle.primary, custom_id=f"lm:pmbuy:{key}"))
         for i, p in enumerate((detail.get("parlays") or [])[:4]):
             button = discord.ui.Button(label=f"Log {len(p.legs)}-leg {p.book}", emoji="📝", row=2,
                                        style=discord.ButtonStyle.success, custom_id=f"lm:betp:{key}:{i}")
@@ -2047,6 +2056,8 @@ class LinemakerBot(discord.Client):
             daily_grade.start()
         if not budget_loop.is_running():
             budget_loop.start()
+        if not pm_sync_loop.is_running():
+            pm_sync_loop.start()
 
     def alert_channel_id(self) -> Optional[int]:
         raw = os.environ.get("LINEMAKER_CHANNEL_ID") or self.home
@@ -3772,6 +3783,250 @@ async def settings_cmd(interaction: discord.Interaction, search: Optional[str] =
         await interaction.response.send_message(
             f"{len(lines) - 1} settings (attached). Use `search:` to narrow it down.", ephemeral=True,
             file=discord.File(io.BytesIO(text.encode()), filename="settings.txt"))
+
+
+# ---- Polymarket US: each member's own linked account ------------------------------------------
+def pm_side(ev) -> Optional[dict]:
+    """The Polymarket market + side for a pick's chosen side, when the feed found one."""
+    try:
+        entries = (ev.market.links or {}).get("Polymarket") or []
+        idx = ev.market.side_keys.index(ev.best.side) if hasattr(ev.market, "side_keys") else (0 if ev.best.side == "A" else 1)
+        e = entries[idx] if idx < len(entries) else None
+        return e if e and e.get("pm_slug") else None
+    except (ValueError, AttributeError):
+        return None
+
+
+def _pm_quote(side: dict) -> Optional[float]:
+    from .polymarket_us import bbo
+    q = bbo(side["pm_slug"])
+    return q["long"] if side["pm_long"] else q["short"]
+
+
+def _pm_plan_embed(ev, side: dict, ask: float, plan: dict, user_max: float) -> discord.Embed:
+    from .polymarket_us import american
+    e = discord.Embed(title=f"🟧 {ev.best.label}", color=0xF57C00, description=(
+        f"Buy **{plan['qty']:g} contracts** at **{ask * 100:.1f}¢** ({american(ask):+d} with the fee)\n"
+        f"Cost **${plan['cost']:.2f}** · pays **${plan['payout']:.2f}** if it hits\n"
+        f"Our chance {ev.best.blended:.0%} · fills now at this price or better, or not at all"))
+    e.set_footer(text=f"Your max per order ${user_max:g} (/polymarket maxbet) · from your linked account")
+    return e
+
+
+def _pm_view(key: str, cost: float) -> discord.ui.View:
+    v = discord.ui.View(timeout=600)
+    v.add_item(discord.ui.Button(label=f"Confirm ${cost:.2f}", emoji="✅", style=discord.ButtonStyle.success,
+                                 custom_id=f"lm:pmok:{key}:{int(round(cost * 100))}"))
+    v.add_item(discord.ui.Button(label="Change amount", emoji="✏️", style=discord.ButtonStyle.secondary,
+                                 custom_id=f"lm:pmamt:{key}"))
+    return v
+
+
+async def _pm_offer(interaction: discord.Interaction, key: str, stake: Optional[float], edit: bool = False):
+    from . import pm_accounts
+    from .polymarket_us import order_plan
+    from .staking import suggested_dollars
+    detail = PICK_DETAILS.get(key) or {}
+    ev = detail.get("ev")
+    side = pm_side(ev) if ev else None
+    send = interaction.response.edit_message if edit else (lambda **kw: interaction.response.send_message(ephemeral=True, **kw))
+    if not side:
+        await send(content="This pick has no Polymarket market to buy (or the card is too old).", embed=None, view=None)
+        return
+    uid = str(interaction.user.id)
+    if not pm_accounts.creds(uid):
+        await send(content="🟧 Link your own Polymarket US account first: `/polymarket link` (private form; "
+                           "the key stays on the bot's server).", embed=None, view=None)
+        return
+    try:
+        ask = await asyncio.to_thread(_pm_quote, side)
+    except Exception as e:
+        await send(content=f"⚠️ Couldn't read Polymarket's price right now ({type(e).__name__}).", embed=None, view=None)
+        return
+    cap = pm_accounts.max_stake(uid)
+    if stake is None:
+        from .polymarket_us import american
+        stake = suggested_dollars(ev.best.blended, american(ask) or ev.best.best_odds) or min(5.0, cap)
+    stake = min(stake, cap)
+    plan = order_plan(stake, ask, side.get("pm_tick", 0.01), side.get("pm_min", 1.0))
+    if not plan:
+        await send(content=f"Nothing to buy: ${stake:.2f} is less than one contract at {ask * 100:.0f}¢ "
+                           "(or the market has no offer right now).", embed=None, view=None)
+        return
+    detail["pm_offer"] = {"ask": ask, "plan": plan, "user": uid}
+    await send(content=None, embed=_pm_plan_embed(ev, side, ask, plan, cap), view=_pm_view(key, plan["cost"]))
+
+
+def _pm_buy(key: str):
+    async def callback(interaction: discord.Interaction):
+        await _pm_offer(interaction, key, None)
+    return callback
+
+
+class PMAmountModal(discord.ui.Modal):
+    def __init__(self, key: str, cap: float):
+        super().__init__(title="Polymarket amount")
+        self.key = key
+        self.amount = discord.ui.TextInput(label=f"Dollars to spend (max ${cap:g})", placeholder="10", max_length=8)
+        self.add_item(self.amount)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        try:
+            stake = float(str(self.amount.value).replace("$", "").strip())
+        except ValueError:
+            await interaction.response.send_message("That isn't a dollar amount.", ephemeral=True)
+            return
+        await _pm_offer(interaction, self.key, stake, edit=True)
+
+
+def _pm_amount(key: str):
+    async def callback(interaction: discord.Interaction):
+        from . import pm_accounts
+        await interaction.response.send_modal(PMAmountModal(key, pm_accounts.max_stake(str(interaction.user.id))))
+    return callback
+
+
+def _pm_confirm(key: str, cents: str):
+    async def callback(interaction: discord.Interaction):
+        from . import pm_accounts
+        from .bets import add_bet, leg_from_eval
+        from .polymarket_us import american, fills, place
+        detail = PICK_DETAILS.get(key) or {}
+        offer, ev = detail.get("pm_offer") or {}, detail.get("ev")
+        uid = str(interaction.user.id)
+        cr = pm_accounts.creds(uid)
+        side = pm_side(ev) if ev else None
+        if not (offer and side and cr) or offer.get("user") != uid:
+            await interaction.response.edit_message(content="This offer expired. Tap Buy on Polymarket again.",
+                                                    embed=None, view=None)
+            return
+        plan = offer["plan"]
+        if plan["cost"] > pm_accounts.max_stake(uid) + 0.01 or int(round(plan["cost"] * 100)) != int(cents):
+            await interaction.response.edit_message(content="Amount changed: tap Buy on Polymarket again.",
+                                                    embed=None, view=None)
+            return
+        await interaction.response.defer(ephemeral=True)
+        try:
+            now_ask = await asyncio.to_thread(_pm_quote, side)
+            tick = side.get("pm_tick", 0.01)
+            if now_ask is None or now_ask > offer["ask"] + tick / 2:   # moved against you: confirm the new price
+                await interaction.edit_original_response(
+                    content=f"⚠️ The price moved to {now_ask * 100:.1f}¢ (you confirmed {offer['ask'] * 100:.1f}¢). "
+                            "Tap Buy on Polymarket again to see the new cost." if now_ask else
+                            "⚠️ Nobody is offering this side right now.", embed=None, view=None)
+                return
+            resp = await asyncio.to_thread(place, cr, side["pm_slug"], side["pm_long"], offer["ask"], plan["qty"], tick)
+        except Exception as e:
+            log.warning("polymarket order failed: %s", type(e).__name__)
+            await interaction.edit_original_response(content=f"⚠️ Polymarket refused the order ({str(e)[:200]}).",
+                                                     embed=None, view=None)
+            return
+        qty, avg = fills(resp, side["pm_long"])
+        detail.pop("pm_offer", None)
+        if not qty:
+            await interaction.edit_original_response(content="No fill: the offer was gone by the time the order "
+                                                             "arrived. Nothing was bought.", embed=None, view=None)
+            return
+        from .polymarket_us import cost_per_contract
+        cost = round(qty * cost_per_contract(avg), 2)
+        odds = american(avg)
+        add_bet([leg_from_eval(ev, odds=odds, book="Polymarket")], odds, cost, "Polymarket", str(interaction.user),
+                source="polymarket-bot", pm_slug=side["pm_slug"], pm_long=side["pm_long"], pm_qty=qty)
+        await interaction.edit_original_response(
+            content=f"✅ Bought **{qty:g} contracts** of {ev.best.label} at **{avg * 100:.1f}¢** "
+                    f"(${cost:.2f} with the fee) · pays **${qty:.2f}** if it hits · logged in your bets.",
+            embed=None, view=None)
+        await asyncio.to_thread(save_details)
+    return callback
+
+
+class PMLinkModal(discord.ui.Modal):
+    def __init__(self):
+        super().__init__(title="Link your Polymarket US account")
+        self.key_id = discord.ui.TextInput(label="Key ID", placeholder="from polymarket.us/developer", max_length=80)
+        self.secret = discord.ui.TextInput(label="Secret key", placeholder="shown once when you created the key",
+                                           max_length=200, style=discord.TextStyle.short)
+        self.add_item(self.key_id)
+        self.add_item(self.secret)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        from . import pm_accounts
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        try:
+            bal = await asyncio.to_thread(pm_accounts.link, str(interaction.user.id), str(interaction.user),
+                                          str(self.key_id.value), str(self.secret.value))
+        except Exception as e:
+            await interaction.followup.send(f"⚠️ That key didn't work ({str(e)[:150]}). Nothing was saved.",
+                                            ephemeral=True)
+            return
+        got = await asyncio.to_thread(pm_accounts.sync_all)
+        await interaction.followup.send(
+            "🟧 **Linked.** Your Polymarket bets now sync into `/record` every 10 minutes, and picks priced on "
+            "Polymarket get a **Buy on Polymarket** button (always with a confirm step). "
+            f"Max per order: ${pm_accounts.max_stake(str(interaction.user.id)):g} (`/polymarket maxbet` to lower it). "
+            "`/polymarket unlink` removes the key.", ephemeral=True)
+
+
+pm_group = app_commands.Group(name="polymarket", description="Your own Polymarket US account: link, sync, buy")
+
+
+@pm_group.command(name="link", description="Link your Polymarket US account (private form)")
+async def pm_link(interaction: discord.Interaction):
+    await interaction.response.send_modal(PMLinkModal())
+
+
+@pm_group.command(name="unlink", description="Remove your Polymarket key from the bot")
+async def pm_unlink(interaction: discord.Interaction):
+    from . import pm_accounts
+    gone = pm_accounts.unlink(str(interaction.user.id))
+    await interaction.response.send_message("🟧 Key removed. Your bets already logged stay in your record." if gone
+                                            else "You don't have a Polymarket account linked.", ephemeral=True)
+
+
+@pm_group.command(name="maxbet", description="Your max dollars per Polymarket order from the bot")
+@app_commands.describe(dollars="Most the bot may spend on one order for you")
+async def pm_maxbet(interaction: discord.Interaction, dollars: float):
+    from . import pm_accounts
+    ok = pm_accounts.set_max(str(interaction.user.id), dollars)
+    await interaction.response.send_message(
+        f"🟧 Max per order: ${pm_accounts.max_stake(str(interaction.user.id)):g}" if ok
+        else "Link your account first: `/polymarket link`.", ephemeral=True)
+
+
+@pm_group.command(name="status", description="Your linked Polymarket account: balance, sync")
+async def pm_status(interaction: discord.Interaction):
+    from . import pm_accounts
+    from .polymarket_us import balances
+    uid = str(interaction.user.id)
+    cr = pm_accounts.creds(uid)
+    if not cr:
+        await interaction.response.send_message("No Polymarket account linked. `/polymarket link` to add yours.",
+                                                ephemeral=True)
+        return
+    await interaction.response.defer(ephemeral=True, thinking=True)
+    try:
+        bal = await asyncio.to_thread(balances, cr)
+        got = await asyncio.to_thread(pm_accounts.sync_user, uid, str(interaction.user), cr)
+        cash = next((b for b in (bal.get("balances") or []) if isinstance(b, dict)), {}) if isinstance(bal, dict) else {}
+        amount = (cash.get("currentBalance") or cash.get("buyingPower") or cash.get("balance") or {})
+        amount = amount.get("value") if isinstance(amount, dict) else amount
+        await interaction.followup.send(
+            f"🟧 **Polymarket linked** · balance {('$' + str(amount)) if amount else 'n/a'} · max per order "
+            f"${pm_accounts.max_stake(uid):g}\nSynced just now: {got['added']} new, {got['matched']} matched to bets "
+            f"you logged, {got['settled']} settled.", ephemeral=True)
+    except Exception as e:
+        await interaction.followup.send(f"⚠️ Polymarket didn't answer ({str(e)[:150]}).", ephemeral=True)
+
+
+bot.tree.add_command(pm_group)
+
+
+@tasks.loop(minutes=10)
+@_keep_running
+async def pm_sync_loop():
+    from . import pm_accounts
+    if pm_accounts.linked():
+        await asyncio.to_thread(pm_accounts.sync_all)
 
 
 @bot.tree.command(name="set", description="Owner: change a setting on the server (like editing .env)")

@@ -216,7 +216,7 @@ def settle() -> int:
     """Settle every open bet whose legs are all graded. Returns how many were settled."""
     bets, cache, n = load_bets(), {}, 0
     for bet in bets:
-        if bet["status"] != "open":
+        if bet["status"] != "open" or bet.get("pm_external"):   # Polymarket-only bets settle from Polymarket
             continue
         outcomes = [leg_outcome(l, cache) for l in bet["legs"]]
         if bet.get("kind") == "pp":   # PrizePicks: Power / Flex payout tables

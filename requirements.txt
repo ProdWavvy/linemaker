@@ -1,5 +1,6 @@
 discord.py==2.5.2
 tzdata>=2024.1
 numpy>=1.26
+pynacl>=1.5        # Polymarket US order signing (Ed25519)
 anthropic>=1.17      # optional: only for Claude chat
 google-genai>=2.32   # optional: only for Gemini chat
