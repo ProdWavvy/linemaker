@@ -228,6 +228,71 @@ def sharp_note(ev) -> str:
     return ""
 
 
+POS_WORD = {"G": "guards", "F": "forwards", "C": "centers"}
+
+
+def _nick(team: str) -> str:
+    """'Memphis Grizzlies' -> 'Grizzlies' (two words for 'Trail Blazers', 'Red Sox' ...)."""
+    words = (team or "").split()
+    if len(words) >= 3 and words[-2] in ("Trail", "Red", "White", "Blue", "Golden", "Maple"):
+        return " ".join(words[-2:])
+    return words[-1] if words else team
+
+
+def _surname(name: str) -> str:
+    words = [w for w in name.strip().split() if w.rstrip(".").lower() not in ("jr", "sr", "ii", "iii", "iv")]
+    return words[-1] if words else name.strip()
+
+
+def reason_tags(ev, prof=None, limit: int = 2) -> str:
+    """The pick's two biggest drivers in a few words, only the ones pointing its way:
+    '📈 +2.1 with Ja Morant out · 🛡️ Grizzlies soft vs guards (+8%)'."""
+    import re
+    m, s = ev.market, ev.best
+    over = s.side == "A"
+    notes = m.notes or ""
+    tags = []   # (strength, text)
+    if m.bet_type == "prop":
+        for mt in re.finditer(r"\+([\d.]+) with (.+?) out", notes):
+            if over:
+                who = ", ".join(_surname(n) for n in mt.group(2).split(","))
+                tags.append((3 + float(mt.group(1)), f"📈 +{mt.group(1)} with {who} out"))
+        mt = re.search(r"DvP ×([\d.]+) vs (.+?) \((\w)\)", notes)
+        if mt:
+            pct = (float(mt.group(1)) - 1) * 100
+            if (pct >= 4 and over) or (pct <= -4 and not over):
+                word = "soft" if pct > 0 else "tough"
+                tags.append((abs(pct) / 3, f"🛡️ {_nick(mt.group(2))} {word} vs {POS_WORD.get(mt.group(3), 'his position')} ({pct:+.0f}%)"))
+        for pat, emoji in ((r"×([\d.]+) vs (.+?) defense", "🛡️"), (r"×([\d.]+) (.+?) shots allowed", "🏒")):
+            mt = re.search(pat, notes)
+            if mt:
+                pct = (float(mt.group(1)) - 1) * 100
+                if (pct >= 4 and over) or (pct <= -4 and not over):
+                    tags.append((abs(pct) / 3, f"{emoji} {_nick(mt.group(2))} {'soft' if pct > 0 else 'tough'} D ({pct:+.0f}%)"))
+        if not over and "blowout risk" in notes:
+            tags.append((2.5, "⏱️ blowout risk"))
+        if not over and "back-to-back" in notes:
+            tags.append((2.0, "😴 back-to-back"))
+        mt = re.search(r"×([\d.]+): (backup[^;]*)", notes)
+        if mt and over and float(mt.group(1)) > 1.02:
+            tags.append((2.2, "🥅 backup goalie in net"))
+        if prof and prof.recent:
+            w5 = prof.recent.get(5)
+            base = prof.season.rate if prof.season else 0.5
+            if w5 and w5.games >= 5 and (w5.rate >= 0.8 or w5.rate - base >= 0.2):
+                tags.append((2 + 4 * max(0.0, w5.rate - base), f"🔥 {w5.hits}/{w5.games} last 5"))
+        if prof and prof.versus and prof.versus.games >= 2 and prof.versus.rate >= 0.67:
+            tags.append((1.5, f"🆚 {prof.versus.hits}/{prof.versus.games} vs {_nick(prof.opponent)}"))
+    else:
+        mt = re.search(r"\((.+?) rested\)", notes)   # NHL moneyline: the other side on a back-to-back
+        if mt and s.label.startswith(mt.group(1)):
+            tags.append((3, "😴 other team on a back-to-back"))
+        if "backup" in notes.lower() and m.sport == "NHL":
+            tags.append((1, "🥅 backup goalie news in the line"))
+    tags.sort(key=lambda t: -t[0])
+    return " · ".join(t for _s, t in tags[:limit])
+
+
 def _board(picks: list, profiles: dict) -> str:
     """Phone-friendly board: two short lines per pick (a fixed-width table wraps on a phone)."""
     from .parlay_format import BOOK_EMOJI, short_label
@@ -239,9 +304,11 @@ def _board(picks: list, profiles: dict) -> str:
         why = (f" · season {_pct(prof.season.rate)}" if prof and prof.season
                and prof.season.games >= MIN_SEASON_GAMES else "")
         proj = f" · proj {ev.market.mean:.1f}" if ev.market.bet_type == "prop" else ""
+        tags = reason_tags(ev, prof)
         rows.append(f"**{i}.** {sharp}{short_label(s.label)}\n"
                     f"\u2003{BOOK_EMOJI.get(s.best_book, '')} {fmt_odds(s.best_odds)} · ours **{_pct(s.blended)}** "
-                    f"vs {_pct(s.best_implied)} · gap **{_pts(s.gap)}**{proj}{why}")
+                    f"vs {_pct(s.best_implied)} · gap **{_pts(s.gap)}**{proj}{why}"
+                    + (f"\n\u2003{tags}" if tags else ""))
     return "\n".join(rows)
 
 
@@ -858,8 +925,9 @@ def volume_messages(sections: list, date: str, cfg, title: str = "") -> list:
             evp = f" · EV {ev.best.blended * american_to_decimal(best_o) - 1:+.0%}" if best_o else ""
             quotes = " · ".join(f"{short.get(b, b[:2])} {fmt_odds(o)}" for b, o in zip(books, prices) if o)
             mark = "🎯 " if (ev.market.key, ev.best.side) in edge_keys else ""
+            tags = reason_tags(ev, prof)
             rows.append(f"**{i}.** {mark}{short_label(ev.best.label)} · **{_pct(ev.best.blended)}**\n"
-                        f"\u2003{quotes}{evp}{szn}")
+                        f"\u2003{quotes}{evp}{szn}" + (f"\n\u2003{tags}" if tags else ""))
         board = discord.Embed(title="✅ High-Hit-Rate Legs", color=GOLD,
                               description=_clip("\n".join(rows), 4096))
         board.set_footer(text="Bold % = our hit chance (calibrated to past results) · EV = value at the "

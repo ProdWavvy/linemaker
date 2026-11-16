@@ -303,3 +303,24 @@ class ClosestMissesTest(unittest.TestCase):
         notes = scan_embeds([("NBA", res, {})], "2026-10-21", cfg)[-1].description
         self.assertIn("🎯 **Closest misses**", notes)
         self.assertIn("Near Miss o20.5 points -110 FD · 58.8% vs 52.4% → outside your odds window", notes)
+
+
+class ReasonTagsTest(unittest.TestCase):
+    def test_two_biggest_drivers_pointing_the_picks_way(self):
+        from types import SimpleNamespace as NS
+        from linemaker.gamelogs import HitProfile, Window
+        from linemaker.scan_format import reason_tags
+        def ev(side, notes, bet_type="prop", label="Ja Guard Over 22.5 points"):
+            return NS(market=NS(notes=notes, bet_type=bet_type, sport="NBA"), best=NS(side=side, label=label))
+        notes = ("ESPN game-log model (20 games); Memphis Grizzlies; DvP ×1.09 vs Utah Jazz (G)"
+                 "; +2.4 with Jaren Jackson Jr out")
+        prof = HitProfile(season=Window(10, 20, 21.0), recent={5: Window(5, 5, 26.0)},
+                          versus=Window(2, 2, 25.0), opponent="Utah Jazz")
+        self.assertEqual(reason_tags(ev("A", notes), prof),
+                         "📈 +2.4 with Jackson out · 🔥 5/5 last 5")
+        self.assertEqual(reason_tags(ev("A", notes), None), "📈 +2.4 with Jackson out · 🛡️ Jazz soft vs guards (+9%)")
+        under = "ESPN game-log model (20 games); X; blowout risk (14-point spread) −2.0 min; DvP ×0.92 vs Boston Celtics (C)"
+        self.assertEqual(reason_tags(ev("B", under)), "🛡️ Celtics tough vs centers (-8%) · ⏱️ blowout risk")
+        self.assertEqual(reason_tags(ev("A", under)), "")                    # nothing supports the over
+        ml = "NHL moneyline: the market's no-vig price, 0.18 logit toward the rested team (Toronto Maple Leafs rested)"
+        self.assertEqual(reason_tags(ev("A", ml, "moneyline", "Toronto Maple Leafs ML")), "😴 other team on a back-to-back")

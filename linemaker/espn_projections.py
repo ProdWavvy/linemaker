@@ -390,9 +390,13 @@ def espn_projections(sport: str, date: str, wanted: dict) -> list:
                 if theirs.get("drtg"):
                     f["defense"] = theirs["drtg"]
                 pos = POSITIONS.get((sport, norm(name)))
+                dvp_note = ""
                 if pos and (dvp.get(norm(opp)) or {}).get(pos):
                     table = dvp[norm(opp)][pos]
                     f["dvp"] = dict(table, pra=None)
+                    parts = [table.get(m) for m in COMBOS.get(market.lower(), (market.lower(),)) if table.get(m)]
+                    if parts:   # for the card's reason tags ("🛡️ Grizzlies soft vs guards")
+                        dvp_note = f"; DvP ×{sum(parts) / len(parts):.2f} vs {opp} ({pos})"
                 res = basketball_mean(games, market, f, delta)
             elif sport in FOOTBALL:
                 res = football_mean(games, market)
@@ -403,7 +407,8 @@ def espn_projections(sport: str, date: str, wanted: dict) -> list:
             mean, sd, steps = res
             row = {"sport": sport, "subject": name, "market": market, "mean": f"{mean:.3f}",
                    "stdev": f"{sd:.3f}",
-                   "notes": f"ESPN game-log model ({len(games)} games); {team}{extra}",
+                   "notes": f"ESPN game-log model ({len(games)} games); {team}{extra}"
+                            + (dvp_note if sport in BASKETBALL else ""),
                    "_team": team, "_opp": opp, "_games": games}
             if hurt.get(norm(name)):
                 row["injury_status"] = hurt[norm(name)]
