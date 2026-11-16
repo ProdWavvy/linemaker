@@ -156,3 +156,28 @@ class WebTest(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(capped.status, 400)                                     # guests: the daily cap
                 self.assertIn("asks for today", (await capped.json())["error"])
             web.ASK["handler"] = None
+
+    async def test_named_tunnel_wins_and_keeps_the_token_off_the_command_line(self):
+        from unittest import mock as m
+        calls = []
+
+        class Proc:
+            class stderr:
+                @staticmethod
+                async def readline():
+                    return b""
+
+        async def fake_exec(*args, **kw):
+            calls.append((args, kw))
+            return Proc()
+        with mock.patch.dict(os.environ, {"CLOUDFLARE_TUNNEL_TOKEN": "tok123", "LINEMAKER_WEB_URL": "https://bets.example.com",
+                                          "LINEMAKER_WEB_NGROK_DOMAIN": "x.ngrok-free.dev", "NGROK_AUTHTOKEN": "n"}), \
+                m.patch.object(web, "_cloudflared", return_value="/bin/cloudflared"), \
+                m.patch("asyncio.create_subprocess_exec", side_effect=fake_exec), \
+                m.patch.object(web, "_ngrok", side_effect=AssertionError("ngrok shouldn't run")):
+            await web._named_tunnel()
+            self.assertEqual(web.base_url(), "https://bets.example.com")
+        args, kw = calls[0]
+        self.assertEqual(args[1:], ("tunnel", "--no-autoupdate", "run"))
+        self.assertNotIn("tok123", " ".join(args))
+        self.assertEqual(kw["env"]["TUNNEL_TOKEN"], "tok123")

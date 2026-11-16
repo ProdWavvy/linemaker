@@ -4031,7 +4031,8 @@ async def web_cmd(interaction: discord.Interaction, invite: Optional[str] = None
             f"🌐 **Invite for {invite[:40]}**: copy this and send it to them.\n{link}\n"
             "It works once (good for 7 days until it's opened), then keeps them signed in on that device for 30 days. "
             "They can see everything, log bets and buy on their own linked Polymarket; they show up in your Members "
-            "tab." + ("" if os.environ.get("LINEMAKER_WEB_URL") or os.environ.get("LINEMAKER_WEB_NGROK_DOMAIN") else
+            "tab." + ("" if os.environ.get("LINEMAKER_WEB_URL") or os.environ.get("LINEMAKER_WEB_NGROK_DOMAIN")
+                 or os.environ.get("CLOUDFLARE_TUNNEL_TOKEN") else
                       "\n⚠️ The address changes when the bot restarts (updates restart it), which breaks this link "
                       "until you send a new one. A fixed address: set LINEMAKER_WEB_NGROK_DOMAIN and NGROK_AUTHTOKEN."),
             ephemeral=True)

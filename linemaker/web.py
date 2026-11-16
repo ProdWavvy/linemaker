@@ -619,15 +619,47 @@ async def start() -> None:
     await web.TCPSite(runner, "127.0.0.1", port()).start()
     log.info("web dashboard on 127.0.0.1:%d", port())
     asyncio.get_running_loop().create_task(_warm())
-    if os.environ.get("LINEMAKER_WEB_URL") or os.environ.get("LINEMAKER_WEB_TUNNEL", "quick").lower() == "off":
+    if os.environ.get("LINEMAKER_WEB_TUNNEL", "quick").lower() == "off":
         return
     try:
+        if os.environ.get("CLOUDFLARE_TUNNEL_TOKEN"):   # your own domain, no warning page
+            await _named_tunnel()
+            return
+        if os.environ.get("LINEMAKER_WEB_URL"):   # your own tunnel or proxy, run outside the bot
+            return
         if os.environ.get("LINEMAKER_WEB_NGROK_DOMAIN") and os.environ.get("NGROK_AUTHTOKEN"):
             await _ngrok()
             return
         await _tunnel()
     except Exception as e:
         log.warning("web tunnel not started: %s", e)
+
+
+async def _named_tunnel() -> None:
+    """A Cloudflare tunnel on your own domain (Zero Trust > Networks > Tunnels, public
+    hostname -> http://localhost:8765): a fixed https address with no warning page.
+    CLOUDFLARE_TUNNEL_TOKEN (set with /set) runs it; LINEMAKER_WEB_URL is its address."""
+    if not os.environ.get("LINEMAKER_WEB_URL"):
+        log.warning("CLOUDFLARE_TUNNEL_TOKEN is set but LINEMAKER_WEB_URL isn't: /web needs the address")
+    binary = await asyncio.to_thread(_cloudflared)
+    env = dict(os.environ, TUNNEL_TOKEN=os.environ["CLOUDFLARE_TUNNEL_TOKEN"])   # not on the command line
+    proc = await asyncio.create_subprocess_exec(binary, "tunnel", "--no-autoupdate", "run", env=env,
+                                                stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE)
+    STATE["proc"] = proc
+
+    async def read():
+        up = False
+        while True:
+            line = await proc.stderr.readline()
+            if not line:
+                break
+            if b"Registered tunnel connection" in line and not up:
+                up = True
+                log.info("web dashboard on your Cloudflare tunnel")
+            elif b" ERR " in line:
+                log.warning("cloudflared: %s", line.decode(errors="ignore")[-200:].strip())
+        log.warning("cloudflare tunnel stopped")
+    asyncio.get_running_loop().create_task(read())
 
 
 async def _warm() -> None:
