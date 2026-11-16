@@ -188,5 +188,5 @@ api("/api/me").then(d=>{ME=d;document.getElementById("me").innerHTML=(d.avatar?`
  const tabs=Object.keys(VIEWS).filter(n=>n!="Members"||d.owner);
  document.getElementById("tabs").innerHTML=tabs.map(n=>`<button data-v="${n}">${{"Today":"🎯 Today","Line shop":"🛒 Line shop","Record":"📈 Record","My bets":"🎟️ My bets","Group":"🏆 Group","Members":"👥 Members"}[n]}</button>`).join("");
  document.querySelectorAll("nav button").forEach(b=>b.onclick=()=>show(b.dataset.v));show("Today")});
-setInterval(()=>{if(current=="Today"||current=="Members")show(current)},90000);
+setInterval(()=>{if(!document.hidden&&!dlg.open&&(current=="Today"||current=="Members"))show(current)},90000);   // only while you're looking
 </script></body></html>"""
