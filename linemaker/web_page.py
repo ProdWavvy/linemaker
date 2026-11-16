@@ -16,7 +16,8 @@ PAGE = r"""<!doctype html>
 *{box-sizing:border-box}html,body{margin:0;background:var(--bg);color:var(--text);font:15px/1.45 system-ui,-apple-system,"Segoe UI",sans-serif}
 a{color:inherit}
 header{position:sticky;top:0;z-index:5;padding:12px 16px 10px;background:linear-gradient(120deg,#2a1f4f 0%,#1b1c22 60%,#2b2414 100%);border-bottom:1px solid var(--line);display:flex;align-items:center;gap:10px}
-.logo{font-weight:800;font-size:18px;color:#fff;letter-spacing:.2px}.live{width:8px;height:8px;border-radius:50%;background:var(--green);box-shadow:0 0 0 0 #3ddc8488;animation:pulse 2s infinite}
+.logo{font-weight:800;font-size:18px;color:#fff;letter-spacing:.2px;white-space:nowrap}
+.me span:not(.badge){max-width:96px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}header a{white-space:nowrap}.live{width:8px;height:8px;border-radius:50%;background:var(--green);box-shadow:0 0 0 0 #3ddc8488;animation:pulse 2s infinite}
 @keyframes pulse{0%{box-shadow:0 0 0 0 #3ddc8488}70%{box-shadow:0 0 0 8px #3ddc8400}100%{box-shadow:0 0 0 0 #3ddc8400}}
 .me{margin-left:auto;display:flex;align-items:center;gap:8px;font-size:13px;color:var(--dim)}.me img,.av{width:28px;height:28px;border-radius:50%;object-fit:cover}
 .badge{font-size:11px;padding:2px 7px;border-radius:9px;background:var(--purple);color:#fff;font-weight:700}
@@ -58,10 +59,17 @@ th{color:var(--dim);font-weight:500;font-size:12px;text-transform:uppercase;lett
 canvas{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:10px;margin-top:10px;max-height:290px}
 .empty{color:var(--dim);padding:28px 0;text-align:center}.week p{margin:7px 0}.week b{color:#fff}
 .viewing{background:#8b6cff22;border:1px solid #8b6cff66;color:#d9d0ff;border-radius:12px;padding:8px 12px;margin:6px 0 10px;font-size:14px;display:flex;align-items:center;gap:8px}
+dialog{background:var(--card);color:var(--text);border:1px solid var(--line);border-radius:16px;padding:16px;width:min(92vw,380px)}
+dialog::backdrop{background:#000a}dialog h3{margin:0 0 8px;color:#fff}dialog label{display:block;font-size:13px;color:var(--dim);margin-top:10px}
+dialog input,dialog select{width:100%;margin-top:4px;padding:9px 10px;border-radius:10px;border:1px solid var(--line);background:#141518;color:#fff;font:inherit}
+.btns{display:flex;gap:8px;margin-top:14px}.btn{flex:1;padding:10px;border-radius:11px;border:0;font:inherit;font-weight:700;cursor:pointer;background:var(--card2);color:#fff}
+.btn.go{background:linear-gradient(120deg,#3ddc84,#9be15d);color:#0b1a10}.btn.pm{background:#F57C00;color:#fff}.msg{margin-top:10px;font-size:14px}
+.inp{width:100%;margin-top:4px;padding:9px;border-radius:10px;border:1px solid var(--line);background:#141518;color:#fff;font:inherit}
+button.chip{font:inherit;font-size:13px;cursor:pointer}
 .viewing button{margin-left:auto;background:#8b6cff;color:#fff;border:0;border-radius:10px;padding:4px 10px;font:inherit;font-size:13px}
 </style></head><body>
 <header><span class="live" title="auto-refreshing"></span><span class="logo">🎯 Linemaker</span><span class="me" id="me"></span><a href="/logout" class="dim" style="font-size:13px">sign out</a></header>
-<nav id="tabs"></nav><main id="main"><div class="empty">Loading…</div></main>
+<nav id="tabs"></nav><main id="main"><div class="empty">Loading…</div></main><dialog id="dlg"></dialog>
 <script>
 const COLORS={fanduel:"#1493FF",draftkings:"#53D337",polymarket:"#F57C00",prizepicks:"#8E44AD",underdog:"#F1C40F",kalshi:"#00B386"};
 const TAGS={fanduel:"FD",draftkings:"DK",polymarket:"PM",prizepicks:"PP",underdog:"UD",kalshi:"Kalshi"};
@@ -81,14 +89,45 @@ const md=t=>esc(t).replace(/\*\*(.+?)\*\*/g,"<b>$1</b>").replace(/`(.+?)`/g,"<co
 const chip=(b,o,u,good,txt)=>{const t=(txt||((TAGS[key(b)]||b)+(o!=null?" "+odds(o):"")))+(good?" ✅":"");
  return u?`<a class="chip${good?" good":""}" href="${esc(u)}" target="_blank" rel="noopener">${sq(b)}${esc(t)}</a>`:`<span class="chip${good?" good":""}">${sq(b)}${esc(t)}</span>`};
 const api=async p=>{const r=await fetch(p,{credentials:"same-origin"});if(r.status==401){location.href="/";throw 0}if(!r.ok)throw new Error(r.status);return r.json()};
-let ME={},VIEW=null,charts=[],AFTER=[];const kill=()=>{charts.forEach(c=>c.destroy());charts=[]};
+let ME={},VIEW=null,charts=[],AFTER=[],PICKS={},PM=null;let NEXT=0;
+const post=async(p,b)=>{const r=await fetch(p,{method:"POST",credentials:"same-origin",headers:{"Content-Type":"application/json","X-Linemaker":"1"},body:JSON.stringify(b)});
+ const d=await r.json().catch(()=>({error:"no answer"}));if(r.status==401){location.href="/";throw 0}if(!r.ok)throw new Error(d.error||r.status);return d};
+const dlg=document.getElementById("dlg");const shut=()=>dlg.close();
+const keep=o=>{const id="p"+(NEXT++);PICKS[id]=o;return id};
+const val=id=>document.getElementById(id).value;
+function openLog(id){const o=PICKS[id];dlg.innerHTML=`<h3>📝 Log this bet</h3><div class="dim">${esc(o.label)}</div>
+ <label>Stake ($)<input id="lstake" inputmode="decimal" placeholder="10"></label><label>Odds you got<input id="lodds" value="${o.odds??""}"></label>
+ <label>Book<input id="lbook" value="${esc(o.book||"")}"></label><div class="msg" id="lmsg"></div>
+ <div class="btns"><button class="btn" id="lno">Cancel</button><button class="btn go" id="lgo">Log it</button></div>`;
+ dlg.showModal();document.getElementById("lno").onclick=shut;
+ document.getElementById("lgo").onclick=async()=>{const m=document.getElementById("lmsg");
+  try{await post("/api/bet",{legs:o.legs,stake:val("lstake"),odds:val("lodds"),book:val("lbook")});
+   m.innerHTML='<span class="pos">✅ Logged in your bets.</span>';setTimeout(shut,900)}catch(e){if(e)m.innerHTML=`<span class="neg">⚠️ ${esc(e.message)}</span>`}}}
+async function openBuy(id){const o=PICKS[id];if(!PM)PM=await api("/api/pm");
+ if(!PM.linked){dlg.innerHTML=`<h3>🟧 Polymarket</h3><p>Link your own Polymarket US account first (it's in the <b>My bets</b> tab).</p><div class="btns"><button class="btn" id="bok">OK</button></div>`;
+  dlg.showModal();document.getElementById("bok").onclick=shut;return}
+ dlg.innerHTML=`<h3>🟧 Buy on Polymarket</h3><div class="dim">${esc(o.label)}</div><label>Dollars to spend (max $${PM.max})<input id="bstake" inputmode="decimal" value="5"></label>
+ <div class="msg" id="bmsg"></div><div class="btns"><button class="btn" id="bno">Cancel</button><button class="btn pm" id="bgo">Get price</button></div>`;
+ dlg.showModal();document.getElementById("bno").onclick=shut;
+ let plan=null;const m=()=>document.getElementById("bmsg");const go=document.getElementById("bgo");
+ go.onclick=async()=>{try{if(!plan){plan=await post("/api/pm/quote",{slug:o.pm.pm_slug,long:o.pm.pm_long,tick:o.pm.pm_tick,min:o.pm.pm_min,stake:val("bstake")});
+   m().innerHTML=`Buy <b>${plan.qty} contracts</b> at <b>${(plan.ask*100).toFixed(1)}¢</b> (${odds(plan.odds)} with the fee)<br>Cost <b>$${plan.cost.toFixed(2)}</b> · pays <b>$${plan.payout.toFixed(2)}</b> if it hits<br><span class="dim">fills now at this price or better, or not at all</span>`;
+   go.textContent=`Confirm $${plan.cost.toFixed(2)}`;return}
+   go.disabled=true;const r=await post("/api/pm/buy",{slug:o.pm.pm_slug,long:o.pm.pm_long,tick:o.pm.pm_tick,ask:plan.ask,qty:plan.qty,cost:plan.cost,leg:o.leg,label:o.label});
+   m().innerHTML=r.ok?`<span class="pos">✅ Bought ${r.qty} contracts at ${(r.avg*100).toFixed(1)}¢ ($${r.cost.toFixed(2)} with the fee). Logged.</span>`:`<span class="neg">⚠️ ${esc(r.msg)}</span>`;
+   go.textContent="Done";go.onclick=shut;go.disabled=false}catch(e){if(e)m().innerHTML=`<span class="neg">⚠️ ${esc(e.message)}</span>`;plan=null;go.textContent="Get price";go.disabled=false}}}
+async function pmLink(){const m=document.getElementById("pmsg");try{await post("/api/pm/link",{key_id:val("pkid"),secret:val("psec")});PM=null;show("My bets")}
+ catch(e){if(e)m.innerHTML=`<span class="neg">⚠️ ${esc(e.message)}</span>`}}
+async function pmUnlink(){await post("/api/pm/unlink",{});PM=null;show("My bets")}const kill=()=>{charts.forEach(c=>c.destroy());charts=[]};
 const q=p=>VIEW?p+(p.includes("?")?"&":"?")+"user="+encodeURIComponent(VIEW):p;
 const pickRow=(p,i)=>`<div class="pick"><div class="ptop">${SPORT[p.sport]||"🎯"} <b>${i}. ${esc(p.label)}</b>${stars(p.stars)}<span class="gap">+${(p.gap*100).toFixed(1)}</span></div>
  <div class="bar"><i style="width:${Math.min(100,p.ours*100)}%"></i><u style="left:${Math.min(99,p.implied*100)}%"></u></div>
  <div class="meta">${sq(p.book)}<span><b>${odds(p.odds)}</b> ${esc(TAGS[key(p.book)]||p.book)}</span><span>ours <b>${pct(p.ours)}</b> · price ${pct(p.implied)}</span><span>${esc(p.game||"")}</span><span>${when(p.commence)}</span></div>
- ${p.tags?`<div class="tags">${esc(p.tags)}</div>`:""}${(p.links||[]).map(l=>chip(l.book,(p.books.find(b=>b.book==l.book)||{}).odds,l.url,false,"Bet "+(TAGS[key(l.book)]||l.book)+" "+odds((p.books.find(b=>b.book==l.book)||{}).odds))).join("")}</div>`;
+ ${p.tags?`<div class="tags">${esc(p.tags)}</div>`:""}${(p.links||[]).map(l=>chip(l.book,(p.books.find(b=>b.book==l.book)||{}).odds,l.url,false,"Bet "+(TAGS[key(l.book)]||l.book)+" "+odds((p.books.find(b=>b.book==l.book)||{}).odds))).join("")}
+ ${p.leg?`<button class="chip" onclick="openLog('${keep({label:p.label,legs:[p.leg],odds:p.odds,book:p.book})}')">📝 Log</button>`:""}${p.pm?`<button class="chip" style="border-color:#F57C0099" onclick="openBuy('${keep({label:p.label,pm:p.pm,leg:p.leg})}')">🟧 Buy</button>`:""}</div>`;
 const ticket=p=>`<div class="ticket" style="border-color:${col(p.book)}66"><div class="hd">${sq(p.book)}${esc(p.book)} · ${p.odds!=null?p.legs.length+"-leg "+esc(p.kind):esc(p.kind)} <span class="ring">${p.odds!=null?"<b style='color:#fff'>"+odds(p.odds)+"</b> · ":p.pays?"pays <b style='color:#fff'>"+p.pays+"x</b> · ":""}${pct(p.prob)} hit</span></div>
- <div class="legs">${p.legs.map(l=>l.url?`<a href="${esc(l.url)}" target="_blank" rel="noopener">${esc(l.label)}</a>`:esc(l.label)+(l.odds!=null?" ("+odds(l.odds)+")":"")).join(" · ")}</div>${p.url?chip(p.book,null,p.url,false,"Open the slip on "+p.book):""}</div>`;
+ <div class="legs">${p.legs.map(l=>l.url?`<a href="${esc(l.url)}" target="_blank" rel="noopener">${esc(l.label)}</a>`:esc(l.label)+(l.odds!=null?" ("+odds(l.odds)+")":"")).join(" · ")}</div>${p.url?chip(p.book,null,p.url,false,"Open the slip on "+p.book):""}
+ ${p.legs_raw&&p.legs_raw.length?`<button class="chip" onclick="openLog('${keep({label:p.legs.map(l=>l.label).join(" + "),legs:p.legs_raw,odds:p.odds,book:p.book})}')">📝 Log</button>`:""}</div>`;
 const ufcCard=u=>{const f=(u.fight||[]).map(r=>`<div class="pick"><div class="ptop">🥊 <b>${r.n}. ${esc(r.label)}</b><span class="gap" style="background:#ffffff10;color:#fff">${pct(r.chance)}</span></div>
   <div class="bar"><i style="width:${r.chance*100}%;background:linear-gradient(90deg,#ff5d5d,#f5c542)"></i><u style="left:${r.kalshi*100}%"></u></div>
   <div class="meta"><span>${esc(r.fight)}</span><span>fair <b>${esc(r.fair)}</b></span><span>bet at <b>${esc(r.bet_at)}</b>+</span><span>Kalshi ${Math.round(r.kalshi*100)}¢</span></div>
@@ -124,8 +163,13 @@ const VIEWS={
     options:{plugins:{legend:{labels:{color:"#dbdee1"}}},scales:ax}}));
    if(d.mine.length)charts.push(new Chart(document.getElementById("c2"),{type:"line",data:{labels:d.mine.map(s=>s.date.slice(5)),datasets:[{label:(VIEW?VIEW+"'s":"Your")+" bets, $ running",data:d.mine.map(s=>s.profit),borderColor:"#3ddc84",backgroundColor:"#3ddc8422",fill:true,tension:.3}]},options:{plugins:{legend:{labels:{color:"#dbdee1"}}},scales:ax}}))});
   return viewing()+k+`<canvas id="c1"></canvas>${d.mine.length?'<canvas id="c2"></canvas>':""}<div class="card week fade" style="--accent:var(--purple)"><h3>🗓️ This week</h3>${wk.map(l=>`<p>${md(l)}</p>`).join("")}</div>`},
- "My bets":async()=>{const d=await api(q("/api/bets"));
-  return viewing()+`<div class="card fade"><h3>🎟️ Open <span class="dim">${d.open.length}</span></h3>${d.open.map(betRow).join("")||'<div class="empty">No open bets.</div>'}</div>
+ "My bets":async()=>{const d=await api(q("/api/bets"));if(!VIEW)PM=await api("/api/pm");
+  const pmPanel=VIEW?"":PM.linked?`<div class="card fade" style="--accent:#F57C00"><h3>🟧 Polymarket linked</h3><div class="dim">Max $${PM.max} per order · your positions sync into your bets every 10 minutes</div>
+   <button class="chip" onclick="pmUnlink()">Unlink</button></div>`:
+   `<div class="card fade" style="--accent:#F57C00"><h3>🟧 Link your Polymarket US account</h3><div class="dim">From polymarket.us/developer. Then 🟧 Buy works on any pick with a Polymarket price, and your positions sync in.</div>
+   <label class="dim">Key ID<input id="pkid" class="inp"></label><label class="dim">Secret key<input id="psec" type="password" class="inp"></label>
+   <div class="msg" id="pmsg"></div><button class="btn pm" style="margin-top:10px;width:100%" onclick="pmLink()">Link</button></div>`;
+  return viewing()+pmPanel+`<div class="card fade"><h3>🎟️ Open <span class="dim">${d.open.length}</span></h3>${d.open.map(betRow).join("")||'<div class="empty">No open bets.</div>'}</div>
   <div class="card fade" style="--accent:#5c6370"><h3>📜 Settled</h3>${d.settled.map(betRow).join("")||'<div class="empty">Nothing settled yet.</div>'}</div>`},
  "Group":async()=>{const g=await api("/api/group");if(!g.length)return`<div class="empty">No settled bets in the last 30 days.</div>`;const medal=["🥇","🥈","🥉"];
   return`<div class="card fade"><h3>🏆 Leaderboard <span class="dim">last 30 days</span></h3>${g.map((p,i)=>`<div class="lb">${ini(p.name)}<div><div class="n">${medal[i]||"#"+(i+1)} ${esc(p.name)}</div><div class="dim">${p.won}-${p.lost}</div></div>
@@ -140,7 +184,7 @@ let current="Today";
 async function show(name){current=name;document.querySelectorAll("nav button").forEach(b=>b.classList.toggle("on",b.dataset.v==name));
  kill();const m=document.getElementById("main");if(!m.innerHTML.includes("card"))m.innerHTML='<div class="empty">Loading…</div>';
  AFTER=[];try{m.innerHTML=`<div class="fade">${await VIEWS[name]()}</div>`;AFTER.splice(0).forEach(f=>f())}catch(e){if(e)m.innerHTML='<div class="empty">Couldn\'t load this. Try again in a minute.</div>'}}
-api("/api/me").then(d=>{ME=d;document.getElementById("me").innerHTML=(d.avatar?`<img src="${esc(d.avatar)}" alt="">`:ini(d.name))+`<span>${esc(d.name)}</span>`+(d.owner?'<span class="badge">OWNER</span>':"");
+api("/api/me").then(d=>{ME=d;document.getElementById("me").innerHTML=(d.avatar?`<img src="${esc(d.avatar)}" alt="">`:ini(d.name))+`<span>${esc(d.name)}</span>`+(d.owner?'<span class="badge">OWNER</span>':"")+(d.guest?'<span class="badge" style="background:#3a6df0">GUEST</span>':"");
  const tabs=Object.keys(VIEWS).filter(n=>n!="Members"||d.owner);
  document.getElementById("tabs").innerHTML=tabs.map(n=>`<button data-v="${n}">${{"Today":"🎯 Today","Line shop":"🛒 Line shop","Record":"📈 Record","My bets":"🎟️ My bets","Group":"🏆 Group","Members":"👥 Members"}[n]}</button>`).join("");
  document.querySelectorAll("nav button").forEach(b=>b.onclick=()=>show(b.dataset.v));show("Today")});

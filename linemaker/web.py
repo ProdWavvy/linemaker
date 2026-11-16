@@ -31,8 +31,8 @@ log = logging.getLogger("linemaker.web")
 TOKEN_TTL = 15 * 60
 SESSION_TTL = 30 * 24 * 3600
 CARDS_KEPT = 8
-_TOKENS = {}      # token -> (user id, name, expires, owner, avatar)
-_SESSIONS = {}    # session -> (user id, name, expires, owner, avatar)
+_TOKENS = {}      # sha256(token) -> (user id, name, expires, owner, avatar, guest)
+_SESSIONS = {}    # sha256(session) -> (user id, name, expires, owner, avatar, guest)
 LAST_SEEN = {}    # member name -> ISO time they last opened the dashboard
 _CARDS = collections.deque(maxlen=CARDS_KEPT)
 STATE = {"url": None, "proc": None}
@@ -55,36 +55,99 @@ def base_url() -> Optional[str]:
 
 
 # ---- login -------------------------------------------------------------------------------------
-def login_link(user_id: str, name: str, owner: bool = False, avatar: str = "") -> Optional[str]:
-    """A one-use sign-in link. owner: the bot's owner (Members tab: everyone's dashboard)."""
+# Tokens and sessions are kept by their SHA-256 (the link / cookie holds the secret itself) in
+# ~/.linemaker-secrets/web_auth.json (0600), so a restart doesn't sign anyone out. Each entry:
+# [user id, name, expires, owner, avatar, guest].
+INVITE_TTL = 7 * 24 * 3600
+
+
+def _auth_path() -> str:
+    return os.path.join(os.path.expanduser(os.environ.get("LINEMAKER_SECRETS_DIR", "~/.linemaker-secrets")), "web_auth.json")
+
+
+def _h(secret: str) -> str:
+    import hashlib
+    return hashlib.sha256((secret or "").encode()).hexdigest()
+
+
+def _load_auth() -> None:
+    if _TOKENS or _SESSIONS:
+        return
+    try:
+        with open(_auth_path()) as f:
+            d = json.load(f)
+        _TOKENS.update({k: tuple(v) for k, v in d.get("tokens", {}).items()})
+        _SESSIONS.update({k: tuple(v) for k, v in d.get("sessions", {}).items()})
+    except (OSError, ValueError):
+        pass
+
+
+def _save_auth() -> None:
+    now = time.time()
+    for store in (_TOKENS, _SESSIONS):
+        for k in [k for k, v in store.items() if v[2] < now]:
+            store.pop(k, None)
+    path = _auth_path()
+    try:
+        os.makedirs(os.path.dirname(path), mode=0o700, exist_ok=True)
+        fd = os.open(path + ".tmp", os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w") as f:
+            json.dump({"tokens": _TOKENS, "sessions": _SESSIONS}, f)
+        os.replace(path + ".tmp", path)
+    except OSError as e:
+        log.warning("web sign-ins not saved: %s", e)
+
+
+def _new_token(entry: tuple, ttl: float) -> Optional[str]:
     url = base_url()
     if not url:
         return None
-    now = time.time()
-    for t in [t for t, v in _TOKENS.items() if v[2] < now]:
-        _TOKENS.pop(t, None)
+    _load_auth()
     tok = secrets.token_urlsafe(32)
-    _TOKENS[tok] = (str(user_id), name, now + TOKEN_TTL, bool(owner), avatar or "")
+    _TOKENS[_h(tok)] = (entry[0], entry[1], time.time() + ttl) + tuple(entry[2:])
+    _save_auth()
     return f"{url}/login?t={tok}"
+
+
+def login_link(user_id: str, name: str, owner: bool = False, avatar: str = "") -> Optional[str]:
+    """A one-use sign-in link for a Discord member (15 minutes). owner: Members tab."""
+    return _new_token((str(user_id), name, bool(owner), avatar or "", False), TOKEN_TTL)
+
+
+def invite_link(name: str) -> Optional[str]:
+    """A one-use invite for someone who isn't in the Discord (good for 7 days until it's
+    opened, then 30 days signed in on that device): a guest named `name`."""
+    slug = re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-")[:30] or "guest"
+    return _new_token((f"guest:{slug}", name.strip()[:40] or "Guest", False, "", True), INVITE_TTL)
 
 
 def redeem(token: str) -> Optional[str]:
     """A login token -> a new session id (the token is spent either way)."""
-    got = _TOKENS.pop(token or "", None)
+    _load_auth()
+    got = _TOKENS.pop(_h(token), None)
     if not got or got[2] < time.time():
+        _save_auth()
         return None
     sid = secrets.token_urlsafe(32)
-    _SESSIONS[sid] = (got[0], got[1], time.time() + SESSION_TTL, got[3] if len(got) > 3 else False,
-                      got[4] if len(got) > 4 else "")
+    _SESSIONS[_h(sid)] = (got[0], got[1], time.time() + SESSION_TTL) + tuple(got[3:])
+    _save_auth()
     return sid
 
 
 def session(sid: Optional[str]) -> Optional[tuple]:
-    got = _SESSIONS.get(sid or "")
+    _load_auth()
+    got = _SESSIONS.get(_h(sid or ""))
     if not got or got[2] < time.time():
-        _SESSIONS.pop(sid or "", None)
         return None
     return got
+
+
+def is_owner(s: tuple) -> bool:
+    return len(s) > 3 and bool(s[3])
+
+
+def is_guest(s: tuple) -> bool:
+    return len(s) > 5 and bool(s[5])
 
 
 # ---- what the cards showed -------------------------------------------------------------------
@@ -106,9 +169,18 @@ def _ev_json(ev, profile=None) -> dict:
         links = [{"book": b, "url": u} for b, u in pick_links(ev) if u and len(u) < 2000]
     except Exception:
         links = []
+    try:
+        from .bets import leg_from_eval
+        from .polymarket_us import side_for
+        leg = leg_from_eval(ev)
+        pm = side_for(ev)
+        pm = {k: pm[k] for k in ("pm_slug", "pm_long", "pm_tick", "pm_min")} if pm else None
+    except Exception:
+        leg, pm = None, None
     return {"label": short_label(s.label), "sport": m.sport, "game": m.game, "commence": getattr(m, "commence", ""),
             "book": s.best_book, "odds": s.best_odds, "ours": round(s.blended, 4), "implied": round(s.best_implied, 4),
             "gap": round(s.gap, 4), "tags": reason_tags(ev, profile), "links": links, "stars": pick_stars(ev, profile),
+            "leg": leg, "pm": pm,
             "books": [{"book": b, "odds": o} for b, o in sorted(prices.items(), key=lambda kv: kv[0]) if o is not None]}
 
 
@@ -121,7 +193,12 @@ def _parlay_json(p) -> dict:
         legs_urls = [u for _l, u in leg_links(p)] if not url else []
     except Exception:
         url, legs_urls = None, []
-    return {"book": p.book, "kind": kind, "odds": p.american, "prob": round(p.prob, 4), "url": url,
+    try:
+        from .bets import leg_from_eval
+        raw = [leg_from_eval(ev, odds=o, book=p.book) for ev, o in p.legs]
+    except Exception:
+        raw = []
+    return {"book": p.book, "kind": kind, "odds": p.american, "prob": round(p.prob, 4), "url": url, "legs_raw": raw,
             "legs": [{"label": short_label(ev.best.label), "odds": o,
                       "url": legs_urls[i] if i < len(legs_urls) else None} for i, (ev, o) in enumerate(p.legs)]}
 
@@ -267,6 +344,75 @@ def activity_data(limit: int = 40) -> list:
              "profit": b.get("profit"), "placed": b.get("placed", "")[:16], "pm": bool(b.get("pm_slug"))} for b in rows]
 
 
+LEG_KEYS = {"key", "side", "label", "sport", "date", "bet_type", "game", "odds", "book", "live", "model_prob"}
+
+
+def log_bet(name: str, body: dict) -> dict:
+    """'I bet this' from the web: one leg or a parlay's legs, the odds you got, your stake."""
+    from .bets import add_bet
+    from .staking import paper_on
+    legs = body.get("legs") or []
+    if not isinstance(legs, list) or not 1 <= len(legs) <= 12:
+        raise ValueError("pick a bet first")
+    clean = []
+    for l in legs:
+        if not isinstance(l, dict) or not l.get("key") or l.get("side") not in ("A", "B", "C"):
+            raise ValueError("that bet can't be logged from here")
+        clean.append({k: l[k] for k in LEG_KEYS if k in l})
+    odds, stake = int(float(body.get("odds"))), float(body.get("stake"))
+    if abs(odds) < 100 or not 0 < stake <= 100000:
+        raise ValueError("stake should be a dollar amount and odds like -150 or +120")
+    book = str(body.get("book") or "")[:40] or "Other"
+    bet = add_bet(clean, odds, stake, book, name, source="web", paper=paper_on())
+    return {"ok": True, "id": bet["id"]}
+
+
+def pm_status(uid: str) -> dict:
+    from . import pm_accounts
+    return {"linked": bool(pm_accounts.creds(uid)), "max": pm_accounts.max_stake(uid)}
+
+
+def pm_link(uid: str, name: str, body: dict) -> dict:
+    from . import pm_accounts
+    pm_accounts.link(uid, name, str(body.get("key_id") or ""), str(body.get("secret") or ""))
+    return pm_status(uid)
+
+
+def pm_quote(uid: str, body: dict) -> dict:
+    from . import pm_accounts
+    from .polymarket_us import american, bbo, order_plan
+    if not pm_accounts.creds(uid):
+        raise ValueError("link your Polymarket account first (My bets tab)")
+    q = bbo(str(body["slug"]))
+    ask = q["long"] if body.get("long") else q["short"]
+    stake = min(float(body.get("stake") or 5), pm_accounts.max_stake(uid))
+    plan = order_plan(stake, ask, float(body.get("tick") or 0.01), float(body.get("min") or 1))
+    if not plan:
+        raise ValueError("nobody is offering this side, or that's less than one contract")
+    return dict(plan, ask=ask, max=pm_accounts.max_stake(uid))
+
+
+def pm_buy(uid: str, name: str, body: dict) -> dict:
+    from . import pm_accounts
+    from .bets import add_bet
+    from .polymarket_us import buy
+    cr = pm_accounts.creds(uid)
+    if not cr:
+        raise ValueError("link your Polymarket account first")
+    qty, ask, cost = float(body["qty"]), float(body["ask"]), float(body.get("cost") or 0)
+    if cost > pm_accounts.max_stake(uid) + 0.01:
+        raise ValueError("over your max per order")
+    got = buy(cr, str(body["slug"]), bool(body.get("long")), ask, qty, float(body.get("tick") or 0.01))
+    if got.get("ok"):
+        leg = body.get("leg") if isinstance(body.get("leg"), dict) else None
+        legs = [dict({k: leg[k] for k in LEG_KEYS if k in leg}, odds=got["odds"], book="Polymarket")] if leg else \
+            [{"label": str(body.get("label") or "Polymarket"), "sport": "Other", "bet_type": "external",
+              "date": dt.date.today().isoformat(), "odds": got["odds"], "book": "Polymarket"}]
+        add_bet(legs, got["odds"], got["cost"], "Polymarket", name, source="polymarket-bot",
+                pm_slug=body["slug"], pm_long=bool(body.get("long")), pm_qty=got["qty"], pm_external=not leg)
+    return got
+
+
 def bets_data(name: str) -> dict:
     from .bets import load_bets, mine, per_user_on
     who = name if per_user_on() else None
@@ -322,7 +468,8 @@ def make_app():
         raise resp
 
     async def logout(request):
-        _SESSIONS.pop(request.cookies.get("lm_session") or "", None)
+        _SESSIONS.pop(_h(request.cookies.get("lm_session") or ""), None)
+        _save_auth()
         resp = web.HTTPFound("/")
         resp.del_cookie("lm_session")
         raise resp
@@ -332,18 +479,39 @@ def make_app():
             s = who(request)
             if not s:
                 return web.json_response({"error": "signed out"}, status=401)
-            is_owner = len(s) > 3 and s[3]
-            if owner_only and not is_owner:
+            owner = is_owner(s)
+            if owner_only and not owner:
                 return web.json_response({"error": "owner only"}, status=403)
             LAST_SEEN[s[1]] = dt.datetime.now().isoformat(timespec="minutes")
-            name = request.query.get("user") if is_owner and request.query.get("user") else s[1]   # owner: anyone's
+            name = request.query.get("user") if owner and request.query.get("user") else s[1]   # owner: anyone's
             data = await asyncio.to_thread(fn, s, name)
             return web.json_response(data, headers={"Cache-Control": "no-store"})
         return handler
 
+    def action(fn):
+        """POST: signed in, JSON, and our own header (a page on another site can't send it)."""
+        async def handler(request):
+            s = who(request)
+            if not s:
+                return web.json_response({"error": "signed out"}, status=401)
+            if request.headers.get("X-Linemaker") != "1":
+                return web.json_response({"error": "bad request"}, status=400)
+            try:
+                body = await request.json()
+            except Exception:
+                body = {}
+            try:
+                return web.json_response(await asyncio.to_thread(fn, s, body if isinstance(body, dict) else {}))
+            except (ValueError, KeyError, TypeError) as e:
+                return web.json_response({"error": str(e)[:200]}, status=400)
+            except Exception as e:
+                log.warning("web action failed: %s", type(e).__name__)
+                return web.json_response({"error": str(e)[:200]}, status=502)
+        return handler
+
     app = web.Application()
     app.add_routes([web.get("/", index), web.get("/login", login), web.get("/logout", logout),
-                    web.get("/api/me", api(lambda s, n: {"name": s[1], "owner": bool(len(s) > 3 and s[3]),
+                    web.get("/api/me", api(lambda s, n: {"name": s[1], "owner": is_owner(s), "guest": is_guest(s),
                                                          "avatar": s[4] if len(s) > 4 else ""})),
                     web.get("/api/cards", api(lambda s, n: cards())),
                     web.get("/api/record", api(lambda s, n: record_data(n))),
@@ -351,7 +519,13 @@ def make_app():
                     web.get("/api/bets", api(lambda s, n: bets_data(n))),
                     web.get("/api/group", api(lambda s, n: group_data())),
                     web.get("/api/members", api(lambda s, n: members_data(), owner_only=True)),
-                    web.get("/api/activity", api(lambda s, n: activity_data(), owner_only=True))])
+                    web.get("/api/activity", api(lambda s, n: activity_data(), owner_only=True)),
+                    web.get("/api/pm", api(lambda s, n: pm_status(s[0]))),
+                    web.post("/api/bet", action(lambda s, b: log_bet(s[1], b))),
+                    web.post("/api/pm/link", action(lambda s, b: pm_link(s[0], s[1], b))),
+                    web.post("/api/pm/unlink", action(lambda s, b: {"ok": __import__("linemaker.pm_accounts", fromlist=["x"]).unlink(s[0])})),
+                    web.post("/api/pm/quote", action(lambda s, b: pm_quote(s[0], b))),
+                    web.post("/api/pm/buy", action(lambda s, b: pm_buy(s[0], s[1], b)))])
     return app
 
 
@@ -367,9 +541,61 @@ async def start() -> None:
     if os.environ.get("LINEMAKER_WEB_URL") or os.environ.get("LINEMAKER_WEB_TUNNEL", "quick").lower() == "off":
         return
     try:
+        if os.environ.get("LINEMAKER_WEB_NGROK_DOMAIN") and os.environ.get("NGROK_AUTHTOKEN"):
+            await _ngrok()
+            return
         await _tunnel()
     except Exception as e:
         log.warning("web tunnel not started: %s", e)
+
+
+def _ngrok_bin() -> str:
+    """The official ngrok agent, downloaded once into cache/bin (for a fixed address)."""
+    import tarfile
+    path = os.path.join(os.environ.get("LINEMAKER_CACHE_DIR", "cache"), "bin", "ngrok")
+    if os.path.exists(path):
+        return path
+    arch = {"x86_64": "amd64", "amd64": "amd64", "aarch64": "arm64", "arm64": "arm64"}.get(platform.machine().lower())
+    if not arch:
+        raise RuntimeError(f"no ngrok build for {platform.machine()}")
+    url = f"https://bin.equinox.io/c/bNyj1mQVY4c/ngrok-v3-stable-linux-{arch}.tgz"
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    tgz = path + ".tgz"
+    with urllib.request.urlopen(urllib.request.Request(url, headers={"User-Agent": "Linemaker/1.0"}), timeout=120) as r, \
+            open(tgz, "wb") as f:
+        f.write(r.read())
+    with tarfile.open(tgz) as t:
+        member = t.getmember("ngrok")
+        with t.extractfile(member) as src, open(path + ".part", "wb") as out:
+            out.write(src.read())
+    os.remove(tgz)
+    os.chmod(path + ".part", stat.S_IRWXU)
+    os.replace(path + ".part", path)
+    return path
+
+
+async def _ngrok() -> None:
+    """A fixed https address (ngrok's free static domain): invite links survive restarts."""
+    domain = os.environ["LINEMAKER_WEB_NGROK_DOMAIN"].replace("https://", "").strip("/")
+    binary = await asyncio.to_thread(_ngrok_bin)
+    proc = await asyncio.create_subprocess_exec(
+        binary, "http", f"127.0.0.1:{port()}", f"--url=https://{domain}", "--log=stdout", "--log-format=logfmt",
+        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT)   # NGROK_AUTHTOKEN comes from the env
+    STATE["proc"] = proc
+
+    async def read():
+        while True:
+            line = await proc.stdout.readline()
+            if not line:
+                break
+            if b"started tunnel" in line and not STATE["url"]:
+                STATE["url"] = f"https://{domain}"
+                log.info("web dashboard on its fixed address")
+            elif b"lvl=eror" in line or b"ERR_NGROK" in line:
+                log.warning("ngrok: %s", line.decode(errors="ignore")[:200])
+        STATE["url"] = None
+        log.warning("ngrok stopped")
+    asyncio.get_running_loop().create_task(read())
 
 
 def _cloudflared() -> str:

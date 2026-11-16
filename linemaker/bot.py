@@ -3803,13 +3803,8 @@ async def settings_cmd(interaction: discord.Interaction, search: Optional[str] =
 # ---- Polymarket US: each member's own linked account ------------------------------------------
 def pm_side(ev) -> Optional[dict]:
     """The Polymarket market + side for a pick's chosen side, when the feed found one."""
-    try:
-        entries = (ev.market.links or {}).get("Polymarket") or []
-        idx = ev.market.side_keys.index(ev.best.side) if hasattr(ev.market, "side_keys") else (0 if ev.best.side == "A" else 1)
-        e = entries[idx] if idx < len(entries) else None
-        return e if e and e.get("pm_slug") else None
-    except (ValueError, AttributeError):
-        return None
+    from .polymarket_us import side_for
+    return side_for(ev)
 
 
 def _pm_quote(side: dict) -> Optional[float]:
@@ -3983,10 +3978,30 @@ class PMLinkModal(discord.ui.Modal):
 
 
 @bot.tree.command(name="web", description="Your private link to the web dashboard (picks, line shop, record, bets)")
-async def web_cmd(interaction: discord.Interaction):
+@app_commands.describe(invite="Owner: a name, for an invite link to send someone who isn't in the Discord")
+async def web_cmd(interaction: discord.Interaction, invite: Optional[str] = None):
     from . import web
     from .admin import is_owner
     owner = await is_owner(bot, interaction.user)
+    if invite:
+        if not owner:
+            await interaction.response.send_message("Only the owner can invite people from outside the Discord.",
+                                                    ephemeral=True)
+            return
+        link = web.invite_link(invite) if web.on() else None
+        if not link:
+            await interaction.response.send_message("🌐 The dashboard isn't reachable yet. Try again in a minute.",
+                                                    ephemeral=True)
+            return
+        await interaction.response.send_message(
+            f"🌐 **Invite for {invite[:40]}**: copy this and send it to them.\n{link}\n"
+            "It works once (good for 7 days until it's opened), then keeps them signed in on that device for 30 days. "
+            "They can see everything, log bets and buy on their own linked Polymarket; they show up in your Members "
+            "tab." + ("" if os.environ.get("LINEMAKER_WEB_URL") or os.environ.get("LINEMAKER_WEB_NGROK_DOMAIN") else
+                      "\n⚠️ The address changes when the bot restarts (updates restart it), which breaks this link "
+                      "until you send a new one. A fixed address: set LINEMAKER_WEB_NGROK_DOMAIN and NGROK_AUTHTOKEN."),
+            ephemeral=True)
+        return
     avatar = str(getattr(getattr(interaction.user, "display_avatar", None), "url", "") or "")
     link = web.login_link(str(interaction.user.id), str(interaction.user), owner, avatar) if web.on() else None
     if not link:

@@ -320,6 +320,33 @@ def inject(feed: list, sport: str) -> int:
     return n
 
 
+def side_for(ev) -> Optional[dict]:
+    """The Polymarket market + side (slug, long, tick, min) for a pick's chosen side, if any."""
+    try:
+        entries = (ev.market.links or {}).get("Polymarket") or []
+        idx = ev.market.side_keys.index(ev.best.side) if hasattr(ev.market, "side_keys") else (0 if ev.best.side == "A" else 1)
+        e = entries[idx] if idx < len(entries) else None
+        return e if e and e.get("pm_slug") else None
+    except (ValueError, AttributeError):
+        return None
+
+
+def buy(cr: tuple, slug: str, long: bool, ask: float, qty: float, tick: float = 0.01) -> dict:
+    """Confirmed buy: re-check the offer (no worse than half a tick), then an immediate-or-cancel
+    order. {"ok", "qty", "avg", "cost", "odds", "msg"}."""
+    q = bbo(slug)
+    now = q["long"] if long else q["short"]
+    if now is None:
+        return {"ok": False, "msg": "Nobody is offering this side right now."}
+    if now > ask + tick / 2:
+        return {"ok": False, "moved": now, "msg": f"The price moved to {now * 100:.1f}c (you confirmed {ask * 100:.1f}c)."}
+    resp = place(cr, slug, long, ask, qty, tick)
+    got, avg = fills(resp, long)
+    if not got:
+        return {"ok": False, "msg": "No fill: the offer was gone by the time the order arrived. Nothing was bought."}
+    return {"ok": True, "qty": got, "avg": avg, "cost": round(got * cost_per_contract(avg), 2), "odds": american(avg)}
+
+
 # ---- account & orders (a linked key) ----------------------------------------------------------
 def balances(creds: tuple) -> dict:
     return _call("GET", "/v1/account/balances", creds=creds)

@@ -21,7 +21,7 @@ class WebTest(unittest.IsolatedAsyncioTestCase):
     async def test_login_cards_and_private_api(self):
         with tempfile.TemporaryDirectory() as d, mock.patch.dict(os.environ, {"LINEMAKER_CACHE_DIR": d,
                                                                               "LINEMAKER_TRACKING_DIR": d,
-                                                                              "LINEMAKER_WEB_URL": "https://dash.test"}):
+                                                                              "LINEMAKER_WEB_URL": "https://dash.test", "LINEMAKER_SECRETS_DIR": os.path.join(d, "sec")}):
             web._CARDS.clear()
             ev = _ev()
             web.record_card("🎯 NBA Value Scan", [(ev, None)], [], [])
@@ -59,7 +59,7 @@ class WebTest(unittest.IsolatedAsyncioTestCase):
     async def test_ufc_card_and_weekly(self):
         with tempfile.TemporaryDirectory() as d, mock.patch.dict(os.environ, {"LINEMAKER_CACHE_DIR": d,
                                                                               "LINEMAKER_TRACKING_DIR": d,
-                                                                              "LINEMAKER_WEB_URL": "https://dash.test"}):
+                                                                              "LINEMAKER_WEB_URL": "https://dash.test", "LINEMAKER_SECRETS_DIR": os.path.join(d, "sec")}):
             web._CARDS.clear()
             web.record_card("🥊 UFC Props", [], [], [], ufc={"fight": [{"n": 1, "label": "Gane by KO/TKO", "quotes": []}],
                                                             "strike": []})
@@ -102,3 +102,30 @@ class WebTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(pick_stars(ev, HitProfile(season=Window(5, 20, 1.0))), 4)   # sharp + DvP
         ev.market.notes, ev.best.market_prob = "", 0.5
         self.assertEqual(pick_stars(ev, None), 3)
+
+    async def test_guest_invite_logs_bets(self):
+        from linemaker import bets
+        with tempfile.TemporaryDirectory() as d, mock.patch.dict(os.environ, {"LINEMAKER_CACHE_DIR": d, "LINEMAKER_TRACKING_DIR": d,
+                                                                              "LINEMAKER_WEB_URL": "https://dash.test",
+                                                                              "LINEMAKER_SECRETS_DIR": os.path.join(d, "s")}):
+            web._TOKENS.clear(); web._SESSIONS.clear()
+            sid = web.redeem(web.invite_link("Cousin Mike").split("t=", 1)[1])
+            web._TOKENS.clear(); web._SESSIONS.clear()                              # a restart: read back from disk
+            self.assertTrue(web.is_guest(web.session(sid)))
+            leg = {"key": "2026-11-16|g|Ja Guard|points|22.5", "side": "A", "label": "Ja Guard Over 22.5 points",
+                   "sport": "NBA", "date": "2026-11-16", "bet_type": "prop", "evil": "x"}
+            async with TestClient(TestServer(web.make_app())) as c:
+                h = {"Cookie": f"lm_session={sid}"}
+                me = await (await c.get("/api/me", headers=h)).json()
+                self.assertEqual((me["name"], me["guest"], me["owner"]), ("Cousin Mike", True, False))
+                r = await c.post("/api/bet", json={"legs": [leg], "odds": -110, "stake": 12, "book": "FanDuel"}, headers=h)
+                self.assertEqual(r.status, 400)                                     # no X-Linemaker header: refused
+                r = await c.post("/api/bet", json={"legs": [leg], "odds": -110, "stake": 12, "book": "FanDuel"},
+                                 headers=dict(h, **{"X-Linemaker": "1"}))
+                self.assertEqual(r.status, 200)
+                bad = await c.post("/api/bet", json={"legs": [leg], "odds": 5, "stake": 12}, headers=dict(h, **{"X-Linemaker": "1"}))
+                self.assertEqual(bad.status, 400)
+                self.assertEqual((await c.get("/api/members", headers=h)).status, 403)   # guests aren't the owner
+            b = bets.load_bets()[-1]
+            self.assertEqual((b["user"], b["stake"], b["source"]), ("Cousin Mike", 12.0, "web"))
+            self.assertNotIn("evil", b["legs"][0])                                   # only bet fields are kept
