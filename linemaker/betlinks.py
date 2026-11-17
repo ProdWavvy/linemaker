@@ -58,13 +58,14 @@ def leg_link(m, side: str, book: str) -> Optional[str]:
     return built or fill_state(e.get("mlink") or e.get("elink") or "") or None
 
 
-def leg_links(parlay) -> list:
+def leg_links(parlay, partial: bool = False) -> list:
     """[(leg label, url)] for each leg of a parlay at its book (where a combined slip can't be
-    built, e.g. Polymarket, whose parlays are put together in the app one leg at a time)."""
+    built, e.g. Polymarket, whose parlays are put together in the app one leg at a time).
+    [] when a leg has no page, unless partial: then that leg's url is None."""
     out = []
     for ev, _odds in parlay.legs:
         url = leg_link(ev.market, ev.best.side, parlay.book)
-        if not url:
+        if not url and not partial:
             return []
         out.append((getattr(ev.best, "label", "leg"), url))
     return out
@@ -146,8 +147,8 @@ def combine(book: str, legs: list, event: str = "") -> Optional[str]:
 
 def book_home(book: str, live: bool = False) -> str:
     """The book's sportsbook page (live section for in-game bets), for when no slip can be built."""
-    if _key(book) == "polymarket":
-        return "https://polymarket.com/sports/live" if live else "https://polymarket.com/sports"
+    if _key(book) == "polymarket":   # Polymarket US (the app you can use in the States)
+        return "https://polymarket.us/sports"
     if _key(book) == "draftkings":
         return "https://sportsbook.draftkings.com/live" if live else "https://sportsbook.draftkings.com/"
     return "https://sportsbook.fanduel.com/live" if live else "https://sportsbook.fanduel.com/"

@@ -342,11 +342,13 @@ class BetModal(discord.ui.Modal):
             ephemeral=True)
 
 
-def slip_buttons(p, view: discord.ui.View, row: Optional[int] = None, limit: int = 25) -> int:
+def slip_buttons(p, view: discord.ui.View, row: Optional[int] = None, limit: int = 25,
+                 live: bool = False) -> int:
     """The slip buttons for a parlay you just logged: "Open the slip on X" where the book takes
     a one-tap slip (FanDuel, DraftKings), else one "Leg N" button per leg opening that bet's
-    page (Polymarket builds parlays in the app, one leg at a time). Returns how many it added."""
-    from .betlinks import leg_links, parlay_link
+    page (Polymarket builds parlays in the app, one leg at a time), plus "Open X" when a leg
+    has no page of its own, so there's always somewhere to tap. Returns how many it added."""
+    from .betlinks import book_home, leg_links, parlay_link
     from .parlay_format import short_label
     url = parlay_link(p)
     if url and len(url) <= 512:
@@ -356,12 +358,15 @@ def slip_buttons(p, view: discord.ui.View, row: Optional[int] = None, limit: int
             return 1
         return 0
     added = 0
-    for i, (label, u) in enumerate(leg_links(p), 1):
-        if len(u) > 512 or len(view.children) >= limit:
+    for i, (label, u) in enumerate(leg_links(p, partial=True), 1):
+        if not u or len(u) > 512 or len(view.children) >= limit:
             continue
         view.add_item(discord.ui.Button(label=f"Leg {i}: {short_label(label)}"[:80], url=u,
                                         emoji=book_emoji(p.book)))
         added += 1
+    if added < len(p.legs) and len(view.children) < limit:   # a leg without its own page: the book
+        view.add_item(discord.ui.Button(label=f"Open {p.book}" + (" live" if live else ""), row=row,
+                                        url=book_home(p.book, live), emoji=book_emoji(p.book)))
     return added
 
 
@@ -381,7 +386,7 @@ def _bet_go(key: str, i: int):
                                                     ephemeral=True)
             return
         try:
-            from .betlinks import book_home, parlay_link
+            from .betlinks import parlay_link
             from .bets import add_bet, find_open, leg_from_eval
             from .parlay_format import short_label
             from .staking import _money, suggested_dollars
@@ -412,11 +417,7 @@ def _bet_go(key: str, i: int):
             view = discord.ui.View(timeout=None)
             url = parlay_link(p)
             live = any(getattr(ev, "phase", "pre") == "live" for ev, _o in p.legs)
-            leg_buttons = 0 if url and len(url) <= 512 else len(p.legs)
-            if not slip_buttons(p, view, limit=20):
-                leg_buttons = 0
-                view.add_item(discord.ui.Button(label=f"Open {p.book}" + (" live" if live else ""),
-                                                url=book_home(p.book, live)))
+            leg_buttons = slip_buttons(p, view, limit=20, live=live)
             view.add_item(discord.ui.Button(label="Change stake / odds", emoji="✏️", style=discord.ButtonStyle.secondary,
                                             custom_id=f"lm:restake:{bet['id']}"))
             view.add_item(discord.ui.Button(label="Undo (didn't place it)", emoji="↩️",
@@ -436,7 +437,8 @@ def _bet_go(key: str, i: int):
                 f" **{_money(bet['stake'])}** on the {len(p.legs)}-leg {p.book} parlay at **{fmt_odds(bet['odds'])}**"
                 f"{practice}.")
             tail = ("" if url else "\n" + (f"🧾 {p.book} has no one-tap slip: tap each **Leg** button below and add it there."
-                                           if leg_buttons else "No one-tap slip for this one: open the book and add the legs.")) + (
+                                           + ("" if leg_buttons >= len(p.legs) else f" Legs without a button: find them in {p.book}.")
+                                           if leg_buttons else f"No one-tap slip for this one: open {p.book} and add the legs.")) + (
                 f"\n🔗 Same-game legs: ≈{fmt_odds(p.american)} is an estimate of {p.book}'s SGP price. "
                 "If the slip shows a different price, ✏️ it so your record is right."
                 if getattr(p, "sgp_estimated", False) else "") + (
@@ -1182,7 +1184,7 @@ def parlay_board(key: str) -> tuple:
         for ev, _o in new.legs:   # the next parlays can't reuse these players / games
             held[exposure(ev)] = {"n": cap, "label": ev.best.label}
         kind = "Edge" if new.style == "edge" else new.kind or ("Value" if new.style == "value" else "Safest")
-        head = (f"{'🟦' if new.book == 'FanDuel' else '🟩'} **{num}** · {len(new.legs)}-leg {kind} · "
+        head = (f"{book_emoji(new.book)} **{num}** · {len(new.legs)}-leg {kind} · "
                 f"**{fmt_odds(new.american)}** · {new.prob:.0%} hit")
         blocks.append("\n".join([head] + [f"  • {short_label(ev.best.label)} ({fmt_odds(o)})" for ev, o in new.legs]
                                 + ([f"  🔄 {'; '.join(notes)}"] if notes else [])))
@@ -1342,6 +1344,7 @@ def _board_bet(key: str, j: int):
                                                     ephemeral=True)
             return
         try:
+            from .betlinks import parlay_link
             from .staking import _money
             parlay_board(key)   # today's versions, against your bets right now
             p = d["current"].get(j)
@@ -1359,7 +1362,9 @@ def _board_bet(key: str, j: int):
                     f"{len(p.legs)}-leg {p.book} at **{fmt_odds(bet['odds'])}**"
                     + (" (≈ the book's same-game price: ✏️ it in /bets if the slip differs)"
                        if getattr(p, "sgp_estimated", False) else "")
-                    + ". Open the slip below; the other parlays just updated.")
+                    + (". Open the slip below" if parlay_link(p) else
+                       f". {p.book} has no one-tap slip: tap the buttons below and add each leg there")
+                    + "; the other parlays just updated.")
             await interaction.response.edit_message(content=note, embed=embed, view=view)
             await asyncio.to_thread(save_details)
             await update_card(key)

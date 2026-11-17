@@ -962,3 +962,57 @@ class ParlayBoardTest(unittest.TestCase):
         self.assertTrue(opts[1].label.startswith("#2 · DraftKings"))
         self.assertNotIn("P0", opts[1].description)
         self.assertEqual(opts[1].value, "x:1")                                     # still opens the board
+
+
+class PolymarketParlayButtonsTest(unittest.TestCase):
+    """A Polymarket parlay picked from the card's menu: Bet logs it and always hands back
+    something to tap (a page per leg where Polymarket has one, else Open Polymarket)."""
+
+    def _board(self, links=False):
+        from linemaker import bot, parlay
+        from tests.test_parlay_opt import leg
+        evs = [leg(f"g{i}", f"P{i}", "points", p=0.75 - i * 0.02, odds=-150, key=f"NBA|g{i}|P{i}|points|10.5")
+               for i in range(4)]
+        for ev in evs:
+            ev.market.books = [("Polymarket", [-150, 120]), ("FanDuel", [-150, 120])]
+        if links:   # only the first leg has a Polymarket page
+            evs[0].market.links = {"Polymarket": [{"link": "https://polymarket.us/event/g0"}, None]}
+        p = parlay.price("Polymarket", [(evs[0], -150), (evs[1], -150)])
+        board = bot._remember({"parlays": [p], "numbers": [1], "pool": evs, "owner": "me"})
+        box = bot._remember({"parlays": [p], "numbers": [1], "pool": evs, "board": board})
+        return board, box
+
+    def _bet(self, links=False):
+        import tempfile
+        from types import SimpleNamespace
+        from linemaker import bot
+        board, box = self._board(links)
+        out = []
+
+        class Resp:
+            async def send_message(self, *a, **kw):
+                out.append(kw)
+
+            async def edit_message(self, **kw):
+                out.append(kw)
+        inter = SimpleNamespace(user="me", response=Resp(), message=None, channel_id=1)
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(os.environ, {"LINEMAKER_TRACKING_DIR": tmp}):
+            async def go():
+                await bot._parlay_bet_card(f"{box}:0")(inter)
+                picked = out[-1]["view"]
+                await bot._board_bet(board, 0)(inter)
+                return picked, out[-1]
+            return asyncio.run(go())
+
+    def test_no_leg_pages_gives_open_polymarket(self):
+        picked, after = self._bet()
+        self.assertTrue(any(str(getattr(c, "custom_id", "")).startswith("lm:bboard:") for c in picked.children))
+        urls = [(c.label, c.url) for c in after["view"].children if getattr(c, "url", None)]
+        self.assertEqual(urls, [("Open Polymarket", "https://polymarket.us/sports")])
+        self.assertIn("no one-tap slip", after["content"])
+
+    def test_leg_pages_plus_open_for_the_rest(self):
+        _picked, after = self._bet(links=True)
+        labels = [c.label for c in after["view"].children if getattr(c, "url", None)]
+        self.assertTrue(labels[0].startswith("Leg 1:"))
+        self.assertIn("Open Polymarket", labels)

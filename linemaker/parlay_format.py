@@ -12,7 +12,7 @@ import re
 
 from .odds import fmt_odds
 
-BOOK_EMOJI = {"FanDuel": "🟦", "DraftKings": "🟩"}
+BOOK_EMOJI = {"FanDuel": "🟦", "DraftKings": "🟩", "Polymarket": "🟧"}
 
 
 def short_label(label: str) -> str:
