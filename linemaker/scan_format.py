@@ -564,10 +564,26 @@ PASS_GROUPS = (   # pass reason prefix -> plain-English label for the summary
 )
 
 
+def _pass_label(reason: str, default=None):
+    """The summary label for a pass reason; "no bettable price at Polymarket" names its books."""
+    if reason.startswith("no bettable price at "):
+        books = reason[len("no bettable price at "):].strip()
+        return f"no {books} price"
+    return next((lbl for prefix, lbl in PASS_GROUPS if reason.startswith(prefix)), default)
+
+
+def _short_books(label: str) -> str:
+    from .discord_format import BOOK_TAGS
+    if label.startswith("no ") and label.endswith(" price"):
+        books = label[3:-6].split("/")
+        return "no " + "/".join(BOOK_TAGS.get(b, b) for b in books) + " price"
+    return SHORT_PASS.get(label, label)
+
+
 def _pass_summary(res, short: bool = False) -> str:
     counts = {}
     for _lbl, reason in res.passes:
-        label = next((lbl for prefix, lbl in PASS_GROUPS if reason.startswith(prefix)), None)
+        label = _pass_label(reason)
         if label:
             counts[label] = counts.get(label, 0) + 1
     vetoes = len(getattr(res, "hit_vetoes", []))
@@ -576,7 +592,7 @@ def _pass_summary(res, short: bool = False) -> str:
     if not counts:
         return ""
     if short:
-        return " · ".join(f"{n} {SHORT_PASS.get(lbl, lbl)}" for lbl, n in sorted(counts.items(), key=lambda kv: -kv[1]))
+        return " · ".join(f"{n} {_short_books(lbl)}" for lbl, n in sorted(counts.items(), key=lambda kv: -kv[1]))
     return ", ".join(f"{n} {lbl}" for lbl, n in sorted(counts.items(), key=lambda kv: -kv[1]))
 
 
@@ -626,7 +642,7 @@ def _missing_games(res) -> list:
 def pass_counts(res) -> dict:
     counts = {}
     for _lbl, reason in res.passes:
-        label = next((lbl for prefix, lbl in PASS_GROUPS if reason.startswith(prefix)), reason[:40])
+        label = _pass_label(reason, reason[:40])
         counts[label] = counts.get(label, 0) + 1
     return counts
 
@@ -676,6 +692,8 @@ def _short_reason(why: str) -> str:
                           ("market caught up", "market already agrees"), ("blended", "below your % floor"),
                           ("no bettable price", "no FD/DK price"), ("injury status", "ruled out")):
         if w.startswith(prefix):
+            if prefix == "no bettable price" and " at " in why:
+                return _short_books(_pass_label(why))
             return short
     if "paused" in w:
         return "market paused"
