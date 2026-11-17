@@ -28,6 +28,7 @@ import asyncio
 import csv
 import datetime as dt
 import io
+import re
 import logging
 import os
 import tempfile
@@ -2209,6 +2210,20 @@ class LinemakerBot(discord.Client):
         for token in (f"<@{self.user.id}>", f"<@!{self.user.id}>"):
             text = text.replace(token, "")
         text = text.strip()
+        m_all = ALLTIME_ASK.search(text) if not message.attachments else None
+        if m_all:   # "all time record in $": the /alltime report, typed
+            per = re.search(r"\$\s*(\d+(?:\.\d+)?)|(\d+(?:\.\d+)?)\s*(?:dollars?|bucks)", text, re.I)
+            per_pick = float(per.group(1) or per.group(2)) if per else 10.0
+            try:
+                from .reports import alltime_sections
+                async with message.channel.typing():
+                    sections = await asyncio.to_thread(alltime_sections, today(), per_pick)
+                for group in chunk_embeds(alltime_embeds(sections)):
+                    await message.reply(embeds=group, mention_author=False)
+            except Exception as e:
+                log.exception("alltime ask failed")
+                await message.reply(f"⚠️ Couldn't build the all-time record ({type(e).__name__}).", mention_author=False)
+            return
         csv_text = None
         for att in message.attachments:
             if att.filename.lower().endswith(".csv") and att.size <= MAX_UPLOAD:
@@ -2836,25 +2851,34 @@ async def clv_cmd(interaction: discord.Interaction, days: Optional[int] = 14):
         await _report_error(interaction, e)
 
 
+ALLTIME_ASK = re.compile(r"\ball[- ]?time\b.*\b(record|profit|results?|roi|money|\$)|"
+                         r"\b(record|profit|results?)\b.*\ball[- ]?time\b", re.I)
+
+
+def alltime_embeds(sections: list) -> list:
+    embeds = []
+    for title, lines in sections:
+        body, extra = "", 0
+        for line in lines:   # long market lists: as many as fit, then a count
+            if len(body) + len(line) + 1 > 3900:
+                extra += 1
+                continue
+            body += line + "\n"
+        if extra:
+            body += f"…and {extra} more"
+        embeds.append(discord.Embed(title=title, description=body, color=0x3498DB))
+    embeds[0].title = "🏆 All-Time Record · " + embeds[0].title.split(" ", 1)[1]
+    return embeds
+
+
 @bot.tree.command(name="alltime", description="All-time record: total, per sport, per market, and more")
-async def alltime_cmd(interaction: discord.Interaction):
+@app_commands.describe(per_pick="Dollars a pick for the profit figures (default $10; 0 = units only)")
+async def alltime_cmd(interaction: discord.Interaction, per_pick: Optional[float] = 10.0):
     await interaction.response.defer(thinking=True)
     try:
         from .reports import alltime_sections
-        sections = await asyncio.to_thread(alltime_sections, today())
-        embeds = []
-        for title, lines in sections:
-            body, extra = "", 0
-            for line in lines:   # long market lists: as many as fit, then a count
-                if len(body) + len(line) + 1 > 3900:
-                    extra += 1
-                    continue
-                body += line + "\n"
-            if extra:
-                body += f"…and {extra} more"
-            embeds.append(discord.Embed(title=title, description=body, color=0x3498DB))
-        embeds[0].title = "🏆 All-Time Record · " + embeds[0].title.split(" ", 1)[1]
-        for group in chunk_embeds(embeds):
+        sections = await asyncio.to_thread(alltime_sections, today(), per_pick or None)
+        for group in chunk_embeds(alltime_embeds(sections)):
             await interaction.followup.send(embeds=group)
     except Exception as e:
         await _report_error(interaction, e)

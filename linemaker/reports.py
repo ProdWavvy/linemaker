@@ -1,6 +1,7 @@
 """Weekly summary: the model's record, closing-line value, your real bets, weight changes."""
 import datetime as dt
 import os
+from typing import Optional
 
 from .odds import american_to_decimal, fmt_money
 from .tracking import clv_summary, load_records
@@ -180,18 +181,30 @@ def whats_working(recs: list, min_n: int = 15) -> list:
 
 # ---- all-time record ------------------------------------------------------------------
 
+_PER_PICK = {"$": None}   # dollars a pick for the all-time lines (alltime_sections sets it)
+
+
+def _money_units(u: float) -> str:
+    per = _PER_PICK["$"]
+    if not per:
+        return f"{u:+.1f}u"
+    d = u * per
+    return f"**{'+' if d >= 0 else '-'}${abs(d):,.0f}** ({u:+.1f}u)"
+
+
 def _rec_line(name: str, pr: dict) -> str:
     n = pr["won"] + pr["lost"]
     return (f"{name}: **{pr['won']}-{pr['lost']}" + (f"-{pr['push']}" if pr["push"] else "") + "** · "
-            f"{pr['units']:+.1f}u" + (f" · ROI {pr['roi']:+.1%}" if pr["roi"] is not None else "")
+            f"{_money_units(pr['units'])}" + (f" · ROI {pr['roi']:+.1%}" if pr["roi"] is not None else "")
             + (f" · hit {pr['won'] / n:.0%}" if n else ""))
 
 
-def alltime_sections(today: str) -> list:
+def alltime_sections(today: str, per_pick: Optional[float] = None) -> list:
     """[(title, [lines])]: every graded model pick the bot has tracked (1 unit each, at the
     price when picked): totals per phase, per sport, per market, overs vs unders, plus the
     market-edge, paused-market (shadow) and auto-parlay records and your own bets."""
     from .autotune import _as_pick
+    _PER_PICK["$"] = per_pick
     tdir = os.environ.get("LINEMAKER_TRACKING_DIR", "tracking")
     pre = load_records(tdir, None, today, graded_only=True, lean=True)
     live = load_records(os.path.join(tdir, "live"), None, today, graded_only=True, lean=True)
@@ -204,7 +217,8 @@ def alltime_sections(today: str) -> list:
         k = (r.get("game_id"), r.get("subject"))
         if k not in one or (r.get("pick_time") or "") < (one[k].get("pick_time") or ""):
             one[k] = r
-    out = [("📊 Totals", [f"Graded {span}. 1 unit a pick, at the price when picked.",
+    unit = f"${per_pick:g} a pick (1 unit)" if per_pick else "1 unit a pick"
+    out = [("📊 Totals", [f"Graded {span}. {unit}, at the price when picked.",
                          _rec_line("Pre-game picks", pick_record(picks)),
                          _rec_line("↳ one per player per game (today's rule)", pick_record(list(one.values()))),
                          _rec_line("Live picks", pick_record([r for r in live if r.get("picked")])),
