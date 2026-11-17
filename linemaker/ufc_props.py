@@ -936,7 +936,7 @@ def _slip(book: str, bk: dict, outcome: dict) -> Optional[str]:
         return (f"https://sportsbook.fanduel.com/addToBetslip?marketId[0]={urllib.parse.quote(mid)}"
                 f"&selectionId[0]={urllib.parse.quote(sel)}")
     if book == "draftkings" and bid and bk.get("link"):
-        return f"{bk['link']}?outcomes={urllib.parse.quote(bid)}"
+        return f"{bk['link'].split('?', 1)[0]}?outcomes={urllib.parse.quote(urllib.parse.unquote(bid), safe='')}"
     if book.startswith("polymarket"):   # Polymarket opens the market's page: no slip links
         return bk.get("link") or bk.get("app_link")
     return None

@@ -1115,3 +1115,13 @@ class PolymarketParlayBuyTest(unittest.TestCase):
             asyncio.run(bot.route_component(inter))
         self.assertIn("/polymarket link", out[-1]["content"])
         self.assertEqual(out[-1]["view"].children[0].label, "Back to parlays")
+
+
+class DraftKingsIdTest(unittest.TestCase):
+    def test_hash_in_outcome_id_is_encoded(self):
+        from linemaker.betlinks import combine
+        raw = {"link": "https://sportsbook.draftkings.com/event/31234567?outcomes=0QA270563367#296449131_13L88808Q1-1102470286Q20"}
+        url = combine("DraftKings", [raw, {"sid": "0QA9#1_2", "link": ""}])
+        self.assertEqual(url, "https://sportsbook.draftkings.com/event/31234567?outcomes="
+                              "0QA270563367%23296449131_13L88808Q1-1102470286Q20+0QA9%231_2")
+        self.assertNotIn("#", url)

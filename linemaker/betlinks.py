@@ -52,6 +52,8 @@ def leg_link(m, side: str, book: str) -> Optional[str]:
     e = leg(m, side, book)
     if not e:
         return None
+    if _key(book) == "draftkings" and _draftkings_ids(e):   # rebuilt so the id is encoded right
+        return combine(book, [e], m.game_id)
     if e.get("link"):
         return fill_state(e["link"])
     built = combine(book, [e], m.game_id) if e.get("sid") else None
@@ -101,12 +103,19 @@ def _fanduel_ids(e: dict) -> list:
 
 
 def _draftkings_ids(e: dict) -> list:
+    """DraftKings outcome ids look like 0QA270563367#296449131_13L88808Q1-1102470286Q20: the '#'
+    is part of the id. A link that carries it raw would lose everything after it (a browser
+    reads it as the page anchor) and DraftKings says "Your pick couldn't be added", so the id
+    is read from the raw text (or the feed's sid) and always re-encoded."""
+    if e.get("sid"):
+        return [urllib.parse.unquote(str(e["sid"]))]
     if e.get("link"):
-        q = _query(fill_state(e["link"]))
-        ids = [x for v in q.get("outcomes", []) for x in re.split(r"[+ ,]", v) if x]
-        if ids:
-            return ids
-    return [str(e["sid"])] if e.get("sid") else []
+        m = re.search(r"[?&]outcomes=([^&]+)", fill_state(e["link"]))
+        if m:
+            ids = [urllib.parse.unquote(x) for x in re.split(r"\+|%2B|,|%2C| |%20", m.group(1), flags=re.I) if x]
+            if ids:
+                return ids
+    return []
 
 
 def combine(book: str, legs: list, event: str = "") -> Optional[str]:
@@ -137,11 +146,11 @@ def combine(book: str, legs: list, event: str = "") -> Optional[str]:
             ids += got
         first = next((e["link"] for e in legs if e.get("link")), "")
         if first:
-            parts = urllib.parse.urlsplit(fill_state(first))
+            parts = urllib.parse.urlsplit(fill_state(first).split("?", 1)[0].split("#", 1)[0])
             base = f"{parts.scheme}://{parts.netloc}{parts.path}"
         else:
             base = DK_BASE.format(event=urllib.parse.quote(event or ""))
-        return f"{base}?outcomes={'+'.join(urllib.parse.quote(i) for i in ids)}"
+        return f"{base}?outcomes={'+'.join(urllib.parse.quote(i, safe='') for i in ids)}"
     return None if len(legs) > 1 else (fill_state(legs[0]["link"]) if legs[0].get("link") else None)
 
 
