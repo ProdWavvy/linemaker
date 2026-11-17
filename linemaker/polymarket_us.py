@@ -276,7 +276,9 @@ def side_quote(m: dict, long: bool) -> Optional[float]:
 def inject(feed: list, sport: str) -> int:
     """Put Polymarket US's own prices (fee included) and market pages on the feed's markets of
     the games it lists; side links carry the market slug and side, for one-tap orders.
-    Replaces any second-hand Polymarket price. Returns how many markets got one."""
+    Replaces any second-hand Polymarket price. A second-hand price on a market Polymarket US
+    doesn't list is dropped (LINEMAKER_PM_US_ONLY, on): you can't bet it in the States, and a
+    parlay with it couldn't be placed. Returns how many markets got a Polymarket US price."""
     if not on() or sport.upper() not in LEAGUES or not feed:
         return 0
     commences = sorted({fm.commence for fm in feed if getattr(fm, "commence", "")})
@@ -290,13 +292,23 @@ def inject(feed: list, sport: str) -> int:
     except Exception as e:
         log.warning("polymarket us events %s: %s", sport, e)
         return 0
-    by_game, n = {}, 0
+    by_game, n, dropped = {}, 0, 0
+    us_only = bool(evs) and os.environ.get("LINEMAKER_PM_US_ONLY", "on").lower() not in ("off", "0", "no", "false")
+
+    def drop(fm):   # a second-hand Polymarket price on a market Polymarket US doesn't list
+        nonlocal dropped
+        if us_only and any("polymarket" in b.lower() for b, _o in fm.books):
+            fm.books = [(b, o) for b, o in fm.books if "polymarket" not in b.lower()]
+            fm.links.pop("Polymarket", None)
+            dropped += 1
     for fm in feed:
         by_game.setdefault(fm.game, []).append(fm)
     for game, fms in by_game.items():
         away, _, home = game.partition(" @ ")
         ev = find_event(evs, away, home)
         if not ev:
+            for fm in fms:
+                drop(fm)
             continue
         try:
             markets = event_markets(ev["slug"])
@@ -306,6 +318,7 @@ def inject(feed: list, sport: str) -> int:
         for fm in fms:
             got = match(fm, markets)
             if not got:
+                drop(fm)
                 continue
             quotes = [side_quote(m, long) for m, long in got]
             odds = [american(q) if q else None for q in quotes]
@@ -315,8 +328,8 @@ def inject(feed: list, sport: str) -> int:
             fm.links["Polymarket"] = [{"link": WEB + ev["slug"], "pm_slug": m["slug"], "pm_long": long,
                                        "pm_tick": m["tick"], "pm_min": m["min_qty"]} for m, long in got]
             n += 1
-    if n:
-        log.info("polymarket us: %s prices on %d markets", sport, n)
+    if n or dropped:
+        log.info("polymarket us: %s prices on %d markets (%d second-hand prices dropped)", sport, n, dropped)
     return n
 
 
@@ -409,3 +422,185 @@ def fills(resp: dict, long: bool) -> tuple:
         qty += q
         cost += q * side_px
     return qty, (cost / qty if qty else None)
+
+
+# ---- parlays ("combos") from a linked account ------------------------------------------------
+# docs.polymarket.us: Combos API + RFQ API. A combo is its own instrument made of 2-10 legs
+# (market slug + SIDE_BUY for the long side / SIDE_SELL for the short side); POST /v1/combos makes
+# it (or returns the existing one). Its price comes from market makers: POST /v1/rfqs asks for
+# quotes on a cash amount (the combo taker fee comes out of that amount), GET /v1/rfqs/quotes reads
+# them (for a buy, the lowest buyPrice wins), PUT .../accept takes one, the maker gets a last
+# look, then the exchange sends both orders (ours immediate-or-cancel). GET /v1/order/{id} says
+# what filled. Combo taker fee: C x p x [theta x (1 - p) + 0.06 x (1 - p)^4].
+COMBO_FEE_EXTRA = 0.06
+
+
+def combo_fee(p: float, qty: float) -> float:
+    return qty * p * (taker_fee() * (1 - p) + COMBO_FEE_EXTRA * (1 - p) ** 4)
+
+
+def combo_american(price: float) -> Optional[int]:
+    """A combo's price (0-1) as American odds, its taker fee included."""
+    if not price or not 0 < price < 1:
+        return None
+    dec = 1 / (price + combo_fee(price, 1.0))
+    return int(round((dec - 1) * 100)) if dec >= 2 else int(round(-100 / (dec - 1)))
+
+
+def combo_legs(sides: list) -> list:
+    return [{"symbol": s["pm_slug"], "side": "SIDE_BUY" if s["pm_long"] else "SIDE_SELL"} for s in sides]
+
+
+def create_combo(creds: tuple, sides: list, opener=None) -> dict:
+    return _call("POST", "/v1/combos", body={"legs": combo_legs(sides)}, creds=creds, opener=opener).get("combo") or {}
+
+
+def request_quotes(creds: tuple, symbol: str, cash: float, opener=None) -> str:
+    body = {"symbol": symbol, "cashOrderQty": f"{cash:.2f}", "restRemainder": False}
+    return _call("POST", "/v1/rfqs", body=body, creds=creds, opener=opener).get("rfqId") or ""
+
+
+def quotes_for(creds: tuple, rfq_id: str = "", quote_id: str = "", opener=None) -> list:
+    query = {"rfqId": rfq_id, "quoteId": quote_id or None}   # the API wants the rfqId either way
+    return _call("GET", "/v1/rfqs/quotes", query, creds=creds, opener=opener).get("quotes") or []
+
+
+def best_buy(quotes: list) -> Optional[dict]:
+    """The quote that wins a requester buy: the lowest positive buyPrice (earliest on a tie)."""
+    live = []
+    for q in quotes:
+        try:
+            px = float(q.get("buyPrice") or 0)
+        except (TypeError, ValueError):
+            continue
+        if q.get("status", "QUOTE_STATUS_ACTIVE") == "QUOTE_STATUS_ACTIVE" and 0 < px < 1 \
+                and float(q.get("buyQtyDecimal") or 0) > 0:
+            live.append((px, q.get("createdTime") or "", q.get("id") or "", q))
+    return min(live, key=lambda t: t[:3])[3] if live else None
+
+
+def close_rfq(creds: tuple, rfq_id: str, opener=None) -> None:
+    try:
+        _call("DELETE", f"/v1/rfqs/{rfq_id}", creds=creds, opener=opener)
+    except Exception:
+        pass
+
+
+def _offer_from(q: dict, symbol: str, rfq_id: str, tick: float) -> dict:
+    price, qty = float(q["buyPrice"]), float(q["buyQtyDecimal"])
+    cost = round(qty * price + round(combo_fee(price, qty), 2), 2)
+    return {"ok": True, "symbol": symbol, "rfq": rfq_id, "quote": q.get("id"), "price": price, "qty": qty,
+            "cost": cost, "payout": round(qty, 2), "odds": combo_american(price), "tick": tick}
+
+
+def combo_offer(creds: tuple, sides: list, cash: float, wait: float = 6.0, poll: float = 0.6,
+                sleep=time.sleep, opener=None) -> dict:
+    """Make the combo, ask market makers for a price on `cash` dollars (fee included) and wait
+    up to `wait` seconds for quotes. {"ok", "symbol", "rfq", "quote", "price", "qty", "cost",
+    "payout", "odds", "tick"} or {"ok": False, "msg"}."""
+    try:
+        combo = create_combo(creds, sides, opener)
+    except PolymarketError as e:
+        return {"ok": False, "msg": f"Polymarket won't make this parlay: {e.message}"}
+    symbol = combo.get("id")
+    if not symbol:
+        return {"ok": False, "msg": "Polymarket didn't return the parlay."}
+    if combo.get("state") not in (None, "", "INSTRUMENT_STATE_OPEN"):
+        return {"ok": False, "msg": "Polymarket isn't taking this parlay right now (a leg is closed or suspended)."}
+    tick = float(combo.get("tickSize") or 0.001)
+    rfq = request_quotes(creds, symbol, cash, opener)
+    if not rfq:
+        return {"ok": False, "msg": "Polymarket didn't open a quote request."}
+    best, waited = None, 0.0
+    while waited < wait:
+        sleep(poll)
+        waited += poll
+        best = best_buy(quotes_for(creds, rfq, opener=opener))
+        if best:   # one more look: other makers answer within a moment
+            sleep(poll)
+            best = best_buy(quotes_for(creds, rfq, opener=opener)) or best
+            break
+    if not best:
+        close_rfq(creds, rfq, opener)
+        return {"ok": False, "msg": "No market maker priced this parlay just now. Try again in a minute, "
+                                    "or build it in the Polymarket app."}
+    return dict(_offer_from(best, symbol, rfq, tick), cash=round(cash, 2))
+
+
+def order(creds: tuple, order_id: str, opener=None) -> dict:
+    return _call("GET", f"/v1/order/{order_id}", creds=creds, opener=opener).get("order") or {}
+
+
+DONE_STATES = ("ORDER_STATE_FILLED", "ORDER_STATE_CANCELED", "ORDER_STATE_REJECTED", "ORDER_STATE_EXPIRED")
+
+
+def _amount(x) -> float:
+    if isinstance(x, dict):
+        x = x.get("value")
+    try:
+        return float(x or 0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def combo_buy(creds: tuple, offer: dict, sides: list, wait: float = 10.0, poll: float = 0.5,
+              sleep=time.sleep, opener=None) -> dict:
+    """Take the confirmed parlay price: the best live quote on the request, if it's no worse
+    than what was confirmed (half a tick), else stop and report the new price. Then accept,
+    wait for the maker's last look and our order's fill. {"ok", "qty", "price", "cost",
+    "odds", "symbol"} / {"ok": False, "msg", "moved": new offer}."""
+    best = best_buy(quotes_for(creds, offer["rfq"], opener=opener))
+    if best is None:   # quotes pulled or the request closed: ask again for the same amount
+        fresh = combo_offer(creds, sides, offer.get("cash") or offer["cost"], sleep=sleep, opener=opener)
+        if not fresh.get("ok"):
+            return fresh
+        offer_now = fresh
+    else:
+        offer_now = _offer_from(best, offer["symbol"], offer["rfq"], offer["tick"])
+    if offer_now["price"] > offer["price"] + offer["tick"] / 2:
+        return {"ok": False, "moved": offer_now,
+                "msg": f"The price moved to {offer_now['price'] * 100:.1f}¢ ({offer_now['odds']:+d}); "
+                       f"you confirmed {offer['price'] * 100:.1f}¢."}
+    rfq, qid = offer_now["rfq"], offer_now["quote"]
+    try:
+        _call("PUT", f"/v1/rfqs/{rfq}/quotes/{qid}/accept", body={"acceptedSide": "SIDE_BUY"},
+              creds=creds, opener=opener)
+    except PolymarketError as e:
+        return {"ok": False, "msg": f"Polymarket refused it: {e.message}"}
+    q, waited = {}, 0.0
+    while waited < wait:
+        sleep(poll)
+        waited += poll
+        q = next((x for x in quotes_for(creds, rfq, quote_id=qid, opener=opener) if x.get("id") == qid), None) or q
+        if q.get("status") in ("QUOTE_STATUS_EXECUTED", "QUOTE_STATUS_DELETED"):
+            break
+    pending = {"ok": False, "pending": True, "symbol": offer_now["symbol"],
+               "msg": "Sent, but Polymarket hasn't reported the fill yet. If it filled, it shows up in your "
+                      "bets within 10 minutes (synced from your account)."}
+    if q.get("status") == "QUOTE_STATUS_DELETED":
+        return {"ok": False, "msg": "The market maker pulled the price at the last second (it happens). "
+                                    "Nothing was bought; tap Buy again for a new price."}
+    oid = q.get("rfqCreatorOrderId")
+    if q.get("status") != "QUOTE_STATUS_EXECUTED" or not oid:
+        return pending
+    o, waited = {}, 0.0
+    while waited < wait:
+        try:
+            o = order(creds, oid, opener)
+        except PolymarketError:
+            o = {}
+        if o.get("state") in DONE_STATES or (_amount(o.get("cumQuantity")) and not _amount(o.get("leavesQuantity"))):
+            break
+        sleep(poll)
+        waited += poll
+    qty = _amount(o.get("cumQuantity"))
+    if not o or (not qty and o.get("state") not in DONE_STATES):
+        return pending
+    if not qty:
+        return {"ok": False, "msg": "No fill: the order came back unfilled. Nothing was bought."}
+    price = _amount(o.get("avgPx")) or offer_now["price"]
+    fee = _amount(o.get("commissionNotionalTotalCollected")) or round(combo_fee(price, qty), 2)
+    cost = round(qty * price + fee, 2)
+    dec = max(qty / cost, 1.0001)
+    odds = int(round((dec - 1) * 100)) if dec >= 2 else int(round(-100 / (dec - 1)))
+    return {"ok": True, "qty": qty, "price": price, "cost": cost, "odds": odds, "symbol": offer_now["symbol"]}

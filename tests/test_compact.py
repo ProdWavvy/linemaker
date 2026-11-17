@@ -1016,3 +1016,102 @@ class PolymarketParlayButtonsTest(unittest.TestCase):
         labels = [c.label for c in after["view"].children if getattr(c, "url", None)]
         self.assertTrue(labels[0].startswith("Leg 1:"))
         self.assertIn("Open Polymarket", labels)
+
+
+class PolymarketParlayBuyTest(unittest.TestCase):
+    """Linked Polymarket account: 🟧 Buy #N on the board gets a live price, Confirm places it
+    and logs it, and the board shows it as placed."""
+
+    def _board(self, all_listed=True):
+        from linemaker import bot, parlay
+        from tests.test_parlay_opt import leg
+        evs = [leg(f"g{i}", f"P{i}", "points", p=0.75 - i * 0.02, odds=-150, key=f"NBA|g{i}|P{i}|points|10.5")
+               for i in range(4)]
+        for i, ev in enumerate(evs):
+            ev.market.books = [("Polymarket", [-150, 120]), ("FanDuel", [-150, 120])]
+            if all_listed or i:
+                ev.market.links = {"Polymarket": [{"link": f"https://polymarket.us/event/g{i}", "pm_slug": f"m-g{i}",
+                                                   "pm_long": True, "pm_tick": 0.01, "pm_min": 1}, None]}
+        pm_p = parlay.price("Polymarket", [(evs[0], -150), (evs[1], -150)])
+        fd_p = parlay.price("FanDuel", [(evs[2], -150), (evs[3], -150)])
+        return bot._remember({"parlays": [pm_p, fd_p], "numbers": [1, 2], "pool": evs, "owner": "me"})
+
+    def _inter(self, out):
+        from types import SimpleNamespace
+
+        class Resp:
+            async def defer(self, **kw):
+                pass
+
+            async def edit_message(self, **kw):
+                out.append(kw)
+
+            async def send_message(self, *a, **kw):
+                out.append(kw)
+
+            def is_done(self):
+                return True
+
+        async def edit_original_response(**kw):
+            out.append(kw)
+        return SimpleNamespace(user=SimpleNamespace(id=42, __str__=lambda s: "me"), response=Resp(),
+                               edit_original_response=edit_original_response)
+
+    def test_board_buy_confirm_logs_it(self):
+        import tempfile
+        from linemaker import bets, bot, pm_accounts, polymarket_us
+        key = self._board()
+        offer = {"ok": True, "symbol": "crossd-1", "rfq": "rfq-1", "quote": "q-1", "price": 0.21, "qty": 40.0,
+                 "cost": 9.4, "payout": 40.0, "odds": 326, "tick": 0.001, "cash": 10.0}
+        fill = {"ok": True, "qty": 40.0, "price": 0.21, "cost": 9.4, "odds": 326, "symbol": "crossd-1"}
+        out = []
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(os.environ, {"LINEMAKER_TRACKING_DIR": tmp}), \
+                mock.patch.object(pm_accounts, "creds", return_value=("k", "s")), \
+                mock.patch.object(pm_accounts, "max_stake", return_value=25.0), \
+                mock.patch.object(polymarket_us, "combo_offer", return_value=offer) as quote, \
+                mock.patch.object(polymarket_us, "combo_buy", return_value=fill) as buy:
+            async def go():
+                embed, view = bot.parlay_board(key)
+                buys = [c for c in view.children if str(getattr(c, "custom_id", "")).startswith("lm:pmc:")]
+                self.assertEqual([c.label for c in buys], ["Buy #1 on Polymarket"])   # not the FanDuel one
+                tap = self._inter(out)
+                tap.data = {"custom_id": buys[0].custom_id}
+                await bot.route_component(tap)
+                shown = out[-1]
+                self.assertIn("Confirm $9.40", [c.label for c in shown["view"].children])
+                self.assertIn("+326", shown["embed"].description)
+                ok = next(c for c in shown["view"].children if c.label.startswith("Confirm"))
+                inter = self._inter(out)
+                inter.data = {"custom_id": ok.custom_id}
+                await bot.route_component(inter)
+                return out[-1]
+            done = asyncio.run(go())
+            logged = bets.load_bets()
+        sides = quote.call_args[0][1]
+        self.assertEqual([s["pm_slug"] for s in sides], ["m-g0", "m-g1"])
+        self.assertTrue(buy.called)
+        self.assertEqual(len(logged), 1)
+        self.assertEqual((logged[0]["book"], logged[0]["pm_slug"], logged[0]["stake"], logged[0]["odds"]),
+                         ("Polymarket", "crossd-1", 9.4, 326))
+        self.assertIn("Placed on Polymarket", done["content"])
+        self.assertIn("✅ **#1 logged**", done["embed"].description)
+
+    def test_leg_not_on_polymarket_no_buy_button(self):
+        from linemaker import bot
+        key = self._board(all_listed=False)
+
+        async def go():
+            return bot.parlay_board(key)
+        _embed, view = asyncio.run(go())
+        self.assertFalse(any(str(getattr(c, "custom_id", "")).startswith("lm:pmc:") for c in view.children))
+
+    def test_not_linked_says_link_first(self):
+        from linemaker import bot, pm_accounts
+        key = self._board()
+        out = []
+        inter = self._inter(out)
+        inter.data = {"custom_id": f"lm:pmc:{key}:0"}
+        with mock.patch.object(pm_accounts, "creds", return_value=None):
+            asyncio.run(bot.route_component(inter))
+        self.assertIn("/polymarket link", out[-1]["content"])
+        self.assertEqual(out[-1]["view"].children[0].label, "Back to parlays")

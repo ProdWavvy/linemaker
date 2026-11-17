@@ -60,6 +60,33 @@ class MatchTest(unittest.TestCase):
         self.assertTrue(f.links["Polymarket"][0]["link"].endswith("nba-chi-cle-2026-11-16"))
 
 
+class UsOnlyTest(unittest.TestCase):
+    def test_second_hand_price_dropped_where_polymarket_us_has_no_market(self):
+        listed = fm("moneyline", "Cleveland Cavaliers", "moneyline", 0.0)
+        unlisted = fm("prop", "Donovan Mitchell", "rebounds", 4.5)               # no rebounds ladder on PM US
+        other = FeedMarket("2026-11-16", "NBA", "g2", "Boston Celtics @ Miami Heat", "2026-11-17T00:30:00Z",
+                           "moneyline", "Miami Heat", "Miami Heat", "moneyline", 0.0, [("FanDuel", [-110, -110])])
+        for f in (listed, unlisted, other):
+            f.books.append(("Polymarket", [-120, 100]))
+        ev = {"slug": "nba-chi-cle-2026-11-16", "title": "CHI Bulls vs. CLE Cavaliers", "markets": []}
+        env = {"LINEMAKER_PM_TAKER_FEE": "0.095", "LINEMAKER_OFFLINE": ""}
+        with mock.patch.object(pm, "events", return_value=[ev]), mock.patch.object(pm, "event_markets", return_value=MARKETS), \
+                mock.patch.dict(os.environ, env):
+            self.assertEqual(pm.inject([listed, unlisted, other], "NBA"), 1)
+        self.assertIn("Polymarket", dict(listed.books))
+        self.assertNotIn("Polymarket", dict(unlisted.books))                     # can't be bet in the States
+        self.assertNotIn("Polymarket", dict(other.books))                        # game not on PM US
+        kept = fm("prop", "Donovan Mitchell", "rebounds", 4.5)
+        kept.books.append(("Polymarket", [-120, 100]))
+        with mock.patch.object(pm, "events", return_value=[]), mock.patch.dict(os.environ, env):
+            pm.inject([kept], "NBA")                                             # PM US said nothing: leave it
+        self.assertIn("Polymarket", dict(kept.books))
+        with mock.patch.object(pm, "events", return_value=[ev]), mock.patch.object(pm, "event_markets", return_value=MARKETS), \
+                mock.patch.dict(os.environ, dict(env, LINEMAKER_PM_US_ONLY="off")):
+            pm.inject([kept], "NBA")
+        self.assertIn("Polymarket", dict(kept.books))
+
+
 class OrderTest(unittest.TestCase):
     def test_signature_verifies(self):
         from nacl.signing import SigningKey
@@ -131,3 +158,127 @@ class AccountsTest(unittest.TestCase):
             self.assertEqual((ext["status"], ext["profit"]), ("won", 2.4))
             self.assertTrue(pm_accounts.unlink("42"))
             self.assertIsNone(pm_accounts.creds("42"))
+
+
+class FakePM:
+    """A pretend Polymarket US API for the combo + RFQ flow."""
+
+    def __init__(self, quotes_after=1, maker_pulls=False, fill=12.5, price="0.21", later_price=None):
+        self.calls, self.quotes_after, self.maker_pulls = [], quotes_after, maker_pulls
+        self.fill, self.price, self.later_price = fill, price, later_price
+        self.polls, self.accepted = 0, False
+
+    def __call__(self, req, timeout=0):
+        url = req.full_url
+        path = url.split("api.polymarket.us", 1)[1].split("?")[0]
+        body = json.loads(req.data) if req.data else None
+        self.calls.append((req.get_method(), path, body, url))
+
+        class Resp(io.BytesIO):
+            def __enter__(self): return self
+            def __exit__(self, *a): return False
+        if path == "/v1/combos":
+            out = {"combo": {"id": "crossd-1", "legs": body["legs"], "state": "INSTRUMENT_STATE_OPEN", "tickSize": 0.001}}
+        elif path == "/v1/rfqs" and req.get_method() == "POST":
+            out = {"rfqId": "rfq-1"}
+        elif path == "/v1/rfqs/quotes":
+            self.polls += 1
+            price = self.later_price if (self.later_price and self.polls > 2) else self.price
+            if self.accepted:
+                status = "QUOTE_STATUS_DELETED" if self.maker_pulls else "QUOTE_STATUS_EXECUTED"
+                out = {"quotes": [{"id": "q-1", "status": status, "buyPrice": price, "buyQtyDecimal": "40",
+                                   "rfqCreatorOrderId": "" if self.maker_pulls else "ord-9"}]}
+            elif self.polls >= self.quotes_after:
+                out = {"quotes": [{"id": "q-2", "status": "QUOTE_STATUS_ACTIVE", "buyPrice": "0.25", "buyQtyDecimal": "36",
+                                   "createdTime": "2026-11-17T00:00:00Z"},
+                                  {"id": "q-1", "status": "QUOTE_STATUS_ACTIVE", "buyPrice": price, "buyQtyDecimal": "40",
+                                   "createdTime": "2026-11-17T00:00:01Z"}]}
+            else:
+                out = {"quotes": []}
+        elif path.endswith("/accept"):
+            self.accepted = True
+            out = {}
+        elif path.startswith("/v1/order/"):
+            out = {"order": {"id": "ord-9", "state": "ORDER_STATE_FILLED" if self.fill else "ORDER_STATE_CANCELED",
+                             "cumQuantity": self.fill, "leavesQuantity": 0, "avgPx": {"value": self.price},
+                             "commissionNotionalTotalCollected": {"value": "0.31"}}}
+        elif req.get_method() == "DELETE":
+            out = {}
+        else:
+            raise AssertionError(path)
+        return Resp(json.dumps(out).encode())
+
+
+class ComboTest(unittest.TestCase):
+    SIDES = [{"pm_slug": "aec-nba-chi-cle", "pm_long": False}, {"pm_slug": "tsc-nba-chi-cle-226pt5", "pm_long": True}]
+
+    def _cr(self):
+        from nacl.signing import SigningKey
+        return ("kid", base64.b64encode(bytes(SigningKey.generate())).decode())
+
+    def test_fee_and_odds(self):
+        with mock.patch.dict(os.environ, {"LINEMAKER_PM_TAKER_FEE": "0.0695"}):   # the docs' table (tier 4, 100 lots)
+            self.assertEqual(round(pm.combo_fee(0.10, 100), 2), 1.02)
+            self.assertEqual(round(pm.combo_fee(0.25, 100), 2), 1.78)
+        with mock.patch.dict(os.environ, {"LINEMAKER_PM_TAKER_FEE": "0.095"}):
+            self.assertLess(pm.combo_american(0.25), 300)                     # 25c is +300 before the fee
+            self.assertGreater(pm.combo_american(0.25), 200)
+
+    def test_offer_takes_lowest_buy_price_and_cash_amount(self):
+        fake = FakePM(quotes_after=2)
+        offer = pm.combo_offer(self._cr(), self.SIDES, 10.0, sleep=lambda s: None, opener=fake)
+        self.assertTrue(offer["ok"])
+        self.assertEqual((offer["quote"], offer["price"], offer["qty"]), ("q-1", 0.21, 40.0))   # 21c beats 25c
+        legs = fake.calls[0][2]["legs"]
+        self.assertEqual(legs, [{"symbol": "aec-nba-chi-cle", "side": "SIDE_SELL"},
+                                {"symbol": "tsc-nba-chi-cle-226pt5", "side": "SIDE_BUY"}])
+        rfq = next(c[2] for c in fake.calls if c[1] == "/v1/rfqs")
+        self.assertEqual(rfq, {"symbol": "crossd-1", "cashOrderQty": "10.00", "restRemainder": False})
+        self.assertEqual(offer["cash"], 10.0)
+        self.assertAlmostEqual(offer["cost"], round(40 * 0.21 + round(pm.combo_fee(0.21, 40), 2), 2))
+
+    def test_no_quotes_closes_the_request(self):
+        fake = FakePM(quotes_after=999)
+        offer = pm.combo_offer(self._cr(), self.SIDES, 10.0, wait=2, sleep=lambda s: None, opener=fake)
+        self.assertFalse(offer["ok"])
+        self.assertIn("No market maker", offer["msg"])
+        self.assertEqual(fake.calls[-1][0], "DELETE")
+
+    def test_buy_accepts_and_reads_the_fill(self):
+        fake = FakePM()
+        cr = self._cr()
+        offer = pm.combo_offer(cr, self.SIDES, 10.0, sleep=lambda s: None, opener=fake)
+        res = pm.combo_buy(cr, offer, self.SIDES, sleep=lambda s: None, opener=fake)
+        self.assertTrue(res["ok"], res)
+        accept = next(c for c in fake.calls if c[1].endswith("/accept"))
+        self.assertEqual((accept[0], accept[1], accept[2]), ("PUT", "/v1/rfqs/rfq-1/quotes/q-1/accept",
+                                                             {"acceptedSide": "SIDE_BUY"}))
+        self.assertEqual(res["qty"], 12.5)
+        self.assertAlmostEqual(res["cost"], round(12.5 * 0.21 + 0.31, 2))
+        self.assertEqual(res["symbol"], "crossd-1")
+        self.assertTrue(all("rfqId=rfq-1" in c[3] for c in fake.calls if c[1] == "/v1/rfqs/quotes"))
+
+    def test_buy_stops_when_the_price_got_worse(self):
+        fake = FakePM(later_price="0.24")
+        cr = self._cr()
+        offer = pm.combo_offer(cr, self.SIDES, 10.0, sleep=lambda s: None, opener=fake)
+        res = pm.combo_buy(cr, offer, self.SIDES, sleep=lambda s: None, opener=fake)
+        self.assertFalse(res["ok"])
+        self.assertEqual(res["moved"]["price"], 0.24)
+        self.assertFalse(any(c[1].endswith("/accept") for c in fake.calls))      # nothing sent
+
+    def test_maker_pulls_at_last_look(self):
+        fake = FakePM(maker_pulls=True)
+        cr = self._cr()
+        offer = pm.combo_offer(cr, self.SIDES, 10.0, sleep=lambda s: None, opener=fake)
+        res = pm.combo_buy(cr, offer, self.SIDES, sleep=lambda s: None, opener=fake)
+        self.assertFalse(res["ok"])
+        self.assertIn("pulled the price", res["msg"])
+
+    def test_unfilled_order(self):
+        fake = FakePM(fill=0)
+        cr = self._cr()
+        offer = pm.combo_offer(cr, self.SIDES, 10.0, sleep=lambda s: None, opener=fake)
+        res = pm.combo_buy(cr, offer, self.SIDES, sleep=lambda s: None, opener=fake)
+        self.assertFalse(res["ok"])
+        self.assertIn("No fill", res["msg"])

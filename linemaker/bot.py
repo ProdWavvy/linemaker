@@ -140,6 +140,14 @@ async def route_component(interaction: discord.Interaction) -> bool:
         handler = _pm_confirm(key, parts[3])
     elif kind == "pmamt":
         handler = _pm_amount(key)
+    elif kind == "pmc":   # a Polymarket parlay from your linked account: live price first
+        handler = _pm_combo_start(key, int(parts[3]))
+    elif kind == "pmcok":
+        handler = _pm_combo_confirm(key, int(parts[3]), parts[4])
+    elif kind == "pmcamt":
+        handler = _pm_combo_amount(key, int(parts[3]))
+    elif kind == "pmcback":
+        handler = _pm_combo_back(key)
     elif kind == "bet":
         handler = PickView._bet_single(key)
     elif kind == "betp":
@@ -1042,6 +1050,9 @@ def parlay_card(legs: list, books: Optional[tuple] = None, boost: float = 0.0,
         # pool: a card's parlay (not your own slip) swaps out players you've bet since (_bet_go)
         key = _remember({"parlays": [p], **({"pool": pool} if pool else {})})
         view.add_item(bet_button(key, 0, p))
+        if p.book.lower() == "polymarket" and not pm_combo_sides(p)[1]:
+            view.add_item(discord.ui.Button(label="Buy on Polymarket", emoji="🟧", style=discord.ButtonStyle.primary,
+                                            custom_id=f"lm:pmc:{key}:0"))
     if not built:
         embed.add_field(name="Can't price this one",
                         value=("Neither FanDuel nor DraftKings" if len(books) > 1 else books[0])
@@ -1200,6 +1211,18 @@ def parlay_board(key: str) -> tuple:
         view.add_item(discord.ui.Button(label=f"Bet {num} {fmt_odds(p.american)}", row=n // 5,
                                         emoji=book_emoji(p.book), style=discord.ButtonStyle.success,
                                         custom_id=f"lm:bboard:{key}:{j}"))
+    n = start = len(view.children)
+    for j, p in current.items():   # Polymarket: placed from your linked account (live price, then confirm)
+        if n >= 20:
+            break
+        if p.book.lower() == "polymarket" and not pm_combo_sides(p)[1]:
+            num = f"#{nums[j]}" if j < len(nums) and nums[j] else f"#{j + 1}"
+            view.add_item(discord.ui.Button(label=f"Buy {num} on Polymarket", emoji="🟧", row=n // 5,
+                                            style=discord.ButtonStyle.primary, custom_id=f"lm:pmc:{key}:{j}"))
+            n += 1
+    if n > start:
+        embed.set_footer(text=embed.footer.text + " · 🟧 Buy places a Polymarket parlay from your linked account "
+                              "(live price, then you confirm).")
     last = d.get("last")
     if last in placed:   # the slip for the one just logged
         b = open_ids[placed[last]]
@@ -3954,6 +3977,218 @@ def _pm_confirm(key: str, cents: str):
                     f"(${cost:.2f} with the fee) · pays **${qty:.2f}** if it hits · logged in your bets.",
             embed=None, view=None)
         await asyncio.to_thread(save_details)
+    return callback
+
+
+# ---- Polymarket parlays ("combos"): placed from your linked account -----------------------------
+def pm_combo_sides(p) -> tuple:
+    """(Polymarket market + side per leg, labels of legs not on Polymarket US)."""
+    sides, missing = [], []
+    for ev, _o in p.legs:
+        side = pm_side(ev)
+        if side:
+            sides.append(side)
+        else:
+            missing.append(ev.best.label)
+    return sides, missing
+
+
+def _is_board(d: dict) -> bool:
+    return "numbers" in d or "current" in d
+
+
+def _combo_parlay(key: str, d: dict, j: int):
+    if _is_board(d):
+        parlay_board(key)   # today's version, against your bets right now
+        return (d.get("current") or {}).get(j)
+    parlays = d.get("parlays") or []
+    return parlays[j] if j < len(parlays) else None
+
+
+def _pm_combo_embed(p, offer: dict, cap: float) -> discord.Embed:
+    from .parlay_format import short_label
+    legs = "\n".join(f"• {short_label(ev.best.label)}" for ev, _o in p.legs)
+    e = discord.Embed(title=f"🟧 {len(p.legs)}-Leg Parlay on Polymarket", color=0xF57C00, description=(
+        f"{legs}\n\nBuy **{offer['qty']:g} contracts** at **{offer['price'] * 100:.1f}¢** "
+        f"(**{offer['odds']:+d}** with the fee)\n"
+        f"Cost **${offer['cost']:.2f}** · pays **${offer['payout']:.2f}** if every leg hits\n"
+        f"Our chance {p.prob:.0%} · the card had it at {fmt_odds(p.american)}")[:4000])
+    e.set_footer(text=f"Live price from a Polymarket market maker; fills at this price or not at all. "
+                      f"Your max per order ${cap:g} (/polymarket maxbet) · from your linked account")
+    return e
+
+
+def _pm_combo_view(key: str, j: int, cost: float, board: bool) -> discord.ui.View:
+    v = discord.ui.View(timeout=600)
+    v.add_item(discord.ui.Button(label=f"Confirm ${cost:.2f}", emoji="✅", style=discord.ButtonStyle.success,
+                                 custom_id=f"lm:pmcok:{key}:{j}:{int(round(cost * 100))}"))
+    v.add_item(discord.ui.Button(label="Change amount", emoji="✏️", style=discord.ButtonStyle.secondary,
+                                 custom_id=f"lm:pmcamt:{key}:{j}"))
+    v.add_item(discord.ui.Button(label="Back to parlays" if board else "Cancel", emoji="↩️",
+                                 style=discord.ButtonStyle.secondary, custom_id=f"lm:pmcback:{key}"))
+    return v
+
+
+def _pm_back_view(key: str, board: bool) -> Optional[discord.ui.View]:
+    if not board:
+        return None
+    v = discord.ui.View(timeout=600)
+    v.add_item(discord.ui.Button(label="Back to parlays", emoji="↩️", style=discord.ButtonStyle.secondary,
+                                 custom_id=f"lm:pmcback:{key}"))
+    return v
+
+
+async def _pm_combo_offer(interaction: discord.Interaction, key: str, j: int, stake: Optional[float] = None):
+    """Live Polymarket price for a parlay (the interaction is already deferred: this edits the
+    message the button was on)."""
+    from . import pm_accounts
+    from .polymarket_us import combo_offer
+    from .staking import parlay_stake
+    d = PICK_DETAILS.get(key)
+    edit = interaction.edit_original_response
+    if not d or not d.get("parlays"):
+        await edit(content="This card is too old. Ask again for fresh parlays.", embed=None, view=None)
+        return
+    board = _is_board(d)
+    p = _combo_parlay(key, d, j)
+    if p is None:
+        await edit(content="That parlay isn't available anymore (its players are in your bets now).",
+                   embed=None, view=_pm_back_view(key, board))
+        return
+    uid = str(interaction.user.id)
+    cr = pm_accounts.creds(uid)
+    if not cr:
+        await edit(content="🟧 Link your own Polymarket US account first: `/polymarket link` (private form; the key "
+                           "stays on the bot's server). Then this button places the parlay for you.",
+                   embed=None, view=_pm_back_view(key, board))
+        return
+    sides, missing = pm_combo_sides(p)
+    if missing:
+        await edit(content="Polymarket US doesn't list (or I couldn't match) " + ", ".join(missing)[:900]
+                           + ", so the bot can't place this one. Build it in the app, or pick another parlay.",
+                   embed=None, view=_pm_back_view(key, board))
+        return
+    cap = pm_accounts.max_stake(uid)
+    stake = min(stake or parlay_stake(p) or min(5.0, cap), cap)
+    await edit(content=f"⏳ Asking Polymarket for a price on ${stake:.2f}…", embed=None, view=None)
+    try:
+        offer = await asyncio.to_thread(combo_offer, cr, sides, stake)
+    except Exception as e:
+        log.warning("polymarket combo quote failed: %s", type(e).__name__)
+        offer = {"ok": False, "msg": f"Couldn't reach Polymarket ({str(e)[:150]})."}
+    if not offer.get("ok"):
+        await edit(content="⚠️ " + offer["msg"], embed=None, view=_pm_back_view(key, board))
+        return
+    d.setdefault("pm_combo", {})[j] = dict(offer, user=uid, parlay=p, sides=sides)
+    await edit(content=None, embed=_pm_combo_embed(p, offer, cap), view=_pm_combo_view(key, j, offer["cost"], board))
+
+
+def _pm_combo_start(key: str, j: int):
+    async def callback(interaction: discord.Interaction):
+        await interaction.response.defer()
+        try:
+            await _pm_combo_offer(interaction, key, j)
+        except Exception as e:
+            await _report_error(interaction, e)
+    return callback
+
+
+class PMComboAmountModal(discord.ui.Modal):
+    def __init__(self, key: str, j: int, cap: float):
+        super().__init__(title="Polymarket parlay amount")
+        self.key, self.j = key, j
+        self.amount = discord.ui.TextInput(label=f"Dollars to spend, fee included (max ${cap:g})",
+                                           placeholder="10", max_length=8)
+        self.add_item(self.amount)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        try:
+            stake = float(str(self.amount.value).replace("$", "").strip())
+            if stake <= 0:
+                raise ValueError
+        except ValueError:
+            await interaction.response.send_message("That isn't a dollar amount.", ephemeral=True)
+            return
+        await interaction.response.defer()
+        await _pm_combo_offer(interaction, self.key, self.j, stake)
+
+
+def _pm_combo_amount(key: str, j: int):
+    async def callback(interaction: discord.Interaction):
+        from . import pm_accounts
+        await interaction.response.send_modal(PMComboAmountModal(key, j, pm_accounts.max_stake(str(interaction.user.id))))
+    return callback
+
+
+def _pm_combo_back(key: str):
+    async def callback(interaction: discord.Interaction):
+        d = PICK_DETAILS.get(key)
+        if d and _is_board(d) and d.get("parlays"):
+            embed, view = parlay_board(key)
+            await interaction.response.edit_message(content=None, embed=embed, view=view)
+        else:
+            await interaction.response.edit_message(content="Nothing bought.", embed=None, view=None)
+    return callback
+
+
+def _pm_combo_confirm(key: str, j: int, cents: str):
+    async def callback(interaction: discord.Interaction):
+        from . import pm_accounts
+        from .bets import add_bet, leg_from_eval
+        from .polymarket_us import combo_buy
+        from .staking import _money
+        d = PICK_DETAILS.get(key) or {}
+        offer = (d.get("pm_combo") or {}).get(j)
+        uid = str(interaction.user.id)
+        cr = pm_accounts.creds(uid)
+        board = _is_board(d)
+        if not (offer and cr) or offer.get("user") != uid:
+            await interaction.response.edit_message(content="This price expired. Tap Buy on Polymarket again.",
+                                                    embed=None, view=_pm_back_view(key, board))
+            return
+        if offer["cost"] > pm_accounts.max_stake(uid) + 0.01 or int(round(offer["cost"] * 100)) != int(cents):
+            await interaction.response.edit_message(content="Amount changed: tap Buy on Polymarket again.",
+                                                    embed=None, view=_pm_back_view(key, board))
+            return
+        await interaction.response.defer()
+        d["pm_combo"].pop(j, None)   # one tap places it once
+        p, sides = offer["parlay"], offer["sides"]
+        await interaction.edit_original_response(content="⏳ Placing it on Polymarket…", embed=None, view=None)
+        try:
+            res = await asyncio.to_thread(combo_buy, cr, offer, sides)
+        except Exception as e:
+            log.warning("polymarket combo order failed: %s", type(e).__name__)
+            res = {"ok": False, "msg": f"Polymarket refused the order ({str(e)[:200]})."}
+        if res.get("moved"):   # worse price now: show it, confirm again
+            new = res["moved"]
+            d.setdefault("pm_combo", {})[j] = dict(new, user=uid, parlay=p, sides=sides)
+            await interaction.edit_original_response(content="⚠️ " + res["msg"],
+                                                     embed=_pm_combo_embed(p, new, pm_accounts.max_stake(uid)),
+                                                     view=_pm_combo_view(key, j, new["cost"], board))
+            return
+        if not res.get("ok"):
+            await interaction.edit_original_response(content=("⏳ " if res.get("pending") else "⚠️ ") + res["msg"],
+                                                     embed=None, view=_pm_back_view(key, board))
+            return
+        legs = [leg_from_eval(ev, odds=o, book="Polymarket") for ev, o in p.legs]
+        bet = await asyncio.to_thread(
+            add_bet, legs, res["odds"], res["cost"], "Polymarket", str(interaction.user), source="polymarket-bot",
+            pm_slug=res["symbol"], pm_long=True, pm_qty=res["qty"],
+            what=f"{len(p.legs)}-leg {getattr(p, 'kind', '') or 'parlay'}")
+        note = (f"✅ **Placed on Polymarket:** {res['qty']:g} contracts at {res['price'] * 100:.1f}¢ "
+                f"(**{res['odds']:+d}**) · {_money(res['cost'])} with the fee · pays **${res['qty']:.2f}** "
+                "if every leg hits · logged in your bets.")
+        if board:
+            d.setdefault("placed", {})[j] = bet["id"]
+            d.setdefault("logged", {})[j] = p
+            d["last"], d["last_parlay"] = None, None
+            embed, view = parlay_board(key)
+            await interaction.edit_original_response(content=note, embed=embed, view=view)
+            await asyncio.to_thread(save_details)
+            await update_card(key)
+        else:
+            await interaction.edit_original_response(content=note, embed=None, view=None)
+            await asyncio.to_thread(save_details)
     return callback
 
 
