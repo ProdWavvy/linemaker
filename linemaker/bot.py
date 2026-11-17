@@ -399,6 +399,7 @@ def _bet_go(key: str, i: int):
             from .parlay_format import short_label
             from .staking import _money, suggested_dollars
             p = detail["parlays"][i]
+            p, live_notes = await asyncio.to_thread(_live_refresh, p)   # a started game: its live slip ids
             legs = [leg_from_eval(ev, odds=o, book=p.book) for ev, o in p.legs]
             bet = find_open(p.book, legs)
             swapped = []
@@ -452,7 +453,9 @@ def _bet_go(key: str, i: int):
                 if getattr(p, "sgp_estimated", False) else "") + (
                 "\nIt settles itself after grading (`/record`). Different stake or price? ✏️. "
                 "Didn't place it? ↩️. Used a bonus bet? 🎁." + (f" {p.book} says a leg can't be parlayed? ⛔." if len(p.legs) > 1 else ""))
-            await interaction.response.send_message(head + tail, view=view, ephemeral=True)
+            if live_notes:
+                tail += "\n⏱️ " + "\n⏱️ ".join(live_notes)[:900]
+            await interaction.response.send_message((head + tail)[:2000], view=view, ephemeral=True)
         except Exception as e:
             await _report_error(interaction, e)
     return callback
@@ -1345,6 +1348,16 @@ async def update_card(key: str):
             log.warning("couldn't redraw the card%s: %s", "" if i == 0 else f" (more parlays {i})", e)
 
 
+def _live_refresh(p) -> tuple:
+    """(parlay, notes): a leg whose game started gets its live slip ids and price (live_slip)."""
+    try:
+        from .live_slip import refresh
+        return refresh(p)
+    except Exception as e:   # never block a bet on it
+        log.info("live slip refresh failed: %s", type(e).__name__)
+        return p, []
+
+
 def log_parlay(p, user: str) -> tuple:
     """(bet, already) — log a parlay at the suggested stake, or find it if it's logged."""
     from .bets import add_bet, find_open, leg_from_eval
@@ -1376,6 +1389,13 @@ def _board_bet(key: str, j: int):
                 await interaction.response.edit_message(content="That parlay isn't available anymore.",
                                                         embed=embed, view=view)
                 return
+            from .live_slip import started
+            deferred = any(started(ev.market) for ev, _o in p.legs)
+            if deferred:   # a started game: read its live slip ids (a moment)
+                await interaction.response.defer()
+                p, live_notes = await asyncio.to_thread(_live_refresh, p)
+            else:
+                live_notes = []
             bet, again = await asyncio.to_thread(log_parlay, p, str(interaction.user))
             d.setdefault("placed", {})[j] = bet["id"]
             d.setdefault("logged", {})[j] = p
@@ -1387,8 +1407,12 @@ def _board_bet(key: str, j: int):
                        if getattr(p, "sgp_estimated", False) else "")
                     + (". Open the slip below" if parlay_link(p) else
                        f". {p.book} has no one-tap slip: tap the buttons below and add each leg there")
-                    + "; the other parlays just updated.")
-            await interaction.response.edit_message(content=note, embed=embed, view=view)
+                    + "; the other parlays just updated."
+                    + "".join(f"\n⏱️ {n}" for n in live_notes))
+            if deferred:
+                await interaction.edit_original_response(content=note[:2000], embed=embed, view=view)
+            else:
+                await interaction.response.edit_message(content=note[:2000], embed=embed, view=view)
             await asyncio.to_thread(save_details)
             await update_card(key)
         except Exception as e:

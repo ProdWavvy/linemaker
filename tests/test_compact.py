@@ -1125,3 +1125,50 @@ class DraftKingsIdTest(unittest.TestCase):
         self.assertEqual(url, "https://sportsbook.draftkings.com/event/31234567?outcomes="
                               "0QA270563367%23296449131_13L88808Q1-1102470286Q20+0QA9%231_2")
         self.assertNotIn("#", url)
+
+
+class LiveSlipTest(unittest.TestCase):
+    """A leg whose game started: Bet puts the live version of the same bet in the slip."""
+
+    def _event(self, line=10.5, price=-180):
+        return {"id": "g0", "sport_key": "basketball_nba", "commence_time": "2026-11-16T23:00:00Z",
+                "home_team": "H", "away_team": "A", "bookmakers": [{"key": "draftkings", "title": "DraftKings",
+                "link": "https://sportsbook.draftkings.com/event/99", "markets": [{"key": "player_points", "outcomes": [
+                    {"name": "Over", "description": "P0", "point": line, "price": price,
+                     "link": "https://sportsbook.draftkings.com/event/99?outcomes=0QALIVE%231", "sid": "0QALIVE#1"},
+                    {"name": "Under", "description": "P0", "point": line, "price": 140,
+                     "link": "https://sportsbook.draftkings.com/event/99?outcomes=0QALIVE%232", "sid": "0QALIVE#2"}]}]}]}
+
+    def _parlay(self):
+        from linemaker import parlay
+        from tests.test_parlay_opt import leg
+        a, b = leg("g0", "P0", "points", odds=-150), leg("g1", "P1", "points", odds=-150)
+        for ev in (a, b):
+            ev.market.books = [("DraftKings", [-150, 120])]
+            ev.market.links = {"DraftKings": [{"link": "", "sid": f"PRE-{ev.market.subject}"}, None]}
+        a.market.commence = "2026-11-17T00:00:00Z"            # started
+        b.market.commence = "2099-01-01T00:00:00Z"            # not yet
+        return parlay.price("DraftKings", [(a, -150), (b, -150)])
+
+    def test_started_leg_gets_live_ids_and_price(self):
+        import datetime as dt
+        from linemaker import betlinks, live_slip
+        api = mock.Mock()
+        api.event_odds.return_value = self._event()
+        new, notes = live_slip.refresh(self._parlay(), api=api, now=dt.datetime(2026, 11, 17, 1, tzinfo=dt.timezone.utc))
+        api.event_odds.assert_called_once_with("NBA", "g0", "player_points")
+        self.assertEqual([o for _e, o in new.legs], [-180, -150])
+        url = betlinks.parlay_link(new)
+        self.assertIn("0QALIVE%231", url)
+        self.assertIn("PRE-P1", url)
+        self.assertIn("live price -180", notes[0])
+
+    def test_line_gone_live_is_reported(self):
+        import datetime as dt
+        from linemaker import live_slip
+        api = mock.Mock()
+        api.event_odds.return_value = self._event(line=12.5)
+        p = self._parlay()
+        new, notes = live_slip.refresh(p, api=api, now=dt.datetime(2026, 11, 17, 1, tzinfo=dt.timezone.utc))
+        self.assertIs(new, p)
+        self.assertIn("live line 12.5", notes[0])
