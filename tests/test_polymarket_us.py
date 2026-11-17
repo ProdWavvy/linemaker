@@ -160,6 +160,67 @@ class AccountsTest(unittest.TestCase):
             self.assertIsNone(pm_accounts.creds("42"))
 
 
+class ComboSyncTest(unittest.TestCase):
+    LEGS = [{"symbol": "aec-nba-chi-cle", "side": "SIDE_SELL", "sport": "NBA", "label": "Cleveland Cavaliers ML"},
+            {"symbol": "astatc-nba-chi-cle-3pm-donmit-gte3", "side": "SIDE_BUY", "sport": "NBA",
+             "label": "Donovan Mitchell 3+ three-pointers made"}]
+
+    def _env(self, d):
+        return mock.patch.dict(os.environ, {"LINEMAKER_TRACKING_DIR": d, "LINEMAKER_SECRETS_DIR": os.path.join(d, "s")})
+
+    def test_old_raw_entry_gets_its_legs_and_settles_from_them(self):
+        from linemaker import bets, pm_accounts
+        pos = [{"slug": "crossd-3b18bef8e0e8d26e", "netPosition": "26", "cost": {"value": "2.50"}}]
+        with tempfile.TemporaryDirectory() as d, self._env(d):
+            pm_accounts.sync_user("42", "wavvy", ("k", "s"), positions=pos, combos=lambda sym: None)
+            old = bets.load_bets()[0]                                           # Polymarket wouldn't say: placeholder
+            self.assertEqual(old["legs"][0]["label"], "Polymarket parlay")
+            got = pm_accounts.sync_user("42", "wavvy", ("k", "s"), positions=pos, combos=lambda sym: self.LEGS)
+            self.assertEqual(got["fixed"], 1)
+            b = bets.load_bets()[0]
+            self.assertEqual(b["kind"], "parlay")
+            self.assertEqual([l["label"] for l in b["legs"]], ["Cleveland Cavaliers ML", "Donovan Mitchell 3+ three-pointers made"])
+            self.assertEqual(len(bets.load_bets()), 1)
+            settled = {"aec-nba-chi-cle": {"settlement": 0.0}, "astatc-nba-chi-cle-3pm-donmit-gte3": {"settlement": 1.0}}
+            got = pm_accounts.sync_user("42", "wavvy", ("k", "s"), positions=[], settlement=lambda s: settled.get(s, {}),
+                                        combos=lambda sym: self.LEGS)
+            b = bets.load_bets()[0]
+            self.assertEqual((got["settled"], b["status"], b["profit"]), (1, "won", 23.5))   # Cavs won (our NO), Mitchell hit
+
+    def test_one_leg_lost_settles_before_the_rest(self):
+        from linemaker import pm_accounts
+        value = pm_accounts.combo_value(self.LEGS, lambda s: {"settlement": 1.0} if s == "aec-nba-chi-cle" else {})
+        self.assertEqual(value, 0.0)                                            # our SELL side of the ML lost
+        self.assertIsNone(pm_accounts.combo_value(self.LEGS, lambda s: {}))
+        half = pm_accounts.combo_value(self.LEGS, lambda s: {"settlement": 0.0} if s == "aec-nba-chi-cle" else {"settlement": 0.6})
+        self.assertAlmostEqual(half, 0.6)                                       # a leg that couldn't resolve pays its price
+
+    def test_parlay_you_logged_is_matched_not_doubled(self):
+        from linemaker import bets, pm_accounts
+        pos = [{"slug": "crossd-49e2938a73e7ec84", "netPosition": "8", "cost": {"value": "4.76"}}]
+        with tempfile.TemporaryDirectory() as d, self._env(d):
+            mine = bets.add_bet([{"label": "Cleveland Cavaliers ML", "sport": "NBA", "date": "2026-11-16"},
+                                 {"label": "Donovan Mitchell Over 2.5 threes", "sport": "NBA", "date": "2026-11-16"}],
+                                -147, 5.0, "Polymarket", "wavvy")
+            got = pm_accounts.sync_user("42", "wavvy", ("k", "s"), positions=pos, combos=lambda sym: self.LEGS)
+            allb = bets.load_bets()
+        self.assertEqual((got["added"], got["matched"]), (0, 1))
+        self.assertEqual(len(allb), 1)
+        self.assertEqual((allb[0]["id"], allb[0]["pm_slug"], allb[0]["stake"]), (mine["id"], "crossd-49e2938a73e7ec84", 5.0))
+
+    def test_leg_words(self):
+        m = {"title": "Bulls vs Cavaliers", "sportsMarketType": "basketball_team_full_game_winner",
+             "marketSides": [{"long": True, "description": "Bulls", "team": {"name": "Chicago Bulls"}},
+                             {"long": False, "description": "Cavaliers", "team": {"name": "Cleveland Cavaliers"}}]}
+        self.assertEqual(pm.leg_text(m, False), "Cleveland Cavaliers ML")
+        tot = {"title": "Over 226.5", "sportsMarketType": "basketball_team_full_game_total", "line": 226.5,
+               "marketSides": [{"long": True, "description": "Over"}, {"long": False, "description": "Under"}]}
+        self.assertEqual(pm.leg_text(tot, False, "tsc-nba-chi-cle-226pt5"), "Under 226.5 (CHI/CLE)")
+        prop = {"title": "Donovan Mitchell 3+ three-pointers made", "sportsMarketType": "basketball_player_threes",
+                "marketSides": [{"long": True, "description": "Yes"}, {"long": False, "description": "No"}]}
+        self.assertEqual(pm.leg_text(prop, False), "No: Donovan Mitchell 3+ three-pointers made")
+
+
 class FakePM:
     """A pretend Polymarket US API for the combo + RFQ flow."""
 

@@ -138,14 +138,86 @@ def _words(text: str) -> set:
     return {w for w in norm(text).split() if len(w) > 2 and not w.isdigit()}
 
 
-def sync_user(user_id: str, name: str, cr: tuple, positions=None, settlement=None, today: Optional[str] = None) -> dict:
-    """Bring one member's Polymarket positions into the bet log. Returns counts."""
+# ---- parlays ("combos") you hold: their legs in words, matching, settlement ---------------------
+def combo_detail(cr: tuple, symbol: str) -> Optional[list]:
+    """[{"symbol", "side", "label", "sport"}] for a combo position, None if Polymarket won't say."""
+    from .polymarket_us import combo_legs_of, leg_text, market_by_slug
+    try:
+        legs = combo_legs_of(cr, symbol)
+    except Exception as e:
+        log.info("polymarket combo %s: %s", symbol, e)
+        return None
+    out = []
+    for leg in legs:
+        try:
+            m = market_by_slug(leg["symbol"])
+        except Exception:
+            m = {}
+        out.append({"symbol": leg["symbol"], "side": leg["side"], "sport": league_of(leg["symbol"]),
+                    "label": leg_text(m, leg["side"] == "SIDE_BUY", leg["symbol"])})
+    return out or None
+
+
+def _combo_bet_legs(combo: list, date: str) -> list:
+    return [{"label": c["label"], "sport": c["sport"], "date": date, "bet_type": "external", "book": "Polymarket"}
+            for c in combo]
+
+
+def _match_parlay(mine: list, combo: list) -> Optional[dict]:
+    """A parlay you logged by hand (Bet on a Polymarket parlay, then placed it in the app): open,
+    no Polymarket id yet, same number of legs, and every leg shares a name with a logged leg."""
+    for b in mine:
+        if b.get("pm_slug") or b.get("status") != "open" or len(b.get("legs") or []) != len(combo):
+            continue
+        free = list(b["legs"])
+        for c in combo:
+            want = _words(c["label"])
+            hit = next((l for l in free if _words(l.get("label", "")) & want), None)
+            if hit is None:
+                break
+            free.remove(hit)
+        else:
+            return b
+    return None
+
+
+def combo_value(legs: list, settle) -> Optional[float]:
+    """What a combo pays per contract once settled: the product of its legs' values (a leg's
+    settlement for SIDE_BUY, 1 - settlement for SIDE_SELL). 0 as soon as one leg goes against
+    it; None while a leg is still open."""
+    vals = []
+    for leg in legs:
+        try:
+            v = (settle(leg["symbol"]) or {}).get("settlement")
+        except Exception:
+            v = None
+        if v is None:
+            vals.append(None)
+            continue
+        v = float(v)
+        vals.append(v if leg["side"] == "SIDE_BUY" else 1 - v)
+    if any(v is not None and v <= 0.0001 for v in vals):
+        return 0.0
+    if not vals or any(v is None for v in vals):
+        return None
+    out = 1.0
+    for v in vals:
+        out *= v
+    return out
+
+
+def sync_user(user_id: str, name: str, cr: tuple, positions=None, settlement=None, today: Optional[str] = None,
+              combos=None) -> dict:
+    """Bring one member's Polymarket positions into the bet log. Returns counts. A parlay
+    ("combo") comes in as a parlay with its legs in words. combos: symbol -> combo_detail (tests)."""
     from . import bets as B
-    from .polymarket_us import _call, positions as fetch_positions
+    from .polymarket_us import _call, is_combo_symbol, positions as fetch_positions
     from .odds import american_to_decimal
     today = today or dt.date.today().isoformat()
     open_pos = [p for p in (positions if positions is not None else fetch_positions(cr)) if _num(p.get("netPosition"))]
-    out = {"added": 0, "matched": 0, "settled": 0}
+    out = {"added": 0, "matched": 0, "settled": 0, "fixed": 0}
+    read_combo = combos or (lambda sym: combo_detail(cr, sym))
+    settle = settlement or (lambda slug: _call("GET", f"/v1/markets/{slug}/settlement"))
     all_bets = B.load_bets()
     mine = [b for b in all_bets if b.get("user") == name and b.get("book", "").lower().startswith("polymarket")]
     seen = set()
@@ -160,7 +232,27 @@ def sync_user(user_id: str, name: str, cr: tuple, positions=None, settlement=Non
         odds = int(round((dec - 1) * 100)) if dec >= 2 else int(round(-100 / (dec - 1)))
         seen.add((slug, long))
         bet = next((b for b in mine if b.get("pm_slug") == slug and b.get("pm_long") == long), None)
-        if bet is None:   # logged by hand (or before the link): same member, Polymarket, same names
+        combo = None
+        if is_combo_symbol(slug) and (bet is None or (bet.get("pm_external") and not bet.get("pm_legs"))):
+            combo = read_combo(slug)
+        if bet is not None and combo:   # synced before parlays had their legs: give it them now
+            twin = _match_parlay([x for x in mine if x is not bet], combo)
+            if twin is not None:   # you'd logged it yourself too: keep yours, drop the copy
+                all_bets.remove(bet)
+                bet = twin
+                bet["pm_legs"] = [{"symbol": c["symbol"], "side": c["side"]} for c in combo]
+                out["matched"] += 1
+            else:
+                date = (bet.get("legs") or [{}])[0].get("date") or today
+                bet.update(kind="parlay" if len(combo) > 1 else "single", legs=_combo_bet_legs(combo, date),
+                           pm_legs=[{"symbol": c["symbol"], "side": c["side"]} for c in combo])
+                out["fixed"] += 1
+        if bet is None and combo:
+            bet = _match_parlay(mine, combo)
+            if bet is not None:
+                bet["pm_legs"] = [{"symbol": c["symbol"], "side": c["side"]} for c in combo]
+                out["matched"] += 1
+        elif bet is None and not is_combo_symbol(slug):   # logged by hand (or before the link): same names
             want = _words(position_label(p))
             bet = next((b for b in mine if not b.get("pm_slug") and b.get("status") == "open"
                         and len(b.get("legs") or []) == 1
@@ -172,13 +264,18 @@ def sync_user(user_id: str, name: str, cr: tuple, positions=None, settlement=Non
             if bet.get("pm_external") or bet.get("source") == "polymarket-bot":
                 bet.update(stake=round(cost, 2), odds=odds)
             continue
-        all_bets.append({"id": __import__("uuid").uuid4().hex[:10],
-                         "placed": dt.datetime.now().isoformat(timespec="seconds"), "user": name,
-                         "kind": "single", "book": "Polymarket", "status": "open", "stake": round(cost, 2),
-                         "odds": odds, "source": "polymarket", "pm_external": True, "pm_slug": slug,
-                         "pm_long": long, "pm_qty": qty,
-                         "legs": [{"label": position_label(p), "sport": league_of(slug), "date": today,
-                                   "bet_type": "external", "odds": odds, "book": "Polymarket"}]})
+        new = {"id": __import__("uuid").uuid4().hex[:10],
+               "placed": dt.datetime.now().isoformat(timespec="seconds"), "user": name,
+               "kind": "single", "book": "Polymarket", "status": "open", "stake": round(cost, 2),
+               "odds": odds, "source": "polymarket", "pm_external": True, "pm_slug": slug,
+               "pm_long": long, "pm_qty": qty,
+               "legs": [{"label": position_label(p) if not is_combo_symbol(slug) else "Polymarket parlay",
+                         "sport": league_of(slug), "date": today, "bet_type": "external", "odds": odds,
+                         "book": "Polymarket"}]}
+        if combo:
+            new.update(kind="parlay" if len(combo) > 1 else "single", legs=_combo_bet_legs(combo, today),
+                       pm_legs=[{"symbol": c["symbol"], "side": c["side"]} for c in combo])
+        all_bets.append(new)
         out["added"] += 1
     # positions gone: settle the ones the bot can't grade itself
     for b in all_bets:
@@ -186,18 +283,26 @@ def sync_user(user_id: str, name: str, cr: tuple, positions=None, settlement=Non
             continue
         if (b["pm_slug"], b["pm_long"]) in seen:
             continue
-        try:
-            s = settlement(b["pm_slug"]) if settlement else _call("GET", f"/v1/markets/{b['pm_slug']}/settlement")
-        except Exception as e:
-            log.info("polymarket settlement %s: %s", b["pm_slug"], e)
-            continue
-        val = s.get("settlement") if isinstance(s, dict) else None
-        if val is None:
-            continue
-        won = (float(val) >= 0.5) == bool(b["pm_long"])
         qty = b.get("pm_qty") or b["stake"] * american_to_decimal(b["odds"])
-        b["status"] = "won" if won else "lost"
-        b["profit"] = round(qty - b["stake"], 2) if won else -b["stake"]
+        if b.get("pm_legs"):   # a parlay: from its legs (a leg that can't resolve pays its fair price)
+            value = combo_value(b["pm_legs"], settle)
+            if value is None:
+                continue
+            paid = round(qty * value, 2)
+            b["status"] = "won" if paid > b["stake"] else "lost"
+            b["profit"] = round(paid - b["stake"], 2)
+        else:
+            try:
+                s = settle(b["pm_slug"])
+            except Exception as e:
+                log.info("polymarket settlement %s: %s", b["pm_slug"], e)
+                continue
+            val = s.get("settlement") if isinstance(s, dict) else None
+            if val is None:
+                continue
+            won = (float(val) >= 0.5) == bool(b["pm_long"])
+            b["status"] = "won" if won else "lost"
+            b["profit"] = round(qty - b["stake"], 2) if won else -b["stake"]
         b["settled"] = dt.datetime.now().isoformat(timespec="seconds")
         out["settled"] += 1
     if any(out.values()):

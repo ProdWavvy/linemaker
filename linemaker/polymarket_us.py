@@ -604,3 +604,49 @@ def combo_buy(creds: tuple, offer: dict, sides: list, wait: float = 10.0, poll: 
     dec = max(qty / cost, 1.0001)
     odds = int(round((dec - 1) * 100)) if dec >= 2 else int(round(-100 / (dec - 1)))
     return {"ok": True, "qty": qty, "price": price, "cost": cost, "odds": odds, "symbol": offer_now["symbol"]}
+
+
+# ---- reading a combo you hold (labels and settlement for synced positions) ---------------------
+def is_combo_symbol(symbol: str) -> bool:
+    return (symbol or "").startswith(("crossd-", "caoc-"))
+
+
+def combo_legs_of(creds: tuple, symbol: str, opener=None) -> list:
+    """[{"symbol", "side"}] for a combo you hold (GET /v1/combos?symbol=, exact symbol)."""
+    d = _call("GET", "/v1/combos", {"symbol": symbol}, creds=creds, opener=opener)
+    combos = d.get("combos") or []
+    return [{"symbol": l.get("symbol"), "side": l.get("side")} for l in (combos[0].get("legs") if combos else []) or []
+            if l.get("symbol")]
+
+
+def market_by_slug(slug: str) -> dict:
+    return _cached(f"market|{slug}", 600, lambda: _call("GET", f"/v1/market/slug/{slug}").get("market") or {})
+
+
+def _teams_from_slug(slug: str) -> str:
+    parts = (slug or "").lower().split("-")
+    tokens = {pre.strip("-") for pres in LEAGUES.values() for pre in pres}
+    i = next((k for k, p in enumerate(parts) if p in tokens), None)
+    return "/".join(p.upper() for p in parts[i + 1:i + 3]) if i is not None else ""
+
+
+def leg_text(m: dict, long: bool, slug: str = "") -> str:
+    """A combo leg in words: 'Cleveland Cavaliers ML', 'Chicago Bulls +8.50', 'Under 226.5 (CHI/CLE)',
+    'Donovan Mitchell 3+ three-pointers made' (or 'No: ...')."""
+    side = next((s for s in m.get("marketSides") or [] if bool(s.get("long")) == long), {}) or {}
+    desc = (side.get("description") or "").strip()
+    team = ((side.get("team") or {}).get("name") or "").strip()
+    title = (m.get("title") or m.get("question") or slug or m.get("slug") or "").strip()
+    typ = (m.get("sportsMarketType") or "").lower()
+    if desc.lower() in ("yes", "no") or not desc:
+        return title if (desc.lower() != "no" and long) or desc.lower() == "yes" else f"No: {title}"
+    if typ.endswith("_winner"):
+        return f"{team or desc} ML"
+    if typ.endswith("_spread"):
+        return f"{team} {desc}" if team else f"{title} {desc}"
+    if typ.endswith("_total"):
+        line = m.get("line")
+        teams = _teams_from_slug(slug or m.get("slug") or "")
+        return f"{desc} {line:g}".strip() + (f" ({teams})" if teams else "") if isinstance(line, (int, float)) \
+            else f"{title} · {desc}"
+    return f"{title} · {desc}" if desc.lower() not in title.lower() else title
