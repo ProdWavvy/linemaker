@@ -44,3 +44,26 @@ class ReportTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class MissingGradesTest(unittest.TestCase):
+    def test_waiting_void_and_old_open_bets(self):
+        import json, tempfile
+        from linemaker import bets, missing_grades
+        with tempfile.TemporaryDirectory() as d, mock.patch.dict(os.environ, {"LINEMAKER_TRACKING_DIR": d}):
+            os.makedirs(os.path.join(d, "NBA-props"))
+            recs = {"k1": {"game": "A @ B", "picked": True, "result": "won"},
+                    "k2": {"game": "A @ B", "picked": True},                 # same game graded: void
+                    "k3": {"game": "C @ D", "picked": True},                 # nothing from C @ D yet
+                    "k4": {"game": "C @ D"}}
+            json.dump(recs, open(os.path.join(d, "NBA-props", "2026-11-20.json"), "w"))
+            json.dump({"k": {"game": "E @ F", "result": "lost"}}, open(os.path.join(d, "NBA-props", "2026-11-21.json"), "w"))
+            bets.add_bet([{"label": "X over", "date": "2026-11-19"}], -110, 5, "FanDuel", "me")
+            rep = missing_grades.report("2026-11-22", d)
+            text = "\n".join(missing_grades.lines(rep))
+        self.assertEqual(rep["fix"], ["2026-11-20"])
+        self.assertIn("1 pick not graded", text)
+        self.assertIn("C @ D", text)
+        self.assertIn("1 pick void", text)
+        self.assertIn("Open bet past its games", text)
+        self.assertNotIn("11/21", text)

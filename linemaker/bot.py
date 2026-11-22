@@ -149,6 +149,8 @@ async def route_component(interaction: discord.Interaction) -> bool:
         handler = _pm_combo_amount(key, int(parts[3]))
     elif kind == "pmcback":
         handler = _pm_combo_back(key)
+    elif kind == "regrade":   # lm:regrade:20261114,20261115
+        handler = _regrade([f"{x[:4]}-{x[4:6]}-{x[6:]}" for x in key.split(",") if len(x) == 8])
     elif kind == "bet":
         handler = PickView._bet_single(key)
     elif kind == "betp":
@@ -2210,6 +2212,14 @@ class LinemakerBot(discord.Client):
         for token in (f"<@{self.user.id}>", f"<@!{self.user.id}>"):
             text = text.replace(token, "")
         text = text.strip()
+        if MISSING_ASK.search(text) and not message.attachments:   # "what grades are missing"
+            try:
+                embed, view = await asyncio.to_thread(missing_grades_card)
+                await message.reply(embed=embed, view=view, mention_author=False)
+            except Exception as e:
+                log.exception("missing grades ask failed")
+                await message.reply(f"⚠️ Couldn't check the grades ({type(e).__name__}).", mention_author=False)
+            return
         m_all = ALLTIME_ASK.search(text) if not message.attachments else None
         if m_all:   # "all time record in $": the /alltime report, typed
             per = re.search(r"\$\s*(\d+(?:\.\d+)?)|(\d+(?:\.\d+)?)\s*(?:dollars?|bucks)", text, re.I)
@@ -2849,6 +2859,63 @@ async def clv_cmd(interaction: discord.Interaction, days: Optional[int] = 14):
         await interaction.followup.send(embed=embed)
     except Exception as e:
         await _report_error(interaction, e)
+
+
+MISSING_ASK = re.compile(r"\b(missing|ungraded|not graded|didn'?t grade|haven'?t graded)\b.*\b(grades?|grading|picks?|results?)\b|"
+                         r"\b(grades?|grading|results?)\b.*\b(missing|ungraded|not graded)\b|"
+                         r"\b(picks?|bets?|games?)\b.*\b(didn'?t|not|never|haven'?t) (been )?graded?\b", re.I)
+
+
+def missing_grades_card() -> tuple:
+    """(embed, view): what hasn't graded, and a button that grades those days again."""
+    from .missing_grades import lines, report
+    rep = report(today(), TRACKING)
+    body = lines(rep)
+    embed = discord.Embed(title="🧾 Missing Grades", color=0xE67E22 if body else 0x2ECC71)
+    if not body:
+        embed.description = "✅ Nothing missing: every tracked day before today is graded, and no open bet is past its games."
+        return embed, None
+    text, extra = "", 0
+    for line in body:
+        if len(text) + len(line) > 3800:
+            extra += 1
+            continue
+        text += line + "\n"
+    embed.description = text + (f"…and {extra} more" if extra else "")
+    embed.set_footer(text="Not graded = the game had no results yet (or the feed missed it): grading again usually "
+                          "fixes it. Void = the player didn't play or the box score has no such stat (nothing to do).")
+    view = None
+    if rep["fix"]:
+        view = discord.ui.View(timeout=None)
+        days = rep["fix"][-8:]
+        view.add_item(discord.ui.Button(label=f"Grade {len(days)} day{'s' if len(days) != 1 else ''} again", emoji="🔄",
+                                        style=discord.ButtonStyle.primary,
+                                        custom_id="lm:regrade:" + ",".join(d.replace("-", "") for d in days)))
+    return embed, view
+
+
+def _regrade(days: list):
+    async def callback(interaction: discord.Interaction):
+        await interaction.response.defer(thinking=True)
+        from .grade_report import day_records, grade_report, graded_keys
+        done = []
+        for d in days:
+            try:
+                before = await asyncio.to_thread(lambda: graded_keys(day_records(d)))
+                summary, remaining, tracked = await asyncio.to_thread(grade_day, d, [], True, False)
+                after = await asyncio.to_thread(lambda: graded_keys(day_records(d)))
+                done.append(f"{d[5:].replace('-', '/')}: {len(after) - len(before):+d} graded")
+                if len(after) > len(before):
+                    embeds, table = await asyncio.to_thread(grade_report, d, summary, before, remaining)
+                    embeds[0].title = f"📈 Late Grade · {d}"
+                    await _post_grade(interaction.channel, d, embeds, table)
+            except Exception as e:
+                done.append(f"{d}: failed ({type(e).__name__})")
+                log.warning("regrade %s: %s", d, e)
+        await asyncio.to_thread(lambda: __import__("linemaker.bets", fromlist=["settle"]).settle())
+        embed, view = await asyncio.to_thread(missing_grades_card)
+        await interaction.followup.send("🔄 " + " · ".join(done)[:1900], embed=embed, view=view)
+    return callback
 
 
 ALLTIME_ASK = re.compile(r"\ball[- ]?time\b.*\b(record|profit|results?|roi|money|\$)|"
